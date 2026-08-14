@@ -164,7 +164,7 @@ function renderTranscriptEntry(entry: TranscriptEntry): string {
   }
 
   if (entry.kind === 'assistant') {
-    const header = `${GREEN}${BOLD}Minicode${RESET}\n${indentBlock(
+    const header = `${GREEN}${BOLD}LiteAI${RESET}\n${indentBlock(
       renderMarkdownish(entry.body),
     )}`
     return entry.workedForSeconds === undefined

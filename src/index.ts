@@ -85,7 +85,7 @@ async function main(): Promise<void> {
   const permissions = new PermissionManager(cwd)
   await permissions.whenReady()
   const model =
-    process.env.MINI_CODE_MODEL_MODE === 'mock'
+    process.env.LITE_AI_MODEL_MODE === 'mock'
       ? new MockModelAdapter()
       : new AnthropicModelAdapter(tools, loadRuntimeConfig)
   const subAgents = new SubAgentManager({

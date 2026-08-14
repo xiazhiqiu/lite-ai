@@ -50,7 +50,7 @@ describe('transcript wrapping', () => {
     assert.equal(lines[1]?.startsWith('> first'), true)
     assert.equal(lines[1]?.length, 56)
     assert.equal(lines[2], '·')
-    assert.equal(lines[3], 'Minicode')
+    assert.equal(lines[3], 'LiteAI')
     assert.equal(lines[4], '  second')
   })
 
@@ -79,7 +79,7 @@ describe('transcript wrapping', () => {
       renderTranscriptLines(entries).map(line => line.replace(/\u001b\[[\d;]*[A-Za-z]/g, '')),
     )
 
-    assert.equal(lines[0], 'Minicode')
+    assert.equal(lines[0], 'LiteAI')
     assert.equal(lines[1], '  done')
     assert.equal(lines[2]?.endsWith('Worked for 10s'), true)
     assert.equal(lines[2]?.length, 56)

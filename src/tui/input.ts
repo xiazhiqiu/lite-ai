@@ -27,7 +27,7 @@ export function renderInputPrompt(
   const before = input.slice(0, offset)
   const current = input[offset] ?? ' '
   const after = input.slice(Math.min(offset + 1, input.length))
-  const promptPrefix = 'mini-code prompt> '
+  const promptPrefix = 'lite-ai prompt> '
   const visibleInput = `${promptPrefix}${before}${current}${after}`
   const panelInnerWidth = Math.max(0, Math.max(60, process.stdout.columns ?? 100) - 4)
   const hintMaxLength = Math.max(0, panelInnerWidth - visibleInput.length - 1)
@@ -37,5 +37,5 @@ export function renderInputPrompt(
   )
   const hint = input || !hintText ? '' : ` ${DIM}${hintText}${RESET}`
 
-  return `${GREEN}${BOLD}mini-code prompt>${RESET} ${before}${REVERSE}${current}${RESET}${after}${hint}`
+  return `${GREEN}${BOLD}lite-ai prompt>${RESET} ${before}${REVERSE}${current}${RESET}${after}${hint}`
 }

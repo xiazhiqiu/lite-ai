@@ -1,7 +1,7 @@
 import { readFile, readdir } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { MINI_CODE_DIR } from './config.js'
+import { LITE_AI_DIR } from './config.js'
 
 export type ContextFile = {
   path: string
@@ -19,9 +19,9 @@ const MAX_PER_FILE_CHARS = 8_000
 const MAX_TOTAL_CHARS = 20_000
 
 const CANDIDATES_PER_DIR = [
-  'MINI.md',
-  'MINI.local.md',
-  path.join('.mini-code', 'MINI.md'),
+  'LITE.md',
+  'LITE.local.md',
+  path.join('.lite-ai', 'LITE.md'),
   'CLAUDE.md',
   'CLAUDE.local.md',
   path.join('.claude', 'CLAUDE.md'),
@@ -147,9 +147,9 @@ export async function discoverInstructionFiles(
   const files: ContextFile[] = []
 
   // User global first
-  const home = homeDir ?? MINI_CODE_DIR
+  const home = homeDir ?? LITE_AI_DIR
   const globalCandidates = [
-    path.join(home, 'MINI.md'),
+    path.join(home, 'LITE.md'),
     path.join(home, 'CLAUDE.md'),
   ]
   for (const candidate of globalCandidates) {
@@ -177,7 +177,7 @@ export async function discoverInstructionFiles(
       }
     }
 
-    for (const rulePath of await discoverRuleFiles(path.join(dir, '.mini-code', 'rules'))) {
+    for (const rulePath of await discoverRuleFiles(path.join(dir, '.lite-ai', 'rules'))) {
       const content = await tryRead(rulePath)
       if (content) {
         files.push({ path: rulePath, content: await resolveIncludes(content, rulePath, new Set([rulePath])) })
@@ -193,7 +193,7 @@ export function describeMemoryFiles(files: ContextFile[], cwd = process.cwd()): 
     const normalized = file.path.split(path.sep).join('/')
     const scope = normalized.includes('/rules/')
       ? 'rules'
-      : path.resolve(file.path).startsWith(path.resolve(MINI_CODE_DIR))
+      : path.resolve(file.path).startsWith(path.resolve(LITE_AI_DIR))
         ? 'global'
         : 'project'
     const trimmed = file.content.trim()

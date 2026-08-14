@@ -16,7 +16,7 @@ const state: AutoCompactState = {
 }
 
 function debugAutoCompact(message: string): void {
-  if (process.env.MINI_CODE_DEBUG_AUTOCOMPACT === '1') {
+  if (process.env.LITE_AI_DEBUG_AUTOCOMPACT === '1') {
     console.error(`[auto-compact] ${message}`)
   }
 }

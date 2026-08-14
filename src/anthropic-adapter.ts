@@ -36,7 +36,7 @@ type AnthropicUsage = {
 }
 
 function getRetryLimit(): number {
-  const value = Number(process.env.MINI_CODE_MAX_RETRIES)
+  const value = Number(process.env.LITE_AI_MAX_RETRIES)
   if (!Number.isFinite(value) || value < 0) {
     return DEFAULT_MAX_RETRIES
   }

@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { MINI_CODE_DIR } from '../config.js'
+import { LITE_AI_DIR } from '../config.js'
 import type { ChatMessage } from '../types.js'
 
 export const TOOL_RESULTS_SUBDIR = 'tool-results'
@@ -46,7 +46,7 @@ function sanitizePathSegment(value: string): string {
 const sessionId = sanitizePathSegment(randomUUID())
 
 function getToolResultsDir(): string {
-  return path.join(MINI_CODE_DIR, TOOL_RESULTS_SUBDIR, sessionId)
+  return path.join(LITE_AI_DIR, TOOL_RESULTS_SUBDIR, sessionId)
 }
 
 function getToolResultPath(toolUseId: string): string {

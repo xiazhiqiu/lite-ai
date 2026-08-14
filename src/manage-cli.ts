@@ -1,7 +1,7 @@
 import {
   type McpConfigScope,
   type McpServerConfig,
-  MINI_CODE_MCP_TOKENS_PATH,
+  LITE_AI_MCP_TOKENS_PATH,
   getMcpConfigPath,
   loadScopedMcpServers,
   readMcpTokensFile,
@@ -11,17 +11,17 @@ import {
 import { discoverSkills, installSkill, removeManagedSkill } from './skills.js'
 
 function printUsage(): void {
-  console.log(`minicode management commands
+  console.log(`lite-ai management commands
 
-minicode mcp list [--project]
-minicode mcp add <name> [--project] [--protocol <auto|content-length|newline-json|streamable-http>] [--url <endpoint>] [--header KEY=VALUE ...] [--env KEY=VALUE ...] [-- <command> [args...]]
-minicode mcp login <name> --token <bearer-token>
-minicode mcp logout <name>
-minicode mcp remove <name> [--project]
+lite-ai mcp list [--project]
+lite-ai mcp add <name> [--project] [--protocol <auto|content-length|newline-json|streamable-http>] [--url <endpoint>] [--header KEY=VALUE ...] [--env KEY=VALUE ...] [-- <command> [args...]]
+lite-ai mcp login <name> --token <bearer-token>
+lite-ai mcp logout <name>
+lite-ai mcp remove <name> [--project]
 
-minicode skills list
-minicode skills add <path-to-skill-or-dir> [--name <name>] [--project]
-minicode skills remove <name> [--project]`)
+lite-ai skills list
+lite-ai skills add <path-to-skill-or-dir> [--name <name>] [--project]
+lite-ai skills remove <name> [--project]`)
 }
 
 function parseScope(args: string[]): {
@@ -181,7 +181,7 @@ async function handleMcpCommand(cwd: string, args: string[]): Promise<boolean> {
     const tokens = await readMcpTokensFile()
     tokens[name] = token
     await saveMcpTokensFile(tokens)
-    console.log(`Stored MCP token for ${name} in ${MINI_CODE_MCP_TOKENS_PATH}`)
+    console.log(`Stored MCP token for ${name} in ${LITE_AI_MCP_TOKENS_PATH}`)
     return true
   }
 
@@ -192,12 +192,12 @@ async function handleMcpCommand(cwd: string, args: string[]): Promise<boolean> {
     }
     const tokens = await readMcpTokensFile()
     if (!(name in tokens)) {
-      console.log(`No token found for ${name} in ${MINI_CODE_MCP_TOKENS_PATH}`)
+      console.log(`No token found for ${name} in ${LITE_AI_MCP_TOKENS_PATH}`)
       return true
     }
     delete tokens[name]
     await saveMcpTokensFile(tokens)
-    console.log(`Removed MCP token for ${name} from ${MINI_CODE_MCP_TOKENS_PATH}`)
+    console.log(`Removed MCP token for ${name} from ${LITE_AI_MCP_TOKENS_PATH}`)
     return true
   }
 

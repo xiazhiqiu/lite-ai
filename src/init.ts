@@ -30,8 +30,8 @@ type RepoDetection = {
   rustDir: boolean
 }
 
-const GITIGNORE_COMMENT = '# MiniCode local artifacts'
-const GITIGNORE_ENTRIES = ['.mini-code/settings.local.json', '.mini-code/sessions/']
+const GITIGNORE_COMMENT = '# LiteAI local artifacts'
+const GITIGNORE_ENTRIES = ['.lite-ai/settings.local.json', '.lite-ai/sessions/']
 
 function detectRepo(cwd: string): RepoDetection {
   const pkgJson = (() => {
@@ -156,15 +156,15 @@ function frameworkNotes(d: RepoDetection): string[] {
   return lines
 }
 
-export function renderInitMiniMd(cwd: string): string {
+export function renderInitLiteMd(cwd: string): string {
   const detection = detectRepo(cwd)
   const sections: string[][] = []
 
   // Header
   sections.push([
-    '# MINI.md',
+    '# LITE.md',
     '',
-    'This file provides guidance to MiniCode when working with code in this repository.',
+    'This file provides guidance to LiteAI when working with code in this repository.',
     '',
   ])
 
@@ -210,8 +210,8 @@ export function renderInitMiniMd(cwd: string): string {
   sections.push([
     '## Working agreement',
     '- Prefer small, reviewable changes and keep generated bootstrap files aligned with actual repo workflows.',
-    '- Keep shared defaults in `~/.mini-code/settings.json`; reserve `.mini-code/settings.local.json` for project-local overrides.',
-    '- Do not overwrite existing `MINI.md` content automatically; update it intentionally when repo workflows change.',
+    '- Keep shared defaults in `~/.lite-ai/settings.json`; reserve `.lite-ai/settings.local.json` for project-local overrides.',
+    '- Do not overwrite existing `LITE.md` content automatically; update it intentionally when repo workflows change.',
     '',
   ])
 
@@ -302,10 +302,10 @@ async function ensureGitignoreEntries(
 export async function initializeRepo(cwd: string): Promise<InitReport> {
   const artifacts: InitArtifact[] = []
 
-  const miniCodeDir = path.join(cwd, '.mini-code')
+  const liteAIDir = path.join(cwd, '.lite-ai')
   artifacts.push({
-    name: '.mini-code/',
-    status: await ensureDir(miniCodeDir),
+    name: '.lite-ai/',
+    status: await ensureDir(liteAIDir),
   })
 
   const gitignorePath = path.join(cwd, '.gitignore')
@@ -314,10 +314,10 @@ export async function initializeRepo(cwd: string): Promise<InitReport> {
     status: await ensureGitignoreEntries(gitignorePath),
   })
 
-  const miniMdPath = path.join(cwd, 'MINI.md')
-  const content = renderInitMiniMd(cwd)
+  const miniMdPath = path.join(cwd, 'LITE.md')
+  const content = renderInitLiteMd(cwd)
   artifacts.push({
-    name: 'MINI.md',
+    name: 'LITE.md',
     status: await writeFileIfMissing(miniMdPath, content),
   })
 

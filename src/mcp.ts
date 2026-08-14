@@ -64,7 +64,7 @@ const MCP_INITIALIZE_TIMEOUT_MS = 10000
 const MCP_INITIALIZE_PROBE_TIMEOUT_MS = 1200
 const MCP_PROTOCOL_CACHE_PATH = path.join(
   os.homedir(),
-  '.mini-code',
+  '.lite-ai',
   'mcp-protocol-cache.json',
 )
 
@@ -464,7 +464,7 @@ class StdioMcpClient {
         protocolVersion: '2024-11-05',
         capabilities: {},
         clientInfo: {
-          name: 'mini-code',
+          name: 'lite-ai',
           version: '0.1.0',
         },
       },
@@ -807,7 +807,7 @@ class StreamableHttpMcpClient {
         protocolVersion: '2024-11-05',
         capabilities: {},
         clientInfo: {
-          name: 'mini-code',
+          name: 'lite-ai',
           version: '0.1.0',
         },
       },

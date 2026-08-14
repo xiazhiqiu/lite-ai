@@ -49,11 +49,11 @@ function extractDescription(markdown: string): string {
 function getSkillRoots(cwd: string): SkillSourceRoot[] {
   return [
     {
-      root: path.join(cwd, '.mini-code', 'skills'),
+      root: path.join(cwd, '.lite-ai', 'skills'),
       source: 'project',
     },
     {
-      root: path.join(os.homedir(), '.mini-code', 'skills'),
+      root: path.join(os.homedir(), '.lite-ai', 'skills'),
       source: 'user',
     },
     {
@@ -69,8 +69,8 @@ function getSkillRoots(cwd: string): SkillSourceRoot[] {
 
 function getManagedSkillRoot(scope: SkillScope, cwd: string): string {
   return scope === 'project'
-    ? path.join(cwd, '.mini-code', 'skills')
-    : path.join(os.homedir(), '.mini-code', 'skills')
+    ? path.join(cwd, '.lite-ai', 'skills')
+    : path.join(os.homedir(), '.lite-ai', 'skills')
 }
 
 async function listSkillDirs(root: SkillSourceRoot): Promise<LoadedSkill[]> {

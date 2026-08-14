@@ -1,10 +1,10 @@
 {
-  "name": "mini-code",
+  "name": "lite-ai",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
-    "minicode": "./bin/minicode"
+    "lite-ai": "./bin/lite-ai"
   },
   "scripts": {
     "dev": "tsx src/index.ts",

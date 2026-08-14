@@ -29,7 +29,7 @@ describe('renderInputPrompt', () => {
     assert.equal(rendered.includes('\n'), false)
     assert.equal(
       rendered,
-      'mini-code prompt>   Ask for code, files, tasks, or MCP tools',
+      'lite-ai prompt>   Ask for code, files, tasks, or MCP tools',
     )
   })
 
@@ -39,20 +39,20 @@ describe('renderInputPrompt', () => {
     assert.equal(rendered.includes('\n'), false)
     assert.equal(
       rendered,
-      'mini-code prompt>   Enter send; /help commands; Esc clear; Ctrl+C exit',
+      'lite-ai prompt>   Enter send; /help commands; Esc clear; Ctrl+C exit',
     )
   })
 
   it('hides the hint when input is present', () => {
     const rendered = stripAnsi(renderInputPrompt('hello', 5))
 
-    assert.equal(rendered, 'mini-code prompt> hello ')
+    assert.equal(rendered, 'lite-ai prompt> hello ')
   })
 
   it('truncates hints to keep empty input on one line', () => {
     const rendered = withTerminalWidth(30, () => stripAnsi(renderInputPrompt('', 0)))
 
     assert.equal(rendered.includes('\n'), false)
-    assert.equal(rendered, 'mini-code prompt>   Ask for code, files, tasks, or MC...')
+    assert.equal(rendered, 'lite-ai prompt>   Ask for code, files, tasks, or MC...')
   })
 })

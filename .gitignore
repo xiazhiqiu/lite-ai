@@ -5,6 +5,30 @@ dist/
 .DS_Store
 *.log
 
-# MiniCode local artifacts
-.mini-code/settings.local.json
-.mini-code/sessions/
+# Tool memory / workspace metadata
+.workbuddy/
+
+# LiteAI local artifacts
+.lite-ai/settings.local.json
+.lite-ai/sessions/
+
+# Auxiliary / generated documentation (kept local, not uploaded)
+README.zh-CN.md
+USAGE.md
+USAGE_ZH.md
+ARCHITECTURE.md
+ARCHITECTURE_ZH.md
+ARCHITECTURE_GUIDE.md
+CLAUDE_CODE_PATTERNS.md
+CLAUDE_CODE_PATTERNS_ZH.md
+CONTRIBUTING.md
+CONTRIBUTING_ZH.md
+ROADMAP.md
+ROADMAP_ZH.md
+MODULES.md
+R-POINTS.md
+TOOL_CONCURRENCY_PLAN.md
+AGENT_STATUS_BAR_DESIGN.md
+
+# Product showcase page (kept local, not uploaded)
+docs/index.html
