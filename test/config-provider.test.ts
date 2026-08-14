@@ -6,12 +6,12 @@ import path from 'node:path'
 import type { RuntimeConfig } from '../src/config.js'
 
 describe('provider resolution', () => {
-  it('resolveProviderName maps openai and falls back to anthropic', async () => {
+  it('resolveProviderName maps anthropic and falls back to openai', async () => {
     const { resolveProviderName } = await import('../src/config.js')
     assert.equal(resolveProviderName('openai'), 'openai')
     assert.equal(resolveProviderName('OPENAI'), 'openai')
-    assert.equal(resolveProviderName(undefined), 'anthropic')
-    assert.equal(resolveProviderName('weird'), 'anthropic')
+    assert.equal(resolveProviderName(undefined), 'openai')
+    assert.equal(resolveProviderName('weird'), 'openai')
     assert.equal(resolveProviderName('anthropic'), 'anthropic')
   })
 })
@@ -78,13 +78,13 @@ describe('loadRuntimeConfig provider branching', () => {
     }
   })
 
-  it('keeps Anthropic branch by default', async () => {
+  it('defaults to OpenAI branch when provider unset', async () => {
     snapshotEnv()
     const temp = await mkdtemp(path.join(os.tmpdir(), 'lite-ai-test-'))
     process.env.LITE_AI_HOME = temp
     try {
       delete process.env.LITE_AI_PROVIDER
-      process.env.LITE_AI_MODEL = 'claude-sonnet'
+      process.env.LITE_AI_MODEL = 'deepseek-chat'
       process.env.OPENAI_BASE_URL = 'https://api.deepseek.com/v1'
       process.env.OPENAI_API_KEY = 'openai-key'
       process.env.ANTHROPIC_BASE_URL = 'https://anthropic.test'
@@ -92,11 +92,11 @@ describe('loadRuntimeConfig provider branching', () => {
 
       const runtime = await loadRuntimeConfig()
 
-      assert.equal(runtime.provider, 'anthropic')
-      assert.equal(runtime.model, 'claude-sonnet')
-      assert.equal(runtime.baseUrl, 'https://anthropic.test')
-      assert.equal(runtime.authToken, 'anthropic-token')
-      assert.equal(runtime.apiKey, undefined)
+      assert.equal(runtime.provider, 'openai')
+      assert.equal(runtime.model, 'deepseek-chat')
+      assert.equal(runtime.baseUrl, 'https://api.deepseek.com/v1')
+      assert.equal(runtime.apiKey, 'openai-key')
+      assert.equal(runtime.authToken, undefined)
     } finally {
       restoreEnv()
       await rm(temp, { recursive: true, force: true })

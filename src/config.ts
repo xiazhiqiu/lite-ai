@@ -6,7 +6,7 @@ import { isEnoentError } from './utils/errors.js'
 export type ProviderName = 'anthropic' | 'openai'
 
 export function resolveProviderName(raw: unknown): ProviderName {
-  return String(raw ?? 'anthropic').toLowerCase() === 'openai' ? 'openai' : 'anthropic'
+  return String(raw ?? 'openai').toLowerCase() === 'anthropic' ? 'anthropic' : 'openai'
 }
 
 export type LiteAISettings = {
@@ -219,7 +219,7 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
   const rawProvider =
     process.env.LITE_AI_PROVIDER ||
     effectiveSettings.provider ||
-    'anthropic'
+    'openai'
   const provider = resolveProviderName(rawProvider)
   const isOpenAI = provider === 'openai'
 
