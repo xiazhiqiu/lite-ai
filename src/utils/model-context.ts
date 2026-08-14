@@ -118,6 +118,26 @@ const MODEL_CONTEXT_RULES: ModelContextRule[] = [
     outputReserve: 4_000,
   },
   {
+    patterns: ['deepseek-v4', 'deepseek v4'],
+    contextWindow: 128_000,
+    outputReserve: 16_000,
+  },
+  {
+    patterns: ['qwen', '通义'],
+    contextWindow: 128_000,
+    outputReserve: 16_000,
+  },
+  {
+    patterns: ['doubao', '豆包'],
+    contextWindow: 128_000,
+    outputReserve: 16_000,
+  },
+  {
+    patterns: ['moonshot', 'kimi'],
+    contextWindow: 128_000,
+    outputReserve: 16_000,
+  },
+  {
     patterns: ['minimax-m3'],
     contextWindow: 1_000_000,
     outputReserve: 16_000,

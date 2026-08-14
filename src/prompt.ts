@@ -1,6 +1,7 @@
 import type { McpServerSummary } from './mcp.js'
 import type { SkillSummary } from './skills.js'
 import { loadMemory } from './memory.js'
+import { isTodosEnabled } from './utils/todo-store.js'
 
 export async function buildSystemPrompt(
   cwd: string,
@@ -30,6 +31,18 @@ export async function buildSystemPrompt(
     '- Do not stop after a progress update. After a <progress> message, continue the task in the next step.',
     '- Plain assistant text without <progress> is treated as a completed assistant message for this turn.',
   ]
+
+  if (isTodosEnabled()) {
+    parts.push([
+      'TODO plan protocol:',
+      '- Use rewrite_todo_list to create the plan when a task splits into 2+ sub-steps, and to add/remove/reorder items.',
+      '- Use update_todo_status when a sub-task completes (completed), you begin it (in_progress), or it becomes blocked/abandoned (cancelled).',
+      '- At most 3 items may be in_progress at once; batch status updates when several finish together.',
+      '- Do not create a TODO plan for single-step tasks or pure Q&A.',
+      '- If resuming a session or starting fresh on a project that may have an existing plan, call update_todo_status with a no-op (e.g. status unchanged) to review the current plan before proceeding.',
+      '- If you finish with <final> while items are still in_progress, briefly explain why (do not force everything completed).',
+    ].join('\n'))
+  }
 
   if (permissionSummary.length > 0) {
     parts.push(`Permission context:\n${permissionSummary.join('\n')}`)

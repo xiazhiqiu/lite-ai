@@ -1393,7 +1393,7 @@ async function handleInput(
   state.isBusy = true
   rerender()
 
-  const pendingToolEntries = new Map<string, number[]>()
+  const pendingToolEntries = new Map<string, number>()
   const aggregatedEditByKey = new Map<string, AggregatedEditProgress>()
   const aggregatedEditByEntryId = new Map<number, AggregatedEditProgress>()
   const turnStartedAt = Date.now()
@@ -1485,7 +1485,7 @@ async function handleInput(
         state.transcriptScrollOffset = 0
         rerender()
       },
-      onToolStart(toolName, toolInput) {
+      onToolStart(toolUseId, toolName, toolInput) {
         setStatus(state, `Running ${toolName}...`)
         state.activeTool = toolName
         let entryId: number
@@ -1532,16 +1532,16 @@ async function handleInput(
             body: summarizeToolInput(toolName, toolInput),
           })
         }
-        const pending = pendingToolEntries.get(toolName) ?? []
-        pending.push(entryId)
-        pendingToolEntries.set(toolName, pending)
+        const pending = pendingToolEntries.get(toolUseId)
+        if (pending === undefined) {
+          pendingToolEntries.set(toolUseId, entryId)
+        }
         state.transcriptScrollOffset = 0
         rerender()
       },
-      onToolResult(toolName, output, isError) {
-        const pending = pendingToolEntries.get(toolName) ?? []
-        const entryId = pending.shift()
-        pendingToolEntries.set(toolName, pending)
+      onToolResult(toolUseId, toolName, output, isError) {
+        const entryId = pendingToolEntries.get(toolUseId)
+        pendingToolEntries.delete(toolUseId)
         if (entryId !== undefined) {
           const aggregated = aggregatedEditByEntryId.get(entryId)
           if (aggregated && aggregated.toolName === toolName) {

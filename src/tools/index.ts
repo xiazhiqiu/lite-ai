@@ -3,6 +3,7 @@ import type { McpServerSummary } from '../mcp.js'
 import { createMcpBackedTools } from '../mcp.js'
 import { discoverSkills } from '../skills.js'
 import { ToolRegistry } from '../tool.js'
+import { isTodosEnabled } from '../utils/todo-store.js'
 import { askUserTool } from './ask-user.js'
 import { editFileTool } from './edit-file.js'
 import { grepFilesTool } from './grep-files.js'
@@ -11,7 +12,9 @@ import { createLoadSkillTool } from './load-skill.js'
 import { modifyFileTool } from './modify-file.js'
 import { patchFileTool } from './patch-file.js'
 import { readFileTool } from './read-file.js'
-import { runCommandTool } from './run-command.js'
+import { runCommandTool, isReadOnlyCommandCall } from './run-command.js'
+import { rewriteTodoListTool } from './todo-write.js'
+import { updateTodoStatusTool } from './todo-status.js'
 import { webFetchTool } from './web-fetch.js'
 import { webSearchTool } from './web-search.js'
 import { writeFileTool } from './write-file.js'
@@ -57,17 +60,22 @@ export async function createDefaultToolRegistry(args: {
 
   return new ToolRegistry([
     askUserTool,
-    listFilesTool,
-    grepFilesTool,
-    readFileTool,
+    { ...listFilesTool, isParallelSafe: () => true },
+    { ...grepFilesTool, isParallelSafe: () => true },
+    { ...readFileTool, isParallelSafe: () => true },
     writeFileTool,
     modifyFileTool,
     editFileTool,
     patchFileTool,
-    runCommandTool,
-    createLoadSkillTool(args.cwd),
-    webFetchTool,
-    webSearchTool,
+    {
+      ...runCommandTool,
+      isParallelSafe: input =>
+        isReadOnlyCommandCall(input as { command: string; args?: string[] }),
+    },
+    { ...createLoadSkillTool(args.cwd), isParallelSafe: () => true },
+    { ...webFetchTool, isParallelSafe: () => true },
+    { ...webSearchTool, isParallelSafe: () => true },
+    ...(isTodosEnabled() ? [rewriteTodoListTool, updateTodoStatusTool] : []),
   ], {
     skills,
     mcpServers: buildConnectingMcpSummaries(mcpServers),

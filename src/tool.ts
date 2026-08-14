@@ -30,6 +30,8 @@ export type ToolDefinition<TInput> = {
   inputSchema: Record<string, unknown>
   schema: z.ZodType<TInput>
   run(input: TInput, context: ToolContext): Promise<ToolResult>
+  /** 判定该调用实例是否可与其它 safe 工具并行。缺省 = false（fail-closed）。 */
+  isParallelSafe?: (input: unknown) => boolean
 }
 
 type ToolRegistryMetadata = {

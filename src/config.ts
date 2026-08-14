@@ -3,9 +3,16 @@ import os from 'node:os'
 import path from 'node:path'
 import { isEnoentError } from './utils/errors.js'
 
+export type ProviderName = 'anthropic' | 'openai'
+
+export function resolveProviderName(raw: unknown): ProviderName {
+  return String(raw ?? 'anthropic').toLowerCase() === 'openai' ? 'openai' : 'anthropic'
+}
+
 export type LiteAISettings = {
   env?: Record<string, string | number>
   model?: string
+  provider?: ProviderName
   maxOutputTokens?: number
   mcpServers?: Record<string, McpServerConfig>
 }
@@ -22,6 +29,7 @@ export type McpServerConfig = {
 }
 
 export type RuntimeConfig = {
+  provider: ProviderName
   model: string
   baseUrl: string
   authToken?: string
@@ -42,6 +50,7 @@ export const LITE_AI_PERMISSIONS_PATH = path.join(LITE_AI_DIR, 'permissions.json
 export const LITE_AI_MCP_PATH = path.join(LITE_AI_DIR, 'mcp.json')
 export const LITE_AI_MCP_TOKENS_PATH = path.join(LITE_AI_DIR, 'mcp-tokens.json')
 export const LITE_AI_PROJECTS_DIR = path.join(LITE_AI_DIR, 'projects')
+export const LITE_AI_TODOS_DIR = path.join(LITE_AI_DIR, 'todos')
 export const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json')
 export const PROJECT_MCP_PATH = path.join(process.cwd(), '.mcp.json')
 
@@ -207,15 +216,27 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     ...process.env,
   }
 
+  const rawProvider =
+    process.env.LITE_AI_PROVIDER ||
+    effectiveSettings.provider ||
+    'anthropic'
+  const provider = resolveProviderName(rawProvider)
+  const isOpenAI = provider === 'openai'
+
   const model =
     process.env.LITE_AI_MODEL ||
     effectiveSettings.model ||
-    String(env.ANTHROPIC_MODEL ?? '').trim()
+    String(env[isOpenAI ? 'OPENAI_MODEL' : 'ANTHROPIC_MODEL'] ?? '').trim()
 
-  const baseUrl =
-    String(env.ANTHROPIC_BASE_URL ?? '').trim() || 'https://api.anthropic.com'
-  const authToken = String(env.ANTHROPIC_AUTH_TOKEN ?? '').trim() || undefined
-  const apiKey = String(env.ANTHROPIC_API_KEY ?? '').trim() || undefined
+  const baseUrl = isOpenAI
+    ? String(env.OPENAI_BASE_URL ?? '').trim() || 'https://api.openai.com/v1'
+    : String(env.ANTHROPIC_BASE_URL ?? '').trim() || 'https://api.anthropic.com'
+  const authToken = isOpenAI
+    ? undefined
+    : String(env.ANTHROPIC_AUTH_TOKEN ?? '').trim() || undefined
+  const apiKey = isOpenAI
+    ? String(env.OPENAI_API_KEY ?? '').trim() || undefined
+    : String(env.ANTHROPIC_API_KEY ?? '').trim() || undefined
   const rawMaxOutputTokens =
     process.env.LITE_AI_MAX_OUTPUT_TOKENS ??
     effectiveSettings.maxOutputTokens ??
@@ -229,23 +250,30 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
 
   if (!model) {
     throw new Error(
-      `No model configured. Set ~/.lite-ai/settings.json or env.ANTHROPIC_MODEL.`,
+      `No model configured. Set ~/.lite-ai/settings.json or env.${isOpenAI ? 'OPENAI_MODEL' : 'ANTHROPIC_MODEL'}.`,
     )
   }
 
-  if (!authToken && !apiKey) {
+  if (isOpenAI) {
+    if (!apiKey) {
+      throw new Error(
+        `No auth configured. Set OPENAI_API_KEY in ~/.lite-ai/settings.json or process env.`,
+      )
+    }
+  } else if (!authToken && !apiKey) {
     throw new Error(
       `No auth configured. Set ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY in ~/.lite-ai/settings.json or process env.`,
     )
   }
 
   return {
+    provider,
     model,
     baseUrl,
     authToken,
     apiKey,
     maxOutputTokens,
     mcpServers: effectiveSettings.mcpServers ?? {},
-    sourceSummary: `config: ${LITE_AI_SETTINGS_PATH} > ${CLAUDE_SETTINGS_PATH} > process.env`,
+    sourceSummary: `config: ${LITE_AI_SETTINGS_PATH} > ${CLAUDE_SETTINGS_PATH} > process.env (provider=${provider})`,
   }
 }

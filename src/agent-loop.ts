@@ -22,6 +22,15 @@ import {
 } from './compact/snipCompact.js'
 import { computeContextStats } from './utils/token-estimator.js'
 import {
+  partitionToolCalls,
+  isToolConcurrencyEnabled,
+} from './utils/tool-parallel.js'
+import {
+  buildAgentStatusBar,
+  isStatusBarEnabled,
+  formatElapsed,
+} from './utils/status-bar.js'
+import {
   applyToolResultBudget,
   createContentReplacementState,
   replaceLargeToolResult,
@@ -118,8 +127,9 @@ export async function runAgentTurn(args: {
   permissions?: PermissionManager
   maxSteps?: number
   modelName?: string
-  onToolStart?: (toolName: string, input: unknown) => void
-  onToolResult?: (toolName: string, output: string, isError: boolean) => void
+  startTime?: number
+  onToolStart?: (toolUseId: string, toolName: string, input: unknown) => void
+  onToolResult?: (toolUseId: string, toolName: string, output: string, isError: boolean) => void
   onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
   onProgressMessage?: (content: string) => void
   onAutoCompact?: (result: CompressionResult) => void | Promise<void>
@@ -132,6 +142,8 @@ export async function runAgentTurn(args: {
 }): Promise<ChatMessage[]> {
   const maxSteps = args.maxSteps
   const modelName = args.modelName ?? ''
+  const startTime = args.startTime ?? Date.now()
+  const statusBarToolCount = new Map<string, number>()
   let messages = args.messages
   let emptyResponseRetryCount = 0
   let recoverableThinkingRetryCount = 0
@@ -238,7 +250,22 @@ export async function runAgentTurn(args: {
       }
     }
 
-    const next = await args.model.next(modelMessages, {
+    const nextInput = (() => {
+      if (!isStatusBarEnabled() || !modelName) return modelMessages
+      const stats = latestStats ?? computeContextStats(modelMessages, modelName)
+      const total = [...statusBarToolCount.values()].reduce((a, b) => a + b, 0)
+      const detail = [...statusBarToolCount.entries()].map(([n, c]) => `${n}:${c}`).join(', ')
+      const status = buildAgentStatusBar({
+        time: new Date().toLocaleString('zh-CN', { hour12: false }),
+        elapsed: formatElapsed(Date.now() - startTime),
+        toolUsage: total === 0 ? '0' : `${total} (${detail})`,
+        ctx: `${Math.round(stats.utilization * 100)}% (${stats.warningLevel})`,
+        cwd: args.cwd,
+      })
+      return [...modelMessages, { role: 'user' as const, content: status }]
+    })()
+
+    const next = await args.model.next(nextInput, {
       tools: args.tools.list(),
       signal: args.signal,
     })
@@ -380,40 +407,76 @@ export async function runAgentTurn(args: {
     const executedToolResults: Array<{
       call: (typeof next.calls)[number]
       result: Awaited<ReturnType<ToolRegistry['execute']>>
-      toolResult: PendingToolResult
+      toolResult?: PendingToolResult
     }> = []
 
-    for (const call of next.calls) {
+    const isConcurrent = isToolConcurrencyEnabled()
+    const groups = isConcurrent
+      ? partitionToolCalls(next.calls, call => {
+          // 未找到工具 / 未声明 isParallelSafe → false（fail-closed）
+          return args.tools.find(call.toolName)?.isParallelSafe?.(call.input) ?? false
+        })
+      : next.calls.map(call => ({ parallel: false, calls: [call] }))
+
+    for (const group of groups) {
       throwIfAborted(args.signal)
-      args.onToolStart?.(call.toolName, call.input)
-      const result = await args.tools.execute(
-        call.toolName,
-        call.input,
-        { cwd: args.cwd, permissions: args.permissions },
-      )
-      sawToolResultThisTurn = true
-      if (!result.ok) {
-        toolErrorCount += 1
+
+      if (group.parallel) {
+        // 并行批：先统一 onToolStart，再 Promise.all 执行，再按发射序 onToolResult
+        for (const call of group.calls) {
+          args.onToolStart?.(call.id, call.toolName, call.input)
+        }
+        const results = await Promise.all(
+          group.calls.map(call =>
+            args.tools.execute(call.toolName, call.input, {
+              cwd: args.cwd,
+              permissions: args.permissions,
+            }),
+          ),
+        )
+        group.calls.forEach((call, i) => {
+          const result = results[i]!
+          sawToolResultThisTurn = true
+          if (!result.ok) {
+            toolErrorCount += 1
+          }
+          args.onToolResult?.(call.id, call.toolName, result.output, !result.ok)
+          statusBarToolCount.set(call.toolName, (statusBarToolCount.get(call.toolName) ?? 0) + 1)
+          executedToolResults.push({ call, result })
+        })
+      } else {
+        // 串行批：逐个执行（与当前行为一致）
+        for (const call of group.calls) {
+          throwIfAborted(args.signal)
+          args.onToolStart?.(call.id, call.toolName, call.input)
+          const result = await args.tools.execute(call.toolName, call.input, {
+            cwd: args.cwd,
+            permissions: args.permissions,
+          })
+          sawToolResultThisTurn = true
+          if (!result.ok) {
+            toolErrorCount += 1
+          }
+          args.onToolResult?.(call.id, call.toolName, result.output, !result.ok)
+          statusBarToolCount.set(call.toolName, (statusBarToolCount.get(call.toolName) ?? 0) + 1)
+          executedToolResults.push({ call, result })
+        }
       }
-      args.onToolResult?.(call.toolName, result.output, !result.ok)
+    }
 
-      const toolResult = await replaceLargeToolResult({
+    // 批后统一：按原发射序执行 replaceLargeToolResult（绝不在并行区执行，避免共享 contentReplacementState 竞态）
+    for (const entry of executedToolResults) {
+      entry.toolResult = await replaceLargeToolResult({
         role: 'tool_result',
-        toolUseId: call.id,
-        toolName: call.toolName,
-        content: result.output,
-        isError: !result.ok,
+        toolUseId: entry.call.id,
+        toolName: entry.call.toolName,
+        content: entry.result.output,
+        isError: !entry.result.ok,
       }, contentReplacementState)
-
-      executedToolResults.push({
-        call,
-        result,
-        toolResult,
-      })
     }
 
     const budgetedResults = await applyToolResultBudget(
-      executedToolResults.map(entry => entry.toolResult),
+      executedToolResults.map(entry => entry.toolResult!),
       contentReplacementState,
     )
     const toolResultById = new Map(
@@ -434,7 +497,7 @@ export async function runAgentTurn(args: {
       )
     })
     const toolResults = executedToolResults.map(entry =>
-      toolResultById.get(entry.call.id) ?? entry.toolResult,
+      toolResultById.get(entry.call.id) ?? entry.toolResult!,
     )
 
     messages = [

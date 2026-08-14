@@ -1,5 +1,6 @@
 import type { ToolRegistry } from './tool.js'
 import type {
+  AgentStep,
   ChatMessage,
   ModelAdapter,
   ModelRequestOptions,
@@ -18,22 +19,25 @@ const DEFAULT_MAX_RETRIES = 4
 const BASE_RETRY_DELAY_MS = 500
 const MAX_RETRY_DELAY_MS = 8_000
 
-type AnthropicContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
-  | { type: string; [key: string]: unknown }
+type OpenAIMessage =
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: OpenAIToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string }
 
-type AnthropicMessage = {
-  role: 'user' | 'assistant'
-  content: AnthropicContentBlock[]
+type OpenAIToolCall = {
+  id: string
+  type: 'function'
+  function: {
+    name: string
+    arguments: string
+  }
 }
 
-type AnthropicUsage = {
-  input_tokens?: number
-  output_tokens?: number
-  cache_creation_input_tokens?: number
-  cache_read_input_tokens?: number
+type OpenAIUsage = {
+  prompt_tokens?: number
+  completion_tokens?: number
+  prompt_tokens_details?: { cached_tokens?: number }
 }
 
 function getRetryLimit(): number {
@@ -54,7 +58,6 @@ function parseRetryAfterMs(retryAfter: string | null): number | null {
   if (Number.isFinite(asSeconds) && asSeconds >= 0) {
     return Math.floor(asSeconds * 1000)
   }
-
   const at = Date.parse(retryAfter)
   if (!Number.isFinite(at)) {
     return null
@@ -90,7 +93,6 @@ function extractErrorMessage(data: unknown, status: number): string {
   if (typeof data === 'string' && data.trim()) {
     return data.trim()
   }
-
   if (
     typeof data === 'object' &&
     data !== null &&
@@ -103,7 +105,6 @@ function extractErrorMessage(data: unknown, status: number): string {
   ) {
     return data.error.message.trim()
   }
-
   if (
     typeof data === 'object' &&
     data !== null &&
@@ -113,7 +114,6 @@ function extractErrorMessage(data: unknown, status: number): string {
   ) {
     return data.error.trim()
   }
-
   if (
     typeof data === 'object' &&
     data !== null &&
@@ -123,146 +123,119 @@ function extractErrorMessage(data: unknown, status: number): string {
   ) {
     return data.message.trim()
   }
-
   return `Model request failed: ${status}`
 }
 
-function isTextBlock(block: AnthropicContentBlock): block is Extract<AnthropicContentBlock, {
-  type: 'text'
-}> {
-  return block.type === 'text' && typeof block.text === 'string'
+function isAssistantToolCall(
+  message: ChatMessage,
+): message is Extract<ChatMessage, { role: 'assistant_tool_call' }> {
+  return message.role === 'assistant_tool_call'
 }
 
-function isToolUseBlock(block: AnthropicContentBlock): block is Extract<AnthropicContentBlock, {
-  type: 'tool_use'
-}> {
-  return (
-    block.type === 'tool_use' &&
-    typeof block.id === 'string' &&
-    typeof block.name === 'string'
-  )
+function toOpenAIToolCall(call: Extract<ChatMessage, { role: 'assistant_tool_call' }>): OpenAIToolCall {
+  return {
+    id: call.toolUseId,
+    type: 'function',
+    function: {
+      name: call.toolName,
+      arguments: JSON.stringify(call.input ?? {}),
+    },
+  }
 }
 
-function isThinkingBlock(block: AnthropicContentBlock): block is ProviderThinkingBlock {
-  return block.type === 'thinking' || block.type === 'redacted_thinking'
+function toOpenAIMessages(messages: ChatMessage[]): OpenAIMessage[] {
+  const converted: OpenAIMessage[] = []
+  let pendingToolCalls: Extract<ChatMessage, { role: 'assistant_tool_call' }>[] = []
+
+  const flushToolCalls = (): void => {
+    if (pendingToolCalls.length === 0) return
+    converted.push({
+      role: 'assistant',
+      content: null,
+      tool_calls: pendingToolCalls.map(toOpenAIToolCall),
+    })
+    pendingToolCalls = []
+  }
+
+  for (const message of messages) {
+    if (message.role === 'system') {
+      converted.push({ role: 'system', content: message.content })
+      continue
+    }
+
+    if (isAssistantToolCall(message)) {
+      pendingToolCalls.push(message)
+      continue
+    }
+
+    // 遇到非 tool_call 消息，先刷新已累积的 tool_calls 组
+    flushToolCalls()
+
+    if (message.role === 'user') {
+      converted.push({ role: 'user', content: message.content })
+      continue
+    }
+
+    // assistant_thinking 为内部推理，按最小改动不回传
+    if (message.role === 'assistant_thinking') {
+      continue
+    }
+
+    if (message.role === 'assistant' || message.role === 'assistant_progress') {
+      converted.push({ role: 'assistant', content: message.content })
+      continue
+    }
+
+    if (message.role === 'context_summary') {
+      converted.push({
+        role: 'user',
+        content: `[Context Summary from earlier conversation]\n${message.content}`,
+      })
+      continue
+    }
+
+    if (message.role === 'snip_boundary') {
+      converted.push({ role: 'user', content: buildAnthropicSnipBoundaryText() })
+      continue
+    }
+
+    if (message.role === 'tool_result') {
+      converted.push({
+        role: 'tool',
+        tool_call_id: message.toolUseId,
+        content: message.content,
+      })
+      continue
+    }
+  }
+
+  flushToolCalls()
+  return converted
 }
 
-function toTextBlock(text: string): AnthropicContentBlock {
-  return { type: 'text', text }
-}
-
-function normalizeAnthropicUsage(usage: AnthropicUsage | undefined): ProviderUsage | undefined {
+function normalizeOpenAIUsage(usage: OpenAIUsage | undefined): ProviderUsage | undefined {
   if (!usage) return undefined
-  const inputTokens =
-    (usage.input_tokens ?? 0) +
-    (usage.cache_creation_input_tokens ?? 0) +
-    (usage.cache_read_input_tokens ?? 0)
-  const outputTokens = usage.output_tokens ?? 0
+  const inputTokens = usage.prompt_tokens ?? 0
+  const outputTokens = usage.completion_tokens ?? 0
   const totalTokens = inputTokens + outputTokens
   if (totalTokens <= 0) return undefined
   return {
     inputTokens,
     outputTokens,
     totalTokens,
-    source: 'anthropic',
+    source: 'openai',
   }
 }
 
-function toAssistantText(message: Extract<ChatMessage, {
-  role: 'assistant' | 'assistant_progress'
-}>): string {
-  if (message.role === 'assistant_progress') {
-    return `<progress>\n${message.content}\n</progress>`
+function parseToolArguments(raw: string): unknown {
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return {}
   }
-
-  return message.content
 }
 
-function pushAnthropicMessage(
-  messages: AnthropicMessage[],
-  role: 'user' | 'assistant',
-  block: AnthropicContentBlock,
-): void {
-  const last = messages.at(-1)
-  if (last?.role === role) {
-    last.content.push(block)
-    return
-  }
-
-  messages.push({ role, content: [block] })
-}
-
-function toAnthropicMessages(messages: ChatMessage[]): {
-  system: string
-  messages: AnthropicMessage[]
-} {
-  const system = messages
-    .filter(message => message.role === 'system')
-    .map(message => message.content)
-    .join('\n\n')
-
-  const converted: AnthropicMessage[] = []
-
-  for (const message of messages) {
-    if (message.role === 'system') continue
-
-    if (message.role === 'user') {
-      pushAnthropicMessage(converted, 'user', toTextBlock(message.content))
-      continue
-    }
-
-    if (message.role === 'assistant_thinking') {
-      for (const block of message.blocks) {
-        pushAnthropicMessage(converted, 'assistant', block)
-      }
-      continue
-    }
-
-    if (message.role === 'assistant' || message.role === 'assistant_progress') {
-      pushAnthropicMessage(
-        converted,
-        'assistant',
-        toTextBlock(toAssistantText(message)),
-      )
-      continue
-    }
-
-    if (message.role === 'assistant_tool_call') {
-      pushAnthropicMessage(converted, 'assistant', {
-        type: 'tool_use',
-        id: message.toolUseId,
-        name: message.toolName,
-        input: message.input,
-      })
-      continue
-    }
-
-    if (message.role === 'context_summary') {
-      pushAnthropicMessage(converted, 'user', toTextBlock(
-        `[Context Summary from earlier conversation]\n${message.content}`,
-      ))
-      continue
-    }
-
-    if (message.role === 'snip_boundary') {
-      pushAnthropicMessage(converted, 'user', toTextBlock(
-        buildAnthropicSnipBoundaryText(),
-      ))
-      continue
-    }
-
-    pushAnthropicMessage(converted, 'user', {
-      type: 'tool_result',
-      tool_use_id: message.toolUseId,
-      content: message.content,
-      is_error: message.isError,
-    })
-  }
-
-  return { system, messages: converted }
-}
-
-export class AnthropicModelAdapter implements ModelAdapter {
+export class OpenAIModelAdapter implements ModelAdapter {
   constructor(
     private readonly tools: ToolRegistry,
     private readonly getRuntimeConfig: () => Promise<RuntimeConfig>,
@@ -271,11 +244,10 @@ export class AnthropicModelAdapter implements ModelAdapter {
   async next(
     messages: ChatMessage[],
     options: ModelRequestOptions = {},
-  ) {
+  ): Promise<AgentStep> {
     throwIfAborted(options.signal)
     const runtime = await this.getRuntimeConfig()
-    const payload = toAnthropicMessages(messages)
-    const url = `${runtime.baseUrl.replace(/\/$/, '')}/v1/messages`
+    const url = `${runtime.baseUrl.replace(/\/$/, '')}/chat/completions`
     const maxOutputTokens = resolveMaxOutputTokens(
       runtime.model,
       runtime.maxOutputTokens,
@@ -283,23 +255,21 @@ export class AnthropicModelAdapter implements ModelAdapter {
 
     const headers: Record<string, string> = {
       'content-type': 'application/json',
-      'anthropic-version': '2023-06-01',
     }
-
-    if (runtime.authToken) {
-      headers.Authorization = `Bearer ${runtime.authToken}`
-    } else if (runtime.apiKey) {
-      headers['x-api-key'] = runtime.apiKey
+    if (runtime.apiKey) {
+      headers.Authorization = `Bearer ${runtime.apiKey}`
     }
 
     const requestBody = {
       model: runtime.model,
-      system: payload.system,
-      messages: payload.messages,
+      messages: toOpenAIMessages(messages),
       tools: (options.tools ?? this.tools.list()).map(tool => ({
-        name: tool.name,
-        description: tool.description,
-        input_schema: tool.inputSchema,
+        type: 'function' as const,
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.inputSchema,
+        },
       })),
       max_tokens: maxOutputTokens,
     }
@@ -331,9 +301,18 @@ export class AnthropicModelAdapter implements ModelAdapter {
     }
 
     const data = (await readJsonBody(response)) as {
-      stop_reason?: string
-      content?: AnthropicContentBlock[]
-      usage?: AnthropicUsage
+      choices?: Array<{
+        finish_reason?: string
+        message?: {
+          content?: string | null
+          reasoning_content?: string | null
+          tool_calls?: Array<{
+            id?: string
+            function?: { name?: string; arguments?: string }
+          }>
+        }
+      }>
+      usage?: OpenAIUsage
       error?: { message?: string }
     }
 
@@ -341,44 +320,29 @@ export class AnthropicModelAdapter implements ModelAdapter {
       throw new Error(extractErrorMessage(data, response.status))
     }
 
+    const choice = data.choices?.[0]
+    const message = choice?.message
+
     const toolCalls: ToolCall[] = []
-    const textParts: string[] = []
-    const thinkingBlocks: ProviderThinkingBlock[] = []
-    const blockTypes: string[] = []
-    const ignoredBlockTypes = new Set<string>()
-
-    for (const block of data.content ?? []) {
-      blockTypes.push(block.type)
-
-      if (isTextBlock(block)) {
-        textParts.push(block.text)
-        continue
-      }
-
-      if (isToolUseBlock(block)) {
-        toolCalls.push({
-          id: block.id,
-          toolName: block.name,
-          input: block.input,
-        })
-        continue
-      }
-
-      if (isThinkingBlock(block)) {
-        thinkingBlocks.push(block)
-        continue
-      }
-
-      ignoredBlockTypes.add(block.type)
+    for (const call of message?.tool_calls ?? []) {
+      if (!call.id || !call.function?.name) continue
+      toolCalls.push({
+        id: call.id,
+        toolName: call.function.name,
+        input: parseToolArguments(call.function.arguments ?? ''),
+      })
     }
 
-    const parsedText = parseAssistantText(textParts.join('\n').trim())
+    const reasoning = message?.reasoning_content
+    const thinkingBlocks: ProviderThinkingBlock[] = reasoning
+      ? [{ type: 'thinking' as const, text: reasoning }]
+      : []
+
+    const parsedText = parseAssistantText(message?.content ?? '')
     const diagnostics: StepDiagnostics = {
-      stopReason: data.stop_reason,
-      blockTypes,
-      ignoredBlockTypes: [...ignoredBlockTypes],
+      stopReason: choice?.finish_reason,
     }
-    const usage = normalizeAnthropicUsage(data.usage)
+    const usage = normalizeOpenAIUsage(data.usage)
 
     if (toolCalls.length > 0) {
       return {

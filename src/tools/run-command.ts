@@ -48,6 +48,111 @@ function isReadOnlyCommand(command: string): boolean {
   return READONLY_COMMANDS.has(command)
 }
 
+// 并发安全只读命令白名单（保守集，不含 sed/vim 等可写工具）。
+// 与上层 READONLY_COMMANDS 解耦：该集合仅供 run_command 执行路径的权限判断，
+// 而并发的只读判定必须排除一切可能写盘的命令。
+const CONCURRENT_READONLY_COMMANDS = new Set([
+  'ls',
+  'cat',
+  'head',
+  'tail',
+  'wc',
+  'grep',
+  'rg',
+  'find',
+  'echo',
+  'pwd',
+  'which',
+  'date',
+  'env',
+  'whoami',
+  'uname',
+  'df',
+  'du',
+  'free',
+  'uptime',
+])
+
+const CONCURRENT_READONLY_GIT_SUBCOMMANDS = new Set([
+  'status',
+  'diff',
+  'log',
+  'show',
+  'branch',
+])
+
+// 若命令含这些字符，判定为可能写盘/副作用，不得并行。
+const DANGEROUS_PATTERN = /[><&$`|;]/
+
+function hasDangerousToken(token: string): boolean {
+  return DANGEROUS_PATTERN.test(token)
+}
+
+/**
+ * 判定一次 run_command 调用实例是否可并发执行（只读）。
+ * fail-closed：任何无法 100% 确认只读的情况都返回 false。
+ * - 带 args 数组：command 为 argv0，args 为 argv1..；仅白名单命令 + git 只读子命令通过。
+ * - 单字符串 command：按 shell 分隔符拆段，逐段校验 argv0 与危险符号。
+ * 绝不复用 isReadOnlyCommand（其白名单含 sed）。
+ */
+export function isReadOnlyCommandCall(input: {
+  command: string
+  args?: string[]
+}): boolean {
+  const trimmed = input.command.trim()
+  if (!trimmed) return false
+
+  if ((input.args?.length ?? 0) > 0) {
+    return isReadOnlyArgv(trimmed, input.args!)
+  }
+
+  return isReadOnlySnippet(trimmed)
+}
+
+function isReadOnlyArgv(argv0: string, args: string[]): boolean {
+  if (args.some(hasDangerousToken)) return false
+
+  if (argv0 === 'git') {
+    const sub = args[0]
+    return sub !== undefined && CONCURRENT_READONLY_GIT_SUBCOMMANDS.has(sub)
+  }
+
+  return CONCURRENT_READONLY_COMMANDS.has(argv0)
+}
+
+function isReadOnlySnippet(command: string): boolean {
+  // 拆成 shell 段（| & && || ; 各自成段），但若是命令替换/重定向等，直接拒。
+  const segments = command
+    .split(/(&&|\|\||[|;])/g)
+    .map(segment => segment.trim())
+    .filter(Boolean)
+
+  for (const segment of segments) {
+    if (segment === '&&' || segment === '||' || segment === '|' || segment === ';') {
+      continue
+    }
+    if (!isReadOnlySegment(segment)) {
+      return false
+    }
+  }
+  return true
+}
+
+function isReadOnlySegment(segment: string): boolean {
+  // 重定向 / 命令替换 / 后台符 / 子 shell —— 一律非只读
+  if (hasDangerousToken(segment)) return false
+
+  const [argv0, ...argv] = splitCommandLine(segment)
+  if (!argv0) return false
+
+  if (argv0 === 'git') {
+    const sub = argv[0]
+    return sub !== undefined && CONCURRENT_READONLY_GIT_SUBCOMMANDS.has(sub)
+  }
+
+  return CONCURRENT_READONLY_COMMANDS.has(argv0)
+}
+
 type Input = {
   command: string
   args?: string[]
