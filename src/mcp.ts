@@ -21,6 +21,8 @@ type McpToolDescriptor = {
   name: string
   description?: string
   inputSchema?: Record<string, unknown>
+  /** server 自声明的只读标记（可选）。未声明时由配置层 readOnlyTools 决定。 */
+  isReadOnly?: boolean
 }
 
 type McpResourceDescriptor = {
@@ -1063,6 +1065,13 @@ export async function createMcpBackedTools(args: {
           descriptor.name,
         )}`
         const inputSchema = normalizeInputSchema(descriptor.inputSchema)
+        // isReadOnly 判定（fail-closed）：
+        //   1. descriptor 自声明 isReadOnly === true → 只读
+        //   2. config.readOnlyTools 包含该工具名 → 只读
+        //   3. 都未命中 → 非只读（不可被子 agent 调用）
+        const readOnlyFromConfig =
+          config.readOnlyTools?.includes(descriptor.name) ?? false
+        const isReadOnly = descriptor.isReadOnly === true || readOnlyFromConfig
         tools.push({
           name: wrappedName,
           description:
@@ -1070,6 +1079,7 @@ export async function createMcpBackedTools(args: {
             `Call MCP tool ${descriptor.name} from server ${serverName}.`,
           inputSchema,
           schema: z.unknown(),
+          isReadOnly,
           async run(input) {
             return client.callTool(descriptor.name, input)
           },

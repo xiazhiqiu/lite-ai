@@ -26,6 +26,7 @@ export const SUB_AGENT_TOOL_NAMES = [
   'load_skill',
   'web_fetch',
   'web_search',
+  'run_command',
 ] as const
 
 function summarizeServerEndpoint(config: McpServerConfig): string {

@@ -1,5 +1,5 @@
 export const MAX_SUB_AGENTS = 3
-export const MAX_SUB_AGENT_STEPS = 20
+export const MAX_SUB_AGENT_STEPS = 30
 
 export type SubAgentStatus =
   | 'running'

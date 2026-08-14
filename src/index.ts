@@ -93,7 +93,7 @@ async function main(): Promise<void> {
         : new AnthropicModelAdapter(tools, loadRuntimeConfig)
   const subAgents = new SubAgentManager({
     model,
-    tools: tools.subset(SUB_AGENT_TOOL_NAMES),
+    tools: tools.subsetForSubAgent(SUB_AGENT_TOOL_NAMES),
     cwd,
   })
   tools.addTools(createSubAgentTools(subAgents))

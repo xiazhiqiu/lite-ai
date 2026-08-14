@@ -26,6 +26,8 @@ export type McpServerConfig = {
   cwd?: string
   enabled?: boolean
   protocol?: 'auto' | 'content-length' | 'newline-json' | 'streamable-http'
+  /** 声明该 server 提供的只读工具名列表（匹配 descriptor.name）。标记为只读的工具可被子 agent 调用。 */
+  readOnlyTools?: string[]
 }
 
 export type RuntimeConfig = {

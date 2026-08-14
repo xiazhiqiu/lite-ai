@@ -40,12 +40,91 @@ const DEVELOPMENT_COMMANDS = new Set([
   'bun',
 ])
 
+// SRE 只读诊断命令集（子命令级白名单，防止 kubectl delete 等写操作误入）
+const SRE_READONLY_COMMANDS = new Set([
+  'kubectl',
+  'docker',
+  'curl',
+  'wget',
+  'jq',
+  'column',
+])
+
+const KUBECTL_READONLY_SUBCOMMANDS = new Set([
+  'get',
+  'describe',
+  'logs',
+  'top',
+  'explain',
+  'diff',
+  'version',
+])
+
+const DOCKER_READONLY_SUBCOMMANDS = new Set([
+  'ps',
+  'logs',
+  'stats',
+  'inspect',
+  'version',
+  'images',
+])
+
+// curl/wget 危险 HTTP 方法（写操作）
+const DANGEROUS_HTTP_METHODS = new Set([
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+])
+
 function isAllowedCommand(command: string): boolean {
-  return READONLY_COMMANDS.has(command) || DEVELOPMENT_COMMANDS.has(command)
+  return (
+    READONLY_COMMANDS.has(command) ||
+    DEVELOPMENT_COMMANDS.has(command) ||
+    SRE_READONLY_COMMANDS.has(command)
+  )
 }
 
 function isReadOnlyCommand(command: string): boolean {
   return READONLY_COMMANDS.has(command)
+}
+
+/**
+ * 判定 SRE 命令是否为只读诊断命令（子命令级白名单）。
+ * kubectl/docker 需校验子命令；curl/wget 需校验无写方法；jq/column 纯只读。
+ */
+export function isSreReadOnlyCommand(command: string, args?: string[]): boolean {
+  if (!SRE_READONLY_COMMANDS.has(command)) return false
+
+  if (command === 'kubectl') {
+    const sub = args?.[0]
+    return sub !== undefined && KUBECTL_READONLY_SUBCOMMANDS.has(sub)
+  }
+
+  if (command === 'docker') {
+    const sub = args?.[0]
+    return sub !== undefined && DOCKER_READONLY_SUBCOMMANDS.has(sub)
+  }
+
+  if (command === 'curl' || command === 'wget') {
+    // 检查是否含写方法标志（-X POST / --method PUT 等）
+    const hasWriteMethod = args?.some((arg, idx) => {
+      if (arg === '-X' || arg === '--request') {
+        const method = args[idx + 1]?.toUpperCase()
+        return method !== undefined && DANGEROUS_HTTP_METHODS.has(method)
+      }
+      // -XPOST 紧凑形式
+      const compact = arg.match(/^-[Xx](\w+)$/)
+      if (compact) {
+        return DANGEROUS_HTTP_METHODS.has(compact[1].toUpperCase())
+      }
+      return false
+    })
+    return !hasWriteMethod
+  }
+
+  // jq / column 纯只读
+  return true
 }
 
 // 并发安全只读命令白名单（保守集，不含 sed/vim 等可写工具）。
@@ -117,6 +196,9 @@ function isReadOnlyArgv(argv0: string, args: string[]): boolean {
     return sub !== undefined && CONCURRENT_READONLY_GIT_SUBCOMMANDS.has(sub)
   }
 
+  // SRE 只读诊断命令（kubectl get/logs、docker ps/logs、curl GET 等）
+  if (isSreReadOnlyCommand(argv0, args)) return true
+
   return CONCURRENT_READONLY_COMMANDS.has(argv0)
 }
 
@@ -149,6 +231,9 @@ function isReadOnlySegment(segment: string): boolean {
     const sub = argv[0]
     return sub !== undefined && CONCURRENT_READONLY_GIT_SUBCOMMANDS.has(sub)
   }
+
+  // SRE 只读诊断命令
+  if (isSreReadOnlyCommand(argv0, argv)) return true
 
   return CONCURRENT_READONLY_COMMANDS.has(argv0)
 }
@@ -299,6 +384,22 @@ export const runCommandTool: ToolDefinition<Input> = {
     const args = useShell
       ? ['-lc', backgroundShell ? stripTrailingBackgroundOperator(input.command) : input.command]
       : normalized.args
+
+    // 子 agent 无 permissions 时，强制只允许只读命令（fail-closed）。
+    // 防止子 agent 在无审批通道的情况下执行写操作。
+    if (!context.permissions) {
+      if (
+        !isReadOnlyCommandCall({
+          command: normalized.command,
+          args: normalized.args,
+        })
+      ) {
+        return {
+          ok: false,
+          output: `Command not allowed without permission manager (sub-agent read-only mode): ${normalized.command}`,
+        }
+      }
+    }
 
     const forcePromptReason =
       !useShell && !knownCommand
