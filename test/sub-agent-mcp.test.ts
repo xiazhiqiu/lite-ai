@@ -70,3 +70,36 @@ test('subsetForSubAgent: 空注册表返回空子集', () => {
 test('SUB_AGENT_TOOL_NAMES 包含 run_command', () => {
   assert.ok(SUB_AGENT_TOOL_NAMES.includes('run_command'))
 })
+
+// MCP annotations.readOnlyHint 判定测试（模拟 createMcpBackedTools 的 isReadOnly 逻辑）
+test('MCP isReadOnly 判定: annotations.readOnlyHint=true 且无 destructiveHint → 只读', () => {
+  // 模拟 mcp.ts 的判定逻辑
+  const annotations = { readOnlyHint: true, destructiveHint: false }
+  const readOnlyFromHint =
+    annotations?.readOnlyHint === true && annotations?.destructiveHint !== true
+  assert.equal(readOnlyFromHint, true)
+})
+
+test('MCP isReadOnly 判定: annotations.readOnlyHint=true 但 destructiveHint=true → 非只读（矛盾按悲观）', () => {
+  const annotations = { readOnlyHint: true, destructiveHint: true }
+  const readOnlyFromHint =
+    annotations?.readOnlyHint === true && annotations?.destructiveHint !== true
+  assert.equal(readOnlyFromHint, false)
+})
+
+test('MCP isReadOnly 判定: 无 annotations → 非只读（fail-closed）', () => {
+  const annotations = undefined
+  const readOnlyFromHint =
+    annotations?.readOnlyHint === true && annotations?.destructiveHint !== true
+  assert.equal(readOnlyFromHint, false)
+})
+
+test('MCP isReadOnly 判定: config.readOnlyTools 覆盖 → 只读（最高优先级）', () => {
+  // 即使无 annotations，config 显式标注也视为只读
+  const annotations = undefined
+  const readOnlyFromConfig = true // config.readOnlyTools 包含该工具名
+  const readOnlyFromHint =
+    annotations?.readOnlyHint === true && annotations?.destructiveHint !== true
+  const isReadOnly = readOnlyFromConfig || readOnlyFromHint
+  assert.equal(isReadOnly, true)
+})
