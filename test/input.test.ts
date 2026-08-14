@@ -53,6 +53,6 @@ describe('renderInputPrompt', () => {
     const rendered = withTerminalWidth(30, () => stripAnsi(renderInputPrompt('', 0)))
 
     assert.equal(rendered.includes('\n'), false)
-    assert.equal(rendered, 'lite-ai prompt>   Ask for code, files, tasks, or MC...')
+    assert.equal(rendered, 'lite-ai prompt>   Ask for code, files, tasks, or MCP ...')
   })
 })
