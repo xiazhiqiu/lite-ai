@@ -451,7 +451,7 @@ P3（后续，锦上添花）
 |---|---|---|
 | **M1 P1 代码完成** | P1-1~P1-5 全部实现 + 测试全绿 | ✅ 达成（355/355 通过） |
 | **M2 评测框架就绪** | P2-1 可运行 RE2-SS 全量评测，输出 AC@1/AC@3 指标 | ⬜ 待开始 |
-| **M3 场景验证** | Pod CrashLoopBackOff 端到端跑通，含假设链+检查点+复盘报告 | ⏳ 部分完成（payment_loss/1 + carts_mem/1 跑通；orders_delay 超时跳过；Pod CrashLoopBackOff 待验证） |
+| **M3 场景验证** | Pod CrashLoopBackOff 端到端跑通，含假设链+检查点+复盘报告 | ✅ 达成（payment_mem/1 全链路跑通：诊断→假设链→检查点→交接简报→postmortem 落盘，135s/40 步；payment_loss/1 + carts_mem/1 之前已跑通；orders_delay 跳过） |
 | **M4 基线评测** | 在 RE2-SS 全量 90 实例上跑出 AC@1/AC@3 基线分数 | ⬜ 待开始 |
 
 ---
