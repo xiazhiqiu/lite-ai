@@ -20,6 +20,7 @@ import { webSearchTool } from './web-search.js'
 import { writeFileTool } from './write-file.js'
 import { hypothesisTrackerTool } from './hypothesis-tracker.js'
 import { incidentCheckpointTool } from './incident-checkpoint.js'
+import { tailLogsTool, followLogsTool, stopFollowTool } from './tail-logs.js'
 
 export const SUB_AGENT_TOOL_NAMES = [
   'list_files',
@@ -80,6 +81,9 @@ export async function createDefaultToolRegistry(args: {
     { ...webSearchTool, isParallelSafe: () => true },
     hypothesisTrackerTool,
     incidentCheckpointTool,
+    { ...tailLogsTool, isParallelSafe: () => true },
+    followLogsTool,
+    stopFollowTool,
     ...(isTodosEnabled() ? [rewriteTodoListTool, updateTodoStatusTool] : []),
   ], {
     skills,
