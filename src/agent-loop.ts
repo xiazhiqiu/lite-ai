@@ -238,7 +238,7 @@ export async function runAgentTurn(args: {
       latestStats = latestStats ?? computeContextStats(modelMessages, modelName)
       args.onContextStats?.(latestStats)
       if (latestStats.warningLevel === 'critical' || latestStats.warningLevel === 'blocked') {
-        const result = await autoCompact(modelMessages, modelName, args.model)
+        const result = await autoCompact(modelMessages, modelName, args.model, args.cwd)
         if (result) {
           messages = result.messages
           modelMessages = messages

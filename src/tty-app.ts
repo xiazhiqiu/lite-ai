@@ -1165,7 +1165,7 @@ async function handleInput(
     state.compressionStatus = 'compressing...'
     rerender()
     try {
-      const result = await manualCompact(args.messages, args.model)
+      const result = await manualCompact(args.messages, args.model, args.cwd)
       if (result) {
         const summaryText = typeof result.summary.content === 'string' ? result.summary.content : ''
         await appendCompactBoundary(
