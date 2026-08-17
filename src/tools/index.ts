@@ -19,6 +19,7 @@ import { webFetchTool } from './web-fetch.js'
 import { webSearchTool } from './web-search.js'
 import { writeFileTool } from './write-file.js'
 import { hypothesisTrackerTool } from './hypothesis-tracker.js'
+import { incidentCheckpointTool } from './incident-checkpoint.js'
 
 export const SUB_AGENT_TOOL_NAMES = [
   'list_files',
@@ -78,6 +79,7 @@ export async function createDefaultToolRegistry(args: {
     { ...webFetchTool, isParallelSafe: () => true },
     { ...webSearchTool, isParallelSafe: () => true },
     hypothesisTrackerTool,
+    incidentCheckpointTool,
     ...(isTodosEnabled() ? [rewriteTodoListTool, updateTodoStatusTool] : []),
   ], {
     skills,
