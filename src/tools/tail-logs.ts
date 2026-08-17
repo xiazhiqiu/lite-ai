@@ -82,9 +82,7 @@ async function fetchTail(source: LogSource, lines: number): Promise<string[]> {
   if (source.previous) args.push('--previous')
 
   try {
-    const { stdout } = await execFileAsync('kubectl', args, {
-      maxBuffer: KUBECTL_MAX_BUFFER,
-    })
+    const { stdout } = await __hooks.kubectlExec(args)
     return splitLines(stdout)
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { stderr?: string }
@@ -98,6 +96,15 @@ async function fetchTail(source: LogSource, lines: number): Promise<string[]> {
       `kubectl logs failed${stderr ? `: ${stderr}` : ` (exit code ${e.code ?? 'unknown'})`}`,
     )
   }
+}
+
+/**
+ * 可测试性钩子：测试时可替换 kubectlExec 为 mock，避免依赖真实 kubectl 二进制。
+ * 生产代码用真实 execFile。沿用 resetFollowSessions 的测试导出模式。
+ */
+export const __hooks = {
+  kubectlExec: (args: string[]): Promise<{ stdout: string; stderr: string }> =>
+    execFileAsync('kubectl', args, { maxBuffer: KUBECTL_MAX_BUFFER }),
 }
 
 // --- Follow sessions (in-memory, ephemeral) ---

@@ -330,3 +330,39 @@ test('generate_postmortem: 空字符串 remediation_actions 被 schema 拒绝', 
 
   assert.equal(result.ok, false)
 })
+
+test('generate_postmortem: 不传 checkpoint_id 时优先使用活动检查点（而非最新）', async () => {
+  const tools = await registry()
+  const ctx = freshCtx()
+
+  // 创建第一个检查点并设为活动
+  const cp1 = await tools.execute(
+    'incident_checkpoint',
+    {
+      action: 'create',
+      name: '较早事故',
+      incident_title: '较早事故（已设为活动）',
+      severity: 'SEV2',
+    },
+    ctx,
+  )
+  const cp1Id = createdId(cp1.output)
+  await tools.execute(
+    'incident_checkpoint',
+    { action: 'switch_to', checkpoint_id: cp1Id },
+    ctx,
+  )
+
+  // 创建第二个更新的检查点（不设为活动）
+  // 注意：seedIncident 会创建名为 "payment 500" 的检查点，比 cp1 新
+  await seedIncident(tools, ctx)
+
+  // 不传 checkpoint_id，应回退到活动检查点（cp1），而非最新的 payment 500
+  const result = await tools.execute('generate_postmortem', {}, ctx)
+
+  assert.equal(result.ok, true)
+  assert.match(result.output, new RegExp(`checkpoint ${cp1Id}`))
+  assert.match(result.output, /较早事故（已设为活动）/)
+  // 不应使用最新的 payment 500 检查点
+  assert.doesNotMatch(result.output, /payment 服务 OOMKilled 导致 500/)
+})
