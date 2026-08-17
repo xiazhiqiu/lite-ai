@@ -1,8 +1,8 @@
 # SRE 事故诊断助手 — 产品需求文档（PRD）
 
-> 版本：v2.0 · 2026-08-14
+> 版本：v2.1 · 2026-08-17（P1 完成，M1 达成）
 > 基于 SRE_ASSISTANT_DESIGN.md v1.0 + 竞品调研 + 终端 agent 设计调研 + RE2-SS 测试集分析
-> 分支：`feat/sre-assistant`
+> 分支：`feat/data-ops-assistant`
 
 ---
 
@@ -106,17 +106,17 @@
 | 上下文压缩 | compact/ | 已有 |
 | 子 agent 并行 | agents/manager.ts | 已有 |
 
-### 3.2 待实现（P1 + P2 + 新发现）
+### 3.2 待实现（P1 已完成 + P2 + 新发现）
 
-按优先级排列（基于竞品调研结果更新）：
+按优先级排列（基于调研中新发现的差异化设计）：
 
 ```
-P1（必须，验证可用性）—— 基于调研中新发现的差异化设计
-  ├── P1-1: 流式日志 tail                         [tail-logs.ts]
-  ├── P1-2: 复盘报告生成（postmortem）              [generate-postmortem.ts]
-  ├── P1-3: 假设-验证链呈现 *NEW*                   [hypothesis-tracker.ts]
-  ├── P1-4: 事故检查点 + 跨班交接简报 *NEW*          [incident-checkpoint.ts]
-  └── P1-5: 事故事实层 compact 保护 *NEW*           [compact/incident-facts.ts]
+P1（必须，验证可用性）✅ 已完成，355/355 测试通过，M1 达成
+  ├── P1-1: 流式日志 tail                         [tail-logs.ts] ✅
+  ├── P1-2: 复盘报告生成（postmortem）              [generate-postmortem.ts] ✅
+  ├── P1-3: 假设-验证链呈现 *NEW*                   [hypothesis-tracker.ts] ✅
+  ├── P1-4: 事故检查点 + 跨班交接简报 *NEW*          [incident-checkpoint.ts] ✅
+  └── P1-5: 事故事实层 compact 保护 *NEW*           [compact/incident-facts.ts] ✅
 
 P2（重要，提升体验）
   ├── P2-1: 评测框架（RE2-SS benchmark 接入）*NEW*  [eval/]
@@ -129,11 +129,16 @@ P3（后续，锦上添花）
   └── 日志/指标可视化增强
 ```
 
+**P1 实现偏差说明**（详见 P1_TASKS.md 末尾"实现偏差汇总"）：
+- P1-1：task 要求 spawn 子进程 + background-tasks 复用；实际为一次性读 + 轮询会话（更简单，覆盖 SRE 实际场景）
+- P1-2：task 要求 session.ts 加 getToolCallTimeline + 调 model；实际从 evidence 取时间线 + 模板化生成（确定性 + 可单测）
+- P1-4：task 要求 session.ts 加 checkpoint_marker 消息；实际用独立 checkpoint-store.ts 落盘（跨 session 可读，不侵入 session 消息流）
+
 ---
 
-## 四、P1 新增需求详细设计
+## 四、P1 新增需求详细设计（已实现 ✅）
 
-### 4.1 P1-3: 假设-验证链呈现（Hypothesis Tracker）
+### 4.1 P1-3: 假设-验证链呈现（Hypothesis Tracker）✅ 已实现
 
 **竞品对标**：Datadog Bits AI 的 Investigation Steps（实时推理日志）+ Hypothesis Tree（完成后树状总览），Dynatrace 的 Visual Resolution Path。
 
@@ -207,7 +212,7 @@ type Evidence = {
 
 ---
 
-### 4.2 P1-4: 事故检查点 + 跨班交接简报（Incident Checkpoint）
+### 4.2 P1-4: 事故检查点 + 跨班交接简报（Incident Checkpoint）✅ 已实现（偏差：用 checkpoint-store.ts 落盘，非 session.ts）
 
 **竞品对标**：Claude Code 的 /rewind / checkpoint / fork。Datadog 的 Investigation 序列化持久化。
 
@@ -282,7 +287,7 @@ incident_checkpoint 工具:
 
 ---
 
-### 4.3 P1-5: 事故事实层 compact 保护（Incident Fact Layer）
+### 4.3 P1-5: 事故事实层 compact 保护（Incident Fact Layer）✅ 已实现
 
 **竞品对标**：Claude Code 的 CLAUDE.md 在 compact 后存活。不同的是，SRE 场景需要保活的是"事故事实"而非"代码规则"。
 
@@ -390,12 +395,12 @@ P0 ✅（已完成，290 测试全绿）
   ├── P0-2: 子 agent 支持 MCP 工具（annotations.readOnlyHint）
   └── system prompt 改造
 
-P1（本阶段目标，约 4-6 个工作日）
-  ├── P1-1: 流式日志 tail                     [tail-logs.ts]
-  ├── P1-2: 复盘报告生成                      [generate-postmortem.ts]
-  ├── P1-3: 假设-验证链呈现 *NEW*              [hypothesis-tracker.ts]
-  ├── P1-4: 事故检查点 + 交接简报 *NEW*         [incident-checkpoint.ts]
-  └── P1-5: 事故事实层 compact 保护 *NEW*      [compact/incident-facts.ts]
+P1 ✅ 已完成（355/355 测试通过，M1 达成）
+  ├── P1-1: 流式日志 tail                     [tail-logs.ts] ✅
+  ├── P1-2: 复盘报告生成                      [generate-postmortem.ts] ✅
+  ├── P1-3: 假设-验证链呈现 *NEW*              [hypothesis-tracker.ts] ✅
+  ├── P1-4: 事故检查点 + 交接简报 *NEW*         [incident-checkpoint.ts] ✅
+  └── P1-5: 事故事实层 compact 保护 *NEW*      [compact/incident-facts.ts] ✅
 
 P2（后续，约 2-3 个工作日）
   ├── P2-1: RE2-SS 评测框架                    [eval/]
@@ -442,12 +447,12 @@ P3（后续，锦上添花）
 
 ## 九、验收里程碑
 
-| 里程碑 | 条件 | 预期耗时 |
+| 里程碑 | 条件 | 状态 |
 |---|---|---|
-| **M1 P1 代码完成** | P1-1~P1-5 全部实现 + 测试全绿 | 4-6 个工作日 |
-| **M2 评测框架就绪** | P2-1 可运行 RE2-SS 全量评测，输出 AC@1/AC@3 指标 | 1-2 个工作日 |
-| **M3 场景验证** | Pod CrashLoopBackOff 端到端跑通，含假设链+检查点+复盘报告 | 0.5 个工作日 |
-| **M4 基线评测** | 在 RE2-SS 全量 90 实例上跑出 AC@1/AC@3 基线分数 | 1 个工作日 |
+| **M1 P1 代码完成** | P1-1~P1-5 全部实现 + 测试全绿 | ✅ 达成（355/355 通过） |
+| **M2 评测框架就绪** | P2-1 可运行 RE2-SS 全量评测，输出 AC@1/AC@3 指标 | ⬜ 待开始 |
+| **M3 场景验证** | Pod CrashLoopBackOff 端到端跑通，含假设链+检查点+复盘报告 | ⏳ 部分完成（payment_loss/1 + carts_mem/1 跑通；orders_delay 超时跳过；Pod CrashLoopBackOff 待验证） |
+| **M4 基线评测** | 在 RE2-SS 全量 90 实例上跑出 AC@1/AC@3 基线分数 | ⬜ 待开始 |
 
 ---
 
@@ -469,11 +474,11 @@ P3（后续，锦上添花）
 |---|---|---|
 | 确认/审批 | 6 级权限 + 热切换 | ✅ 权限审批 + SRE 只读白名单 |
 | 只读模式 | Plan/Act 分离 | ⚠️ 设计需增强 |
-| 假设-验证 | 假设树 + 证据链 + 状态分级 | 🔜 P1-3 |
+| 假设-验证 | 假设树 + 证据链 + 状态分级 | ✅ P1-3 已实现 |
 | 会话恢复 | resume/checkpoint/fork | ✅ 已实现 |
-| 上下文管理 | 事故事实 compact 保活 | 🔜 P1-5 |
+| 上下文管理 | 事故事实 compact 保活 | ✅ P1-5 已实现 |
 | 进度语义 | 诊断阶段/置信度 | ⚠️ 需适配 |
-| 交接 | 自动生成事故简报 | 🔜 P1-4 |
+| 交接 | 自动生成事故简报 | ✅ P1-4 已实现 |
 
 ### 10.3 RE2-SS 评测协议
 
