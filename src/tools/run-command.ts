@@ -107,15 +107,23 @@ export function isSreReadOnlyCommand(command: string, args?: string[]): boolean 
   }
 
   if (command === 'curl' || command === 'wget') {
+    // 目标 URL 指向只读检索端点（Elasticsearch 的 _search/_count/_sql 等）时，
+    // POST 是只读查询操作，允许放行（ES 检索惯用 POST /_search）。
+    const url = args?.find(a => /^https?:\/\//.test(a)) ?? ''
+    const isSearchEndpoint =
+      /\/_(search|msearch|count|sql|eql|validate)(\/|\?|$)/.test(url)
+
     // 检查是否含写方法标志（-X POST / --method PUT 等）
     const hasWriteMethod = args?.some((arg, idx) => {
       if (arg === '-X' || arg === '--request') {
         const method = args[idx + 1]?.toUpperCase()
+        if (method === 'POST' && isSearchEndpoint) return false
         return method !== undefined && DANGEROUS_HTTP_METHODS.has(method)
       }
       // -XPOST 紧凑形式
       const compact = arg.match(/^-[Xx](\w+)$/)
       if (compact) {
+        if (compact[1].toUpperCase() === 'POST' && isSearchEndpoint) return false
         return DANGEROUS_HTTP_METHODS.has(compact[1].toUpperCase())
       }
       return false
@@ -325,7 +333,33 @@ function looksLikeShellSnippet(command: string, args?: string[]): boolean {
     return false
   }
 
-  return /[|&;<>()$`]/.test(command)
+  // 引号感知：仅当 shell 操作符出现在引号之外时才视为 shell 片段。
+  // URL 查询串（如 "http://host/path?a=1&b=2"）里的 & 位于引号内，不是 shell 操作符，
+  // 不应把 curl 等简单命令路由到 bash（Windows 上 bash 不可用会直接失败）。
+  let quote: '"' | "'" | null = null
+  let escaping = false
+  for (const char of command) {
+    if (escaping) {
+      escaping = false
+      continue
+    }
+    if (char === '\\') {
+      escaping = true
+      continue
+    }
+    if (quote) {
+      if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (/[|&;<>()$`]/.test(char)) {
+      return true
+    }
+  }
+  return false
 }
 
 function isBackgroundShellSnippet(command: string, args?: string[]): boolean {

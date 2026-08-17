@@ -18,5 +18,8 @@ dist/
 # Auxiliary / generated documentation (kept local, not uploaded)
 aux-docs/
 
+# External test datasets (RE2-SS etc., not part of repo)
+dataset/
+
 # Product showcase page (kept local, not uploaded)
 docs/index.html
