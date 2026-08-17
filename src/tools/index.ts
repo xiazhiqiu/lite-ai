@@ -21,6 +21,7 @@ import { writeFileTool } from './write-file.js'
 import { hypothesisTrackerTool } from './hypothesis-tracker.js'
 import { incidentCheckpointTool } from './incident-checkpoint.js'
 import { tailLogsTool, followLogsTool, stopFollowTool } from './tail-logs.js'
+import { generatePostmortemTool } from './generate-postmortem.js'
 
 export const SUB_AGENT_TOOL_NAMES = [
   'list_files',
@@ -84,6 +85,7 @@ export async function createDefaultToolRegistry(args: {
     { ...tailLogsTool, isParallelSafe: () => true },
     followLogsTool,
     stopFollowTool,
+    generatePostmortemTool,
     ...(isTodosEnabled() ? [rewriteTodoListTool, updateTodoStatusTool] : []),
   ], {
     skills,
