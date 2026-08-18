@@ -3,6 +3,7 @@ import path from 'node:path'
 import { LITE_AI_TODOS_DIR } from '../config.js'
 import { MAX_SUB_AGENTS } from '../agents/types.js'
 import { isEnoentError } from './errors.js'
+import { projectSlug } from './project-slug.js'
 
 export const TODO_STATUSES = [
   'pending',
@@ -31,10 +32,7 @@ export function isTodosEnabled(): boolean {
   return process.env.LITE_AI_TASKS === '1'
 }
 
-/** 由 cwd 派生项目标识（与 session.ts 的 projectDirName 同一规则），保证跨 session 共享同一份 TODO。 */
-export function todoProjectSlug(cwd: string): string {
-  return cwd.replace(/[/\\:]+/g, '-').replace(/^-+/, '')
-}
+export const todoProjectSlug = projectSlug
 
 export function todosFilePath(cwd: string): string {
   return path.join(LITE_AI_TODOS_DIR, `${todoProjectSlug(cwd)}.json`)

@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { LITE_AI_DIR } from '../config.js'
 import { isEnoentError } from './errors.js'
+import { projectSlug } from './project-slug.js'
 
 export const HYPOTHESIS_STATUSES = [
   'pending',
@@ -37,10 +38,7 @@ export type HypothesisList = {
   hypotheses: Hypothesis[]
 }
 
-/** 由 cwd 派生项目标识（与 todo-store 同一规则），保证跨 session 共享同一份假设链。 */
-export function hypothesisProjectSlug(cwd: string): string {
-  return cwd.replace(/[/\\:]+/g, '-').replace(/^-+/, '')
-}
+export const hypothesisProjectSlug = projectSlug
 
 export function hypothesesFilePath(cwd: string): string {
   return path.join(LITE_AI_DIR, 'hypotheses', `${hypothesisProjectSlug(cwd)}.json`)

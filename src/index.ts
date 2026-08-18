@@ -8,7 +8,8 @@ import {
   findMatchingSlashCommands,
   tryHandleLocalCommand,
 } from './cli-commands.js'
-import { loadRuntimeConfig } from './config.js'
+import { loadRuntimeConfig, loadWebhookConfig } from './config.js'
+import { runWebhookServer } from './webhook/index.js'
 import { forkSession } from './session.js'
 import { maybeHandleManagementCommand } from './manage-cli.js'
 import { summarizeMcpServers } from './mcp-status.js'
@@ -61,6 +62,24 @@ async function main(): Promise<void> {
   }
 
   if (await maybeHandleManagementCommand(cwd, argv)) {
+    return
+  }
+
+  // --webhook [port]：进入告警监听独立进程模式。
+  const webhookIndex = argv.indexOf('--webhook')
+  if (webhookIndex !== -1) {
+    argv.splice(webhookIndex, 1)
+    let portOverride: number | undefined
+    const nextArg = argv[webhookIndex]
+    if (nextArg && /^\d+$/.test(nextArg)) {
+      portOverride = Number(nextArg)
+      argv.splice(webhookIndex, 1)
+    }
+    const config = await loadWebhookConfig()
+    if (portOverride !== undefined) {
+      config.port = portOverride
+    }
+    await runWebhookServer({ cwd, config })
     return
   }
 

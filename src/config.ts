@@ -15,7 +15,26 @@ export type LiteAISettings = {
   provider?: ProviderName
   maxOutputTokens?: number
   mcpServers?: Record<string, McpServerConfig>
+  webhook?: Partial<WebhookConfig>
 }
+
+export type WebhookConfig = {
+  /** 监听端口，默认 8787 */
+  port: number
+  /** 监听地址，默认 127.0.0.1 */
+  host: string
+  /** 可选校验 token */
+  secret?: string
+  /** 收到 firing 告警后是否自动诊断，默认 true */
+  autoDiagnose: boolean
+  /** 诊断完成后 POST 摘要到此地址 */
+  notifyUrl?: string
+  /** 通知请求自定义头 */
+  notifyHeaders: Record<string, string>
+}
+
+export const DEFAULT_WEBHOOK_PORT = 8787
+export const DEFAULT_WEBHOOK_HOST = '127.0.0.1'
 
 export type McpServerConfig = {
   command: string
@@ -277,5 +296,79 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     maxOutputTokens,
     mcpServers: effectiveSettings.mcpServers ?? {},
     sourceSummary: `config: ${LITE_AI_SETTINGS_PATH} > ${CLAUDE_SETTINGS_PATH} > process.env (provider=${provider})`,
+  }
+}
+
+/**
+ * 解析 webhook 模式配置，优先级：process.env.LITE_AI_WEBHOOK_* > settings.json > 内置默认。
+ */
+export async function loadWebhookConfig(): Promise<WebhookConfig> {
+  const settings = await loadEffectiveSettings()
+  const fileConfig = settings.webhook ?? {}
+
+  const readNum = (
+    envKey: string,
+    raw: number | undefined,
+    fallback: number,
+  ): number => {
+    const envValue = process.env[envKey]
+    if (envValue !== undefined && envValue !== '') {
+      const n = Number(envValue)
+      if (Number.isFinite(n) && n > 0) return Math.floor(n)
+    }
+    return raw !== undefined && Number.isFinite(raw) && raw > 0 ? raw : fallback
+  }
+
+  const readBool = (
+    envKey: string,
+    raw: boolean | undefined,
+    fallback: boolean,
+  ): boolean => {
+    const envValue = process.env[envKey]
+    if (envValue !== undefined && envValue !== '') {
+      return envValue !== '0' && envValue.toLowerCase() !== 'false'
+    }
+    return raw ?? fallback
+  }
+
+  const readSecret = (): string | undefined => {
+    const envValue = process.env.LITE_AI_WEBHOOK_SECRET
+    if (envValue !== undefined && envValue !== '') return envValue
+    return fileConfig.secret?.trim() || undefined
+  }
+
+  const readNotifyUrl = (): string | undefined => {
+    const envValue = process.env.LITE_AI_WEBHOOK_NOTIFY_URL
+    if (envValue !== undefined && envValue !== '') return envValue
+    return fileConfig.notifyUrl?.trim() || undefined
+  }
+
+  let notifyHeaders: Record<string, string> = {...(fileConfig.notifyHeaders ?? {})}
+  const envHeaders = process.env.LITE_AI_WEBHOOK_NOTIFY_HEADERS
+  if (envHeaders !== undefined && envHeaders !== '') {
+    try {
+      const parsed = JSON.parse(envHeaders) as unknown
+      if (typeof parsed === 'object' && parsed !== null) {
+        notifyHeaders = {
+          ...notifyHeaders,
+          ...Object.fromEntries(
+            Object.entries(parsed as Record<string, never>).map(
+              ([k, v]) => [k, String(v)],
+            ),
+          ),
+        }
+      }
+    } catch {
+      // 忽略非法 JSON 头配置
+    }
+  }
+
+  return {
+    port: readNum('LITE_AI_WEBHOOK_PORT', fileConfig.port, DEFAULT_WEBHOOK_PORT),
+    host: (process.env.LITE_AI_WEBHOOK_HOST?.trim() || fileConfig.host?.trim() || DEFAULT_WEBHOOK_HOST),
+    secret: readSecret(),
+    autoDiagnose: readBool('LITE_AI_WEBHOOK_AUTO_DIAGNOSE', fileConfig.autoDiagnose, true),
+    notifyUrl: readNotifyUrl(),
+    notifyHeaders,
   }
 }
