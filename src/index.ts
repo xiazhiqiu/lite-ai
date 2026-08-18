@@ -2,6 +2,7 @@ import crypto from 'node:crypto'
 import readline from 'node:readline'
 import process from 'node:process'
 import { AnthropicModelAdapter } from './anthropic-adapter.js'
+import { OpenAIModelAdapter } from './openai-adapter.js'
 import {
   completeSlashCommand,
   findMatchingSlashCommands,
@@ -87,10 +88,12 @@ async function main(): Promise<void> {
   const model =
     process.env.LITE_AI_MODEL_MODE === 'mock'
       ? new MockModelAdapter()
-      : new AnthropicModelAdapter(tools, loadRuntimeConfig)
+      : runtime?.provider === 'openai'
+        ? new OpenAIModelAdapter(tools, loadRuntimeConfig)
+        : new AnthropicModelAdapter(tools, loadRuntimeConfig)
   const subAgents = new SubAgentManager({
     model,
-    tools: tools.subset(SUB_AGENT_TOOL_NAMES),
+    tools: tools.subsetForSubAgent(SUB_AGENT_TOOL_NAMES),
     cwd,
   })
   tools.addTools(createSubAgentTools(subAgents))
