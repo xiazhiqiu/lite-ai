@@ -6,8 +6,9 @@ import { resetAutoCompactState } from './auto-compact.js'
 export async function manualCompact(
   messages: ChatMessage[],
   modelAdapter: ModelAdapter,
+  cwd?: string,
 ): Promise<CompressionResult | null> {
-  const result = await compactConversation(messages, modelAdapter)
+  const result = await compactConversation(messages, modelAdapter, cwd)
   if (result) {
     resetAutoCompactState()
   }
