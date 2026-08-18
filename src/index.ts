@@ -2,12 +2,14 @@ import crypto from 'node:crypto'
 import readline from 'node:readline'
 import process from 'node:process'
 import { AnthropicModelAdapter } from './anthropic-adapter.js'
+import { OpenAIModelAdapter } from './openai-adapter.js'
 import {
   completeSlashCommand,
   findMatchingSlashCommands,
   tryHandleLocalCommand,
 } from './cli-commands.js'
-import { loadRuntimeConfig } from './config.js'
+import { loadRuntimeConfig, loadWebhookConfig } from './config.js'
+import { runWebhookServer } from './webhook/index.js'
 import { forkSession } from './session.js'
 import { maybeHandleManagementCommand } from './manage-cli.js'
 import { summarizeMcpServers } from './mcp-status.js'
@@ -63,6 +65,24 @@ async function main(): Promise<void> {
     return
   }
 
+  // --webhook [port]：进入告警监听独立进程模式。
+  const webhookIndex = argv.indexOf('--webhook')
+  if (webhookIndex !== -1) {
+    argv.splice(webhookIndex, 1)
+    let portOverride: number | undefined
+    const nextArg = argv[webhookIndex]
+    if (nextArg && /^\d+$/.test(nextArg)) {
+      portOverride = Number(nextArg)
+      argv.splice(webhookIndex, 1)
+    }
+    const config = await loadWebhookConfig()
+    if (portOverride !== undefined) {
+      config.port = portOverride
+    }
+    await runWebhookServer({ cwd, config })
+    return
+  }
+
   const isInteractiveTerminal = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   let runtime = null
   try {
@@ -87,10 +107,12 @@ async function main(): Promise<void> {
   const model =
     process.env.LITE_AI_MODEL_MODE === 'mock'
       ? new MockModelAdapter()
-      : new AnthropicModelAdapter(tools, loadRuntimeConfig)
+      : runtime?.provider === 'openai'
+        ? new OpenAIModelAdapter(tools, loadRuntimeConfig)
+        : new AnthropicModelAdapter(tools, loadRuntimeConfig)
   const subAgents = new SubAgentManager({
     model,
-    tools: tools.subset(SUB_AGENT_TOOL_NAMES),
+    tools: tools.subsetForSubAgent(SUB_AGENT_TOOL_NAMES),
     cwd,
   })
   tools.addTools(createSubAgentTools(subAgents))

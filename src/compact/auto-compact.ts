@@ -46,6 +46,7 @@ export async function autoCompact(
   messages: ChatMessage[],
   model: string,
   modelAdapter: ModelAdapter,
+  cwd?: string,
 ): Promise<CompressionResult | null> {
   if (state.disabled) {
     return null
@@ -61,7 +62,7 @@ export async function autoCompact(
   }
 
   try {
-    const result = await compactConversation(messages, modelAdapter)
+    const result = await compactConversation(messages, modelAdapter, cwd)
     if (result) {
       state.consecutiveFailures = 0
       return result

@@ -132,6 +132,99 @@ function classifyDangerousCommand(command: string, args: string[]): string | nul
     return `${command} can execute arbitrary local code (${signature})`
   }
 
+  // SRE 写操作识别（kubectl/docker 写子命令、curl 写方法）
+  const sreDanger = classifySreDangerousCommand(command, normalizedArgs, signature)
+  if (sreDanger) return sreDanger
+
+  return null
+}
+
+// kubectl/docker 写操作子命令（需审批）
+const KUBECTL_DANGEROUS_SUBCOMMANDS = new Set([
+  'scale',
+  'delete',
+  'rollout',
+  'exec',
+  'apply',
+  'create',
+  'edit',
+  'patch',
+  'replace',
+  'cordon',
+  'uncordon',
+  'drain',
+  'taint',
+  'annotate',
+  'label',
+  'port-forward',
+  'proxy',
+])
+
+const DOCKER_DANGEROUS_SUBCOMMANDS = new Set([
+  'restart',
+  'rm',
+  'exec',
+  'kill',
+  'stop',
+  'start',
+  'pause',
+  'unpause',
+  'run',
+  'build',
+  'push',
+  'pull',
+  'tag',
+  'load',
+  'save',
+  'import',
+  'commit',
+  'update',
+  'volume',
+  'network',
+])
+
+const CURL_DANGEROUS_METHODS = new Set([
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+])
+
+function classifySreDangerousCommand(
+  command: string,
+  args: string[],
+  signature: string,
+): string | null {
+  if (command === 'kubectl') {
+    const sub = args[0]
+    if (sub !== undefined && KUBECTL_DANGEROUS_SUBCOMMANDS.has(sub)) {
+      return `kubectl ${sub} is a mutating operation on cluster resources (${signature})`
+    }
+  }
+
+  if (command === 'docker') {
+    const sub = args[0]
+    if (sub !== undefined && DOCKER_DANGEROUS_SUBCOMMANDS.has(sub)) {
+      return `docker ${sub} is a mutating operation on containers/images (${signature})`
+    }
+  }
+
+  if (command === 'curl' || command === 'wget') {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]
+      if (arg === '-X' || arg === '--request') {
+        const method = args[i + 1]?.toUpperCase()
+        if (method !== undefined && CURL_DANGEROUS_METHODS.has(method)) {
+          return `${command} -X ${method} is a mutating HTTP request (${signature})`
+        }
+      }
+      const compact = arg.match(/^-[Xx](\w+)$/)
+      if (compact && CURL_DANGEROUS_METHODS.has(compact[1].toUpperCase())) {
+        return `${command} -X ${compact[1].toUpperCase()} is a mutating HTTP request (${signature})`
+      }
+    }
+  }
+
   return null
 }
 

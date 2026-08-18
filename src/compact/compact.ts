@@ -7,6 +7,10 @@ import {
 } from '../utils/token-estimator.js'
 import { RETENTION } from './constants.js'
 import { buildCompactSummaryPrompt, parseSummaryFromResponse } from './prompt.js'
+import {
+  extractIncidentFactSnapshot,
+  formatIncidentFactSnapshot,
+} from './incident-facts.js'
 
 function groupMessagesByApiRound(messages: ChatMessage[]): ChatMessage[][] {
   const groups: ChatMessage[][] = []
@@ -124,6 +128,7 @@ function messagesToText(messages: ChatMessage[]): string {
 export async function compactConversation(
   messages: ChatMessage[],
   modelAdapter: ModelAdapter,
+  cwd?: string,
 ): Promise<CompressionResult | null> {
   if (messages.length <= 2) {
     return null
@@ -170,9 +175,20 @@ export async function compactConversation(
       return null
     }
 
+    // P1-5 事故事实层 compact 保护：压缩前从假设链+检查点提取快照，
+    // 注入到 summary 末尾。假设链为空时 extractIncidentFactSnapshot 返回 null，
+    // 不注入（降级为原 compact 行为）。
+    let enrichedContent = summaryContent
+    if (cwd) {
+      const snapshot = await extractIncidentFactSnapshot(cwd)
+      if (snapshot) {
+        enrichedContent = summaryContent + '\n' + formatIncidentFactSnapshot(snapshot)
+      }
+    }
+
     const summaryMessage: Extract<ChatMessage, { role: 'context_summary' }> = {
       role: 'context_summary',
-      content: summaryContent,
+      content: enrichedContent,
       compressedCount: messagesToCompress.length,
       timestamp: Date.now(),
     }
