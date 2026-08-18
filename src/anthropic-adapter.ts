@@ -10,6 +10,7 @@ import type {
 } from './types.js'
 import type { RuntimeConfig } from './config.js'
 import { resolveMaxOutputTokens } from './utils/context.js'
+import { parseAssistantText } from './utils/text-markers.js'
 import { buildAnthropicSnipBoundaryText } from './compact/snipCompact.js'
 import { abortableDelay, throwIfAborted } from './abort.js'
 
@@ -144,42 +145,6 @@ function isToolUseBlock(block: AnthropicContentBlock): block is Extract<Anthropi
 
 function isThinkingBlock(block: AnthropicContentBlock): block is ProviderThinkingBlock {
   return block.type === 'thinking' || block.type === 'redacted_thinking'
-}
-
-function parseAssistantText(content: string): {
-  content: string
-  kind?: 'final' | 'progress'
-} {
-  const trimmed = content.trim()
-  if (!trimmed) {
-    return { content: '' }
-  }
-
-  const markers: Array<{
-    prefix: string
-    kind: 'final' | 'progress'
-  }> = [
-    { prefix: '<final>', kind: 'final' },
-    { prefix: '[FINAL]', kind: 'final' },
-    { prefix: '<progress>', kind: 'progress' },
-    { prefix: '[PROGRESS]', kind: 'progress' },
-  ]
-
-  for (const marker of markers) {
-    if (trimmed.startsWith(marker.prefix)) {
-      const rawContent = trimmed.slice(marker.prefix.length).trim()
-      const closingTag =
-        marker.kind === 'progress'
-          ? /<\/progress>/gi
-          : /<\/final>/gi
-      return {
-        content: rawContent.replace(closingTag, '').trim(),
-        kind: marker.kind,
-      }
-    }
-  }
-
-  return { content: trimmed }
 }
 
 function toTextBlock(text: string): AnthropicContentBlock {
