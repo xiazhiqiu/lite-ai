@@ -1,6 +1,10 @@
 # LiteAI — SRE 事故诊断助手
 
 <p align="center">
+  <img src="./docs/logo.jpg" alt="LiteAI Logo" width="180" />
+</p>
+
+<p align="center">
   <b>终端原生、MCP 开放、单会话可审计、可 resume/fork 的 SRE 事故诊断 Agent。</b>
 </p>
 
