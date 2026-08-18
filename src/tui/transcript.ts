@@ -1,6 +1,7 @@
 import process from 'node:process'
 import { charDisplayWidth, stringDisplayWidth, wrapPanelBodyLine } from './chrome.js'
 import { renderMarkdownish } from './markdown.js'
+import { isLogTool, renderLogBody } from './logs.js'
 import type { TranscriptEntry } from './types.js'
 
 const RESET = '[0m'
@@ -192,7 +193,7 @@ function renderTranscriptEntry(entry: TranscriptEntry): string {
         ? `${DIM}${entry.collapsedSummary ?? 'output collapsed'}${RESET}`
         : entry.collapsePhase
           ? `${DIM}collapsing${'.'.repeat(entry.collapsePhase)}${RESET}`
-          : previewToolBody(entry.toolName, renderMarkdownish(entry.body))
+          : previewToolBody(entry.toolName, isLogTool(entry.toolName) ? renderLogBody(entry.body) : renderMarkdownish(entry.body))
 
   return `${MAGENTA}${BOLD}tool${RESET} ${entry.toolName} ${status}\n${indentBlock(body)}`
 }
