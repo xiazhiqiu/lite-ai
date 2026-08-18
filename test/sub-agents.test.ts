@@ -88,7 +88,6 @@ describe('SubAgentManager', () => {
     const rootTools = new ToolRegistry([
       ...SUB_AGENT_TOOL_NAMES.map(testTool),
       testTool('write_file'),
-      testTool('run_command'),
       testTool('spawn_agent'),
     ])
     const manager = new SubAgentManager({
@@ -128,7 +127,7 @@ describe('SubAgentManager', () => {
       )
       assert.equal(
         request.options?.tools?.some(tool =>
-          ['write_file', 'run_command', 'spawn_agent'].includes(tool.name)
+          ['write_file', 'spawn_agent'].includes(tool.name)
         ),
         false,
       )
