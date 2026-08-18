@@ -81,7 +81,24 @@ export async function runWebhookServer(
   }
 
   // 返回 true 表示已入队。
-  let handleAlert: ((alert: Alert) => boolean) | undefined
+  const handleAlert = (alert: Alert): boolean => {
+    if (!dedupe.shouldDiagnose(alert.id)) {
+      console.log(`[webhook] 去重跳过 ${alert.title} (${alert.id})，冷却窗口内`)
+      return false
+    }
+    enqueue(async () => {
+      try {
+        const result = await diagnose(alert)
+        console.log(
+          `[webhook] 诊断完成 ${alert.title} (${alert.severity}) → session ${result.sessionId}`,
+        )
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        console.error(`[webhook] 诊断异常 ${alert.title}: ${reason}`)
+      }
+    })
+    return true
+  }
 
   const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST') {
@@ -141,7 +158,7 @@ export async function runWebhookServer(
     let deduplicated = 0
     for (const alert of kept) {
       if (config.autoDiagnose === false) continue
-      if (!handleAlert!(alert)) {
+      if (!handleAlert(alert)) {
         deduplicated += 1
       } else {
         accepted += 1
@@ -150,26 +167,6 @@ export async function runWebhookServer(
 
     reply(res, 202, { accepted, deduplicated, truncated })
   })
-
-  // 在监听后闭包引用 server，注入 handleAlert 供请求使用。
-  handleAlert = (alert: Alert): boolean => {
-    if (!dedupe.shouldDiagnose(alert.id)) {
-      console.log(`[webhook] 去重跳过 ${alert.title} (${alert.id})，冷却窗口内`)
-      return false
-    }
-    enqueue(async () => {
-      try {
-        const result = await diagnose(alert)
-        console.log(
-          `[webhook] 诊断完成 ${alert.title} (${alert.severity}) → session ${result.sessionId}`,
-        )
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        console.error(`[webhook] 诊断异常 ${alert.title}: ${reason}`)
-      }
-    })
-    return true
-  }
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
