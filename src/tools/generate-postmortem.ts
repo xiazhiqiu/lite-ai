@@ -13,6 +13,7 @@ import {
   type Hypothesis,
   readHypotheses,
 } from '../utils/hypothesis-store.js'
+import { indexPostmortem } from '../utils/kb-client.js'
 
 const InputSchema = z.object({
   checkpoint_id: z.string().min(1).optional(),
@@ -249,9 +250,14 @@ export const generatePostmortemTool: ToolDefinition<Input> = {
     await mkdir(path.dirname(filePath), { recursive: true })
     await writeFile(filePath, report, 'utf8')
 
+    // 自动索引到事故知识库（embedding 模型缺失时静默降级，不阻断报告生成）
+    const indexNotice = await indexPostmortem(filePath)
+      .then(r => (r.status === 'indexed' ? `\n已自动索引到事故知识库（${r.chunks} 个片段）。` : ''))
+      .catch(() => '\n（知识库索引跳过：embedding 模型未就绪，可稍后运行 scripts/download-embedding-model.mjs 补齐）')
+
     return {
       ok: true,
-      output: `Postmortem generated for "${cp.name}" (checkpoint ${cp.id}).\n\nSaved to: ${filePath}\n\n---\n\n${report}`,
+      output: `Postmortem generated for "${cp.name}" (checkpoint ${cp.id}).${indexNotice}\n\nSaved to: ${filePath}\n\n---\n\n${report}`,
     }
   },
 }
