@@ -23,3 +23,6 @@ dataset/
 
 # Product showcase page (kept local, not uploaded)
 docs/index.html
+
+# ONNX embedding models (downloaded at runtime by scripts/download-embedding-model.mjs)
+models/
