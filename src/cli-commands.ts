@@ -8,7 +8,6 @@ import {
 } from './config.js'
 import { initializeRepo, renderInitReport } from './init.js'
 import { discoverInstructionFiles, renderMemoryReport } from './memory.js'
-import { listAlertRecords } from './webhook/alert-store.js'
 import type { ToolRegistry } from './tool.js'
 
 export type SlashCommand = {
@@ -153,11 +152,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     usage: '/memory',
     description: 'Show instruction files loaded into the system prompt.',
   },
-  {
-    name: '/alerts',
-    usage: '/alerts',
-    description: 'List recent webhook-diagnosed incidents and their resume commands.',
-  },
 ]
 
 export function formatSlashCommands(): string {
@@ -279,23 +273,6 @@ export async function tryHandleLocalCommand(
     return `current model: ${runtime.model}`
   }
 
-  if (input === '/alerts') {
-    const records = (await listAlertRecords()).filter(r => r.status === 'diagnosed')
-    if (records.length === 0) {
-      return '[webhook] 暂无已诊断的告警会话。'
-    }
-    const lines = [`[webhook] ${records.length} recent diagnoses:`]
-    for (const record of records.slice(0, 10)) {
-      lines.push(`  ${record.severity.padEnd(9)} ${record.title}`)
-      lines.push(`            since ${timeAgo(record.timestamp)}`)
-      if (record.summary) {
-        lines.push(`            summary: ${record.summary}`)
-      }
-      lines.push(`            resume: lite-ai --resume ${record.sessionId}`)
-    }
-    return lines.join('\n')
-  }
-
   if (input.startsWith('/model ')) {
     const model = input.slice('/model '.length).trim()
     if (!model) {
@@ -315,21 +292,4 @@ export function completeSlashCommand(line: string): [string[], string] {
     .filter(command => command.startsWith(line))
 
   return [hits.length > 0 ? hits : SLASH_COMMANDS.map(command => command.usage), line]
-}
-
-/** 相对时间描述，如 "2 min ago"。 */
-function timeAgo(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime()
-  if (!Number.isFinite(ms) || ms < 0) return 'just now'
-  const seconds = Math.floor(ms / 1000)
-  if (seconds < 60) return formatLongTime(seconds, 'second')
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return formatLongTime(minutes, 'minute')
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return formatLongTime(hours, 'hour')
-  return formatLongTime(Math.floor(hours / 24), 'day')
-}
-
-function formatLongTime(value: number, unit: string): string {
-  return `${value} ${unit}${value === 1 ? '' : 's'} ago`
 }

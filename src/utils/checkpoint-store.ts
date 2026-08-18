@@ -2,7 +2,6 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { LITE_AI_DIR } from '../config.js'
 import { isEnoentError } from './errors.js'
-import { projectSlug } from './project-slug.js'
 
 export const SEVERITIES = ['SEV1', 'SEV2', 'SEV3'] as const
 export type Severity = (typeof SEVERITIES)[number]
@@ -27,7 +26,10 @@ export type CheckpointList = {
   checkpoints: IncidentCheckpoint[]
 }
 
-export const checkpointProjectSlug = projectSlug
+/** 由 cwd 派生项目标识（与 todo-store 同一规则），保证跨 session 共享同一份检查点。 */
+export function checkpointProjectSlug(cwd: string): string {
+  return cwd.replace(/[/\\:]+/g, '-').replace(/^-+/, '')
+}
 
 export function checkpointsFilePath(cwd: string): string {
   return path.join(LITE_AI_DIR, 'checkpoints', `${checkpointProjectSlug(cwd)}.json`)
