@@ -21,6 +21,13 @@ type McpToolDescriptor = {
   name: string
   description?: string
   inputSchema?: Record<string, unknown>
+  /** MCP 协议标准的工具注解（hint，非强保证）。readOnlyHint=true 表示 server 声明该工具无副作用。 */
+  annotations?: {
+    readOnlyHint?: boolean
+    destructiveHint?: boolean
+    idempotentHint?: boolean
+    openWorldHint?: boolean
+  }
 }
 
 type McpResourceDescriptor = {
@@ -1063,6 +1070,17 @@ export async function createMcpBackedTools(args: {
           descriptor.name,
         )}`
         const inputSchema = normalizeInputSchema(descriptor.inputSchema)
+        // isReadOnly 判定（业界主流：协议 annotations + 用户配置兜底 + 默认悲观）：
+        //   1. config.readOnlyTools 显式标注 → 只读（用户信任声明，最高优先级）
+        //   2. annotations.readOnlyHint === true 且无矛盾（destructiveHint !== true）→ 只读
+        //   3. 都未命中 → 非只读（fail-closed，不可被子 agent 调用）
+        // 参考：MCP spec 2025-06-18 ToolAnnotations / Qwen Code 的 Kind.Read 映射
+        const readOnlyFromConfig =
+          config.readOnlyTools?.includes(descriptor.name) ?? false
+        const readOnlyFromHint =
+          descriptor.annotations?.readOnlyHint === true &&
+          descriptor.annotations?.destructiveHint !== true
+        const isReadOnly = readOnlyFromConfig || readOnlyFromHint
         tools.push({
           name: wrappedName,
           description:
@@ -1070,6 +1088,7 @@ export async function createMcpBackedTools(args: {
             `Call MCP tool ${descriptor.name} from server ${serverName}.`,
           inputSchema,
           schema: z.unknown(),
+          isReadOnly,
           async run(input) {
             return client.callTool(descriptor.name, input)
           },
