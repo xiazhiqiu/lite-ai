@@ -22,7 +22,7 @@ aux-docs/
 dataset/
 
 # Product showcase page (kept local, not uploaded)
-docs/index.html
+docs/
 
 # ONNX embedding models (downloaded at runtime by scripts/download-embedding-model.mjs)
 models/
