@@ -249,6 +249,7 @@ export async function tryHandleLocalCommand(
   if (input === '/status') {
     const runtime = await loadRuntimeConfig()
     return [
+      `provider: ${runtime.provider}`,
       `model: ${runtime.model}`,
       `baseUrl: ${runtime.baseUrl}`,
       `auth: ${runtime.authToken ? 'ANTHROPIC_AUTH_TOKEN' : 'ANTHROPIC_API_KEY'}`,
