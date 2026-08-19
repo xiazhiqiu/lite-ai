@@ -18,6 +18,7 @@ dist/
 # Auxiliary / generated documentation (kept local, not uploaded)
 aux-docs/
 P1_TASKS.md
+SRE_ASSISTANT_PRD.md
 
 # External test datasets (RE2-SS etc., not part of repo)
 dataset/
