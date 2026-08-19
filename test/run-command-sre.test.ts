@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   isReadOnlyCommandCall,
 } from '../src/tools/run-command.js'
-import { isSreReadOnlyCommand } from '../src/tools/sre-whitelist.js'
+import { isSreReadOnlyCommand, classifySreMutatingCommand } from '../src/tools/sre-whitelist.js'
 
 test('isSreReadOnlyCommand: kubectl 只读子命令放行', () => {
   assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'pods']), true)
@@ -105,4 +105,36 @@ test('isReadOnlyCommandCall: 多段命令含 SRE 只读可并发', () => {
     isReadOnlyCommandCall({ command: 'kubectl get pods && kubectl scale deploy --replicas=3' }),
     false,
   )
+})
+
+test('classifySreMutatingCommand: kubectl 写子命令返回原因', () => {
+  const reason = classifySreMutatingCommand('kubectl', ['delete', 'pod', 'nginx'], 'kubectl delete pod nginx')
+  assert.ok(reason?.includes('kubectl delete is a mutating operation'))
+  assert.equal(
+    classifySreMutatingCommand('kubectl', ['get', 'pods'], 'kubectl get pods'),
+    null,
+  )
+})
+
+test('classifySreMutatingCommand: docker 写子命令返回原因', () => {
+  assert.ok(
+    classifySreMutatingCommand('docker', ['rm', 'c'], 'docker rm c')?.includes(
+      'docker rm is a mutating operation',
+    ),
+  )
+  assert.equal(classifySreMutatingCommand('docker', ['ps'], 'docker ps'), null)
+})
+
+test('classifySreMutatingCommand: curl 写方法返回原因，GET 不返回', () => {
+  assert.ok(
+    classifySreMutatingCommand('curl', ['-X', 'POST', 'http://host/api'], 'curl -X POST http://host/api')?.includes(
+      'curl -X POST is a mutating HTTP request',
+    ),
+  )
+  assert.ok(
+    classifySreMutatingCommand('wget', ['-XPUT', 'http://host/api'], 'wget -XPUT http://host/api')?.includes(
+      'wget -X PUT is a mutating HTTP request',
+    ),
+  )
+  assert.equal(classifySreMutatingCommand('curl', ['http://host/health'], 'curl http://host/health'), null)
 })

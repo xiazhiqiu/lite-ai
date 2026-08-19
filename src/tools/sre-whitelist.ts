@@ -83,3 +83,101 @@ export function isSreReadOnlyCommand(command: string, args?: string[]): boolean 
   // jq / column 纯只读
   return true
 }
+
+// ---- 写操作（mutating）判定 ----
+// 与上面的只读白名单互补：只读判定用于放行/并发，写判定用于触发审批。
+// kubectl/docker 的子命令与 curl/wget 的 HTTP 方法策略集中在此处维护，
+// 作为 kunectl/docker/curl 命令策略的唯一事实来源。
+
+export const SRE_MUTATING_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
+  kubectl: new Set([
+    'scale',
+    'delete',
+    'rollout',
+    'exec',
+    'apply',
+    'create',
+    'edit',
+    'patch',
+    'replace',
+    'cordon',
+    'uncordon',
+    'drain',
+    'taint',
+    'annotate',
+    'label',
+    'port-forward',
+    'proxy',
+  ]),
+  docker: new Set([
+    'restart',
+    'rm',
+    'exec',
+    'kill',
+    'stop',
+    'start',
+    'pause',
+    'unpause',
+    'run',
+    'build',
+    'push',
+    'pull',
+    'tag',
+    'load',
+    'save',
+    'import',
+    'commit',
+    'update',
+    'volume',
+    'network',
+  ]),
+}
+
+export const CURL_DANGEROUS_METHODS = new Set([
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+])
+
+/**
+ * 判定 SRE 命令是否为写操作（kubectl/docker 写子命令、curl/wget 写 HTTP 方法）。
+ * 命中时返回审批原因文案（含 signature），供权限层弹窗展示；否则返回 null。
+ */
+export function classifySreMutatingCommand(
+  command: string,
+  args: string[],
+  signature: string,
+): string | null {
+  if (command === 'kubectl') {
+    const sub = args[0]
+    if (sub !== undefined && SRE_MUTATING_SUBCOMMANDS.kubectl?.has(sub)) {
+      return `kubectl ${sub} is a mutating operation on cluster resources (${signature})`
+    }
+  }
+
+  if (command === 'docker') {
+    const sub = args[0]
+    if (sub !== undefined && SRE_MUTATING_SUBCOMMANDS.docker?.has(sub)) {
+      return `docker ${sub} is a mutating operation on containers/images (${signature})`
+    }
+  }
+
+  if (command === 'curl' || command === 'wget') {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]
+      if (arg === '-X' || arg === '--request') {
+        const method = args[i + 1]?.toUpperCase()
+        if (method !== undefined && CURL_DANGEROUS_METHODS.has(method)) {
+          return `${command} -X ${method} is a mutating HTTP request (${signature})`
+        }
+      }
+      const compact = arg.match(/^-[Xx](\w+)$/)
+      if (compact && CURL_DANGEROUS_METHODS.has(compact[1].toUpperCase())) {
+        return `${command} -X ${compact[1].toUpperCase()} is a mutating HTTP request (${signature})`
+      }
+    }
+  }
+
+  return null
+}
