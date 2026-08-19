@@ -1,5 +1,7 @@
 // 从 ModelScope 下载 all-MiniLM-L6-v2 ONNX 模型文件到本地目录。
 // 用法: node scripts/download-embedding-model.mjs <目标目录>
+// 注意: <目标目录> 是 embedding 模型的"父目录"（含 Xenova/all-MiniLM-L6-v2 层级），
+//       与 LITE_AI_EMBED_MODEL_DIR / kb-embedder 的 localModelRoot 约定一致。
 import { mkdir, writeFile, readFile } from 'node:fs/promises'
 import path from 'node:path'
 
@@ -27,11 +29,14 @@ async function download(url, dest) {
   return buf.length
 }
 
+// 模型文件写入 {outDir}/{model}/...（含 Xenova/all-MiniLM-L6-v2 层级），
+// 与 kb-embedder 的 localModelRoot 约定一致：outDir 是"包含 Xenova/... 的父目录"。
+const modelRoot = path.join(outDir, ...model.split('/'))
 let total = 0
 for (const f of files) {
-  const destDir = path.dirname(path.join(outDir, f))
+  const destDir = path.dirname(path.join(modelRoot, f))
   await mkdir(destDir, { recursive: true })
-  const dest = path.join(outDir, f)
+  const dest = path.join(modelRoot, f)
   const url = `${base}/${f}`
   try {
     const n = await download(url, dest)
