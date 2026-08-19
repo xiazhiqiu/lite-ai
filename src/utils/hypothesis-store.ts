@@ -1,7 +1,13 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { LITE_AI_DIR } from '../config.js'
-import { isEnoentError } from './errors.js'
+import {
+  AbortMutationError,
+  atomicWriteJsonFile,
+  mutateJsonFile,
+  readJsonDegraded,
+} from './json-file.js'
+
+export { AbortMutationError }
 
 export const HYPOTHESIS_STATUSES = [
   'pending',
@@ -61,30 +67,45 @@ export function emptyHypothesisList(cwd: string): HypothesisList {
   }
 }
 
+function isHypothesisListShape(value: unknown): value is HypothesisList {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Array.isArray((value as HypothesisList).hypotheses)
+  )
+}
+
 export async function readHypotheses(cwd: string): Promise<HypothesisList> {
-  try {
-    const raw = await readFile(hypothesesFilePath(cwd), 'utf8')
-    const parsed = JSON.parse(raw) as unknown
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      !Array.isArray((parsed as HypothesisList).hypotheses)
-    ) {
-      return emptyHypothesisList(cwd)
-    }
-    return parsed as HypothesisList
-  } catch (error) {
-    if (isEnoentError(error)) return emptyHypothesisList(cwd)
-    throw error
-  }
+  return readJsonDegraded(
+    hypothesesFilePath(cwd),
+    isHypothesisListShape,
+    () => emptyHypothesisList(cwd),
+  )
 }
 
 export async function saveHypotheses(cwd: string, list: HypothesisList): Promise<void> {
-  await mkdir(path.join(LITE_AI_DIR, 'hypotheses'), { recursive: true })
-  await writeFile(
+  await atomicWriteJsonFile(hypothesesFilePath(cwd), {
+    ...list,
+    updatedAt: new Date().toISOString(),
+  })
+}
+
+/**
+ * 原子"读改写成"：进程内按文件串行 read → mutate → 原子写。
+ * mutate 内 `throw new AbortMutationError()` 可中止且不落盘（保留既有"校验失败 ok:false"语义）。
+ */
+export async function updateHypotheses(
+  cwd: string,
+  mutate: (current: HypothesisList) => void,
+): Promise<HypothesisList> {
+  return mutateJsonFile(
     hypothesesFilePath(cwd),
-    `${JSON.stringify({ ...list, updatedAt: new Date().toISOString() }, null, 2)}\n`,
-    'utf8',
+    isHypothesisListShape,
+    () => emptyHypothesisList(cwd),
+    cur => {
+      mutate(cur)
+      cur.updatedAt = new Date().toISOString()
+    },
   )
 }
 

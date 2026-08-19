@@ -1,8 +1,14 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { LITE_AI_TODOS_DIR } from '../config.js'
 import { MAX_SUB_AGENTS } from '../agents/types.js'
-import { isEnoentError } from './errors.js'
+import {
+  AbortMutationError,
+  atomicWriteJsonFile,
+  mutateJsonFile,
+  readJsonDegraded,
+} from './json-file.js'
+
+export { AbortMutationError }
 
 export const TODO_STATUSES = [
   'pending',
@@ -52,30 +58,45 @@ export function emptyTodoList(cwd: string): TodoList {
   }
 }
 
+function isTodoListShape(value: unknown): value is TodoList {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Array.isArray((value as TodoList).todos)
+  )
+}
+
 export async function readTodos(cwd: string): Promise<TodoList> {
-  try {
-    const raw = await readFile(todosFilePath(cwd), 'utf8')
-    const parsed = JSON.parse(raw) as unknown
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      !Array.isArray((parsed as TodoList).todos)
-    ) {
-      return emptyTodoList(cwd)
-    }
-    return parsed as TodoList
-  } catch (error) {
-    if (isEnoentError(error)) return emptyTodoList(cwd)
-    throw error
-  }
+  return readJsonDegraded(
+    todosFilePath(cwd),
+    isTodoListShape,
+    () => emptyTodoList(cwd),
+  )
 }
 
 export async function saveTodos(cwd: string, list: TodoList): Promise<void> {
-  await mkdir(LITE_AI_TODOS_DIR, { recursive: true })
-  await writeFile(
+  await atomicWriteJsonFile(todosFilePath(cwd), {
+    ...list,
+    updatedAt: new Date().toISOString(),
+  })
+}
+
+/**
+ * 原子"读改写成"：进程内按文件串行 read → mutate → 原子写。
+ * mutate 内 `throw new AbortMutationError()` 可中止且不落盘。
+ */
+export async function updateTodos(
+  cwd: string,
+  mutate: (current: TodoList) => void,
+): Promise<TodoList> {
+  return mutateJsonFile(
     todosFilePath(cwd),
-    `${JSON.stringify({ ...list, updatedAt: new Date().toISOString() }, null, 2)}\n`,
-    'utf8',
+    isTodoListShape,
+    () => emptyTodoList(cwd),
+    cur => {
+      mutate(cur)
+      cur.updatedAt = new Date().toISOString()
+    },
   )
 }
 

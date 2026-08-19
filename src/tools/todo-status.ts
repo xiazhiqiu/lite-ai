@@ -1,12 +1,12 @@
 import { z } from 'zod'
 import type { ToolDefinition } from '../tool.js'
 import {
+  AbortMutationError,
   type TodoItem,
   type TodoList,
   TODO_STATUSES,
   isTodoStatus,
-  readTodos,
-  saveTodos,
+  updateTodos,
   validateTodoList,
 } from '../utils/todo-store.js'
 import { formatTodoList } from './todo-write.js'
@@ -66,16 +66,22 @@ export const updateTodoStatusTool: ToolDefinition<Input> = {
     ),
   }),
   async run(input, context) {
-    const list = await readTodos(context.cwd)
-    const error = applyStatusUpdates(list, input.updates)
-    if (error) {
-      return { ok: false, output: error }
+    let failure: string | null = null
+    const list = await updateTodos(context.cwd, cur => {
+      const error = applyStatusUpdates(cur, input.updates)
+      if (error) {
+        failure = error
+        throw new AbortMutationError()
+      }
+      const validationError = validateTodoList(cur)
+      if (validationError) {
+        failure = validationError
+        throw new AbortMutationError()
+      }
+    })
+    if (failure) {
+      return { ok: false, output: failure }
     }
-    const validationError = validateTodoList(list)
-    if (validationError) {
-      return { ok: false, output: validationError }
-    }
-    await saveTodos(context.cwd, list)
     return {
       ok: true,
       output: `TODO statuses updated (${input.updates.length}). Current plan:\n${formatTodoList(list.todos)}`,

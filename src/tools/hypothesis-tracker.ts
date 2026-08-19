@@ -1,12 +1,13 @@
 import { z } from 'zod'
 import type { ToolDefinition } from '../tool.js'
 import {
+  AbortMutationError,
   type Evidence,
   type Hypothesis,
   HYPOTHESIS_STATUSES,
   isHypothesisStatus,
   readHypotheses,
-  saveHypotheses,
+  updateHypotheses,
   validateHypothesisList,
   summarizeHypotheses,
 } from '../utils/hypothesis-store.js'
@@ -147,31 +148,31 @@ export const hypothesisTrackerTool: ToolDefinition<Input> = {
   schema: InputSchema,
 
   async run(input, context) {
-    const list = await readHypotheses(context.cwd)
-
     switch (input.action) {
       case 'add_hypothesis': {
-        const existing = list.hypotheses.find(h => h.id === input.id)
-        if (existing) {
-          return {
-            ok: false,
-            output: `Hypothesis id "${input.id}" already exists. Use update_status to modify it.`,
+        let failure: string | null = null
+        const list = await updateHypotheses(context.cwd, cur => {
+          if (cur.hypotheses.find(h => h.id === input.id)) {
+            failure = `Hypothesis id "${input.id}" already exists. Use update_status to modify it.`
+            throw new AbortMutationError()
           }
+          cur.hypotheses.push({
+            id: input.id,
+            description: input.description,
+            priority: input.priority,
+            status: 'pending',
+            created_at: Date.now(),
+            evidence: [],
+          })
+          const error = validateHypothesisList(cur)
+          if (error) {
+            failure = error
+            throw new AbortMutationError()
+          }
+        })
+        if (failure) {
+          return { ok: false, output: failure }
         }
-        const newHypothesis: Hypothesis = {
-          id: input.id,
-          description: input.description,
-          priority: input.priority,
-          status: 'pending',
-          created_at: Date.now(),
-          evidence: [],
-        }
-        list.hypotheses.push(newHypothesis)
-        const error = validateHypothesisList(list)
-        if (error) {
-          return { ok: false, output: error }
-        }
-        await saveHypotheses(context.cwd, list)
         return {
           ok: true,
           output: formatSummary(
@@ -182,17 +183,25 @@ export const hypothesisTrackerTool: ToolDefinition<Input> = {
       }
 
       case 'add_evidence': {
-        const hypothesis = list.hypotheses.find(
-          h => h.id === input.hypothesis_id,
-        )
-        if (!hypothesis) {
-          return {
-            ok: false,
-            output: `Unknown hypothesis id "${input.hypothesis_id}". Registered hypotheses:\n${list.hypotheses.map(h => `  - ${h.id}: ${h.description} [${h.status}]`).join('\n')}`,
+        let failure: string | null = null
+        const list = await updateHypotheses(context.cwd, cur => {
+          const hypothesis = cur.hypotheses.find(
+            h => h.id === input.hypothesis_id,
+          )
+          if (!hypothesis) {
+            failure = `Unknown hypothesis id "${input.hypothesis_id}". Registered hypotheses:\n${cur.hypotheses.map(h => `  - ${h.id}: ${h.description} [${h.status}]`).join('\n')}`
+            throw new AbortMutationError()
           }
+          hypothesis.evidence.push(input.evidence)
+          const error = validateHypothesisList(cur)
+          if (error) {
+            failure = error
+            throw new AbortMutationError()
+          }
+        })
+        if (failure) {
+          return { ok: false, output: failure }
         }
-        hypothesis.evidence.push(input.evidence)
-        await saveHypotheses(context.cwd, list)
         return {
           ok: true,
           output: formatSummary(
@@ -203,20 +212,28 @@ export const hypothesisTrackerTool: ToolDefinition<Input> = {
       }
 
       case 'update_status': {
-        const hypothesis = list.hypotheses.find(
-          h => h.id === input.hypothesis_id,
-        )
-        if (!hypothesis) {
-          return {
-            ok: false,
-            output: `Unknown hypothesis id "${input.hypothesis_id}". Registered hypotheses:\n${list.hypotheses.map(h => `  - ${h.id}: ${h.description} [${h.status}]`).join('\n')}`,
+        let failure: string | null = null
+        const list = await updateHypotheses(context.cwd, cur => {
+          const hypothesis = cur.hypotheses.find(
+            h => h.id === input.hypothesis_id,
+          )
+          if (!hypothesis) {
+            failure = `Unknown hypothesis id "${input.hypothesis_id}". Registered hypotheses:\n${cur.hypotheses.map(h => `  - ${h.id}: ${h.description} [${h.status}]`).join('\n')}`
+            throw new AbortMutationError()
           }
+          hypothesis.status = input.status
+          if (input.conclusion !== undefined) {
+            hypothesis.conclusion = input.conclusion
+          }
+          const error = validateHypothesisList(cur)
+          if (error) {
+            failure = error
+            throw new AbortMutationError()
+          }
+        })
+        if (failure) {
+          return { ok: false, output: failure }
         }
-        hypothesis.status = input.status
-        if (input.conclusion !== undefined) {
-          hypothesis.conclusion = input.conclusion
-        }
-        await saveHypotheses(context.cwd, list)
         return {
           ok: true,
           output: formatSummary(
@@ -227,6 +244,7 @@ export const hypothesisTrackerTool: ToolDefinition<Input> = {
       }
 
       case 'get_summary': {
+        const list = await readHypotheses(context.cwd)
         return {
           ok: true,
           output: formatSummary(

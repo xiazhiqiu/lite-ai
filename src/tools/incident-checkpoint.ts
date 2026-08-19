@@ -1,13 +1,14 @@
 import { z } from 'zod'
 import type { ToolDefinition } from '../tool.js'
 import {
+  AbortMutationError,
   type IncidentCheckpoint,
   SEVERITIES,
   checkpointsFilePath,
   emptyCheckpointList,
   enforceCheckpointLimit,
   readCheckpoints,
-  saveCheckpoints,
+  updateCheckpoints,
   validateCheckpointList,
 } from '../utils/checkpoint-store.js'
 import { readHypotheses } from '../utils/hypothesis-store.js'
@@ -135,8 +136,6 @@ export const incidentCheckpointTool: ToolDefinition<Input> = {
   schema: InputSchema,
 
   async run(input, context) {
-    const list = await readCheckpoints(context.cwd)
-
     switch (input.action) {
       case 'create': {
         const cp: IncidentCheckpoint = {
@@ -149,24 +148,32 @@ export const incidentCheckpointTool: ToolDefinition<Input> = {
           key_commands: [],
           active: false,
         }
-        list.checkpoints.push(cp)
-        const error = validateCheckpointList(list)
-        if (error) {
-          return { ok: false, output: error }
+        let failure: string | null = null
+        let notice: string | null = null
+        const list = await updateCheckpoints(context.cwd, cur => {
+          cur.checkpoints.push(cp)
+          const error = validateCheckpointList(cur)
+          if (error) {
+            failure = error
+            throw new AbortMutationError()
+          }
+          notice = enforceCheckpointLimit(cur)
+        })
+        if (failure) {
+          return { ok: false, output: failure }
         }
-        const limitNotice = enforceCheckpointLimit(list)
-        await saveCheckpoints(context.cwd, list)
         const lines = [
           `Checkpoint created: ${cp.id} (${cp.name}, ${cp.severity})`,
           '',
           'Current checkpoints:',
           ...list.checkpoints.map(formatCheckpoint),
         ]
-        if (limitNotice) lines.push('', limitNotice)
+        if (notice) lines.push('', notice)
         return { ok: true, output: lines.join('\n') }
       }
 
       case 'list': {
+        const list = await readCheckpoints(context.cwd)
         if (list.checkpoints.length === 0) {
           return { ok: true, output: 'No checkpoints yet. Use create to save one.' }
         }
@@ -183,17 +190,21 @@ export const incidentCheckpointTool: ToolDefinition<Input> = {
       }
 
       case 'switch_to': {
-        const cp = list.checkpoints.find(c => c.id === input.checkpoint_id)
-        if (!cp) {
-          return {
-            ok: false,
-            output: `Unknown checkpoint id "${input.checkpoint_id}". Known:\n${list.checkpoints.map(formatCheckpoint).join('\n')}`,
+        let failure: string | null = null
+        const list = await updateCheckpoints(context.cwd, cur => {
+          const cp = cur.checkpoints.find(c => c.id === input.checkpoint_id)
+          if (!cp) {
+            failure = `Unknown checkpoint id "${input.checkpoint_id}". Known:\n${cur.checkpoints.map(formatCheckpoint).join('\n')}`
+            throw new AbortMutationError()
           }
+          for (const c of cur.checkpoints) {
+            c.active = c.id === cp.id
+          }
+        })
+        if (failure) {
+          return { ok: false, output: failure }
         }
-        for (const c of list.checkpoints) {
-          c.active = c.id === cp.id
-        }
-        await saveCheckpoints(context.cwd, list)
+        const cp = list.checkpoints.find(c => c.id === input.checkpoint_id)!
         return {
           ok: true,
           output: `Now active: ${cp.id} (${cp.name}, ${cp.severity}) "${cp.incident_title}"`,
@@ -201,6 +212,7 @@ export const incidentCheckpointTool: ToolDefinition<Input> = {
       }
 
       case 'generate_handover': {
+        const list = await readCheckpoints(context.cwd)
         const cp = input.checkpoint_id
           ? list.checkpoints.find(c => c.id === input.checkpoint_id)
           : list.checkpoints.find(c => c.active) ?? list.checkpoints[list.checkpoints.length - 1]

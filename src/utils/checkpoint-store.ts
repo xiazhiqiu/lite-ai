@@ -1,7 +1,13 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { LITE_AI_DIR } from '../config.js'
-import { isEnoentError } from './errors.js'
+import {
+  AbortMutationError,
+  atomicWriteJsonFile,
+  mutateJsonFile,
+  readJsonDegraded,
+} from './json-file.js'
+
+export { AbortMutationError }
 
 export const SEVERITIES = ['SEV1', 'SEV2', 'SEV3'] as const
 export type Severity = (typeof SEVERITIES)[number]
@@ -45,30 +51,45 @@ export function emptyCheckpointList(cwd: string): CheckpointList {
   }
 }
 
+function isCheckpointListShape(value: unknown): value is CheckpointList {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    Array.isArray((value as CheckpointList).checkpoints)
+  )
+}
+
 export async function readCheckpoints(cwd: string): Promise<CheckpointList> {
-  try {
-    const raw = await readFile(checkpointsFilePath(cwd), 'utf8')
-    const parsed = JSON.parse(raw) as unknown
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      !Array.isArray((parsed as CheckpointList).checkpoints)
-    ) {
-      return emptyCheckpointList(cwd)
-    }
-    return parsed as CheckpointList
-  } catch (error) {
-    if (isEnoentError(error)) return emptyCheckpointList(cwd)
-    throw error
-  }
+  return readJsonDegraded(
+    checkpointsFilePath(cwd),
+    isCheckpointListShape,
+    () => emptyCheckpointList(cwd),
+  )
 }
 
 export async function saveCheckpoints(cwd: string, list: CheckpointList): Promise<void> {
-  await mkdir(path.join(LITE_AI_DIR, 'checkpoints'), { recursive: true })
-  await writeFile(
+  await atomicWriteJsonFile(checkpointsFilePath(cwd), {
+    ...list,
+    updatedAt: new Date().toISOString(),
+  })
+}
+
+/**
+ * 原子"读改写成"：进程内按文件串行 read → mutate → 原子写。
+ * mutate 内 `throw new AbortMutationError()` 可中止且不落盘。
+ */
+export async function updateCheckpoints(
+  cwd: string,
+  mutate: (current: CheckpointList) => void,
+): Promise<CheckpointList> {
+  return mutateJsonFile(
     checkpointsFilePath(cwd),
-    `${JSON.stringify({ ...list, updatedAt: new Date().toISOString() }, null, 2)}\n`,
-    'utf8',
+    isCheckpointListShape,
+    () => emptyCheckpointList(cwd),
+    cur => {
+      mutate(cur)
+      cur.updatedAt = new Date().toISOString()
+    },
   )
 }
 
