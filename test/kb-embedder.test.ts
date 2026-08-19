@@ -76,6 +76,23 @@ test('checkEmbeddingAvailability: API 模式视为就绪；本地模型缺失时
   await rm(root, { recursive: true, force: true })
 })
 
+test('embeddingDimension: 默认 384，可由 LITE_AI_EMBED_DIMENSION 覆盖，非法值抛错', async () => {
+  const { embeddingDimension } = await import('../src/config.js')
+  const prev = process.env.LITE_AI_EMBED_DIMENSION
+
+  delete process.env.LITE_AI_EMBED_DIMENSION
+  assert.equal(embeddingDimension(), 384)
+
+  process.env.LITE_AI_EMBED_DIMENSION = '768'
+  assert.equal(embeddingDimension(), 768)
+
+  process.env.LITE_AI_EMBED_DIMENSION = 'abc'
+  assert.throws(() => embeddingDimension(), /positive integer/)
+
+  if (prev === undefined) delete process.env.LITE_AI_EMBED_DIMENSION
+  else process.env.LITE_AI_EMBED_DIMENSION = prev
+})
+
 // 恢复环境
 process.on('exit', () => {
   for (const [k, v] of Object.entries(ORIG)) {

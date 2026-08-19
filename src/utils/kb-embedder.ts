@@ -1,9 +1,7 @@
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { pipeline, env, type FeatureExtractionPipeline } from '@huggingface/transformers'
-
-/** 知识库向量库固定维度。更换 embedding 模型时需保持一致（否则需重建知识库）。 */
-export const EMBEDDING_DIMENSION = 384
+import { embeddingDimension } from '../config.js'
 
 export type EmbedderMode = 'api' | 'local'
 
@@ -72,14 +70,15 @@ export function checkEmbeddingAvailability(): EmbeddingAvailability {
 }
 
 /**
- * 维度校验：sqlite-vec 向量表维度固定。
- * 不同维度会导致 KNN 检索/写入失败，这里给出明确报错而非底层异常。
+ * 维度校验：写入/检索前确认向量维度与向量库一致。
+ * 维度通过 LITE_AI_EMBED_DIMENSION 配置，默认 384，不一致时给出明确报错。
  */
-function assertDimension(vec: Float32Array): never | Float32Array {
-  if (vec.length === EMBEDDING_DIMENSION) return vec
+function assertDimension(vec: Float32Array): Float32Array {
+  const dim = embeddingDimension()
+  if (vec.length === dim) return vec
   throw new Error(
-    `Embedding dimension ${vec.length} does not match knowledge base dimension ${EMBEDDING_DIMENSION}. ` +
-      'Use a model consistent with the KB, or clear and rebuild the KB.',
+    `Embedding dimension ${vec.length} does not match knowledge base dimension ${dim}. ` +
+      `Set LITE_AI_EMBED_DIMENSION=${vec.length} to use this model.`,
   )
 }
 

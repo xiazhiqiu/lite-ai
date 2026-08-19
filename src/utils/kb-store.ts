@@ -2,9 +2,7 @@ import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import Database from 'better-sqlite3'
 import * as sqliteVec from 'sqlite-vec'
-import { LITE_AI_DIR } from '../config.js'
-
-export const VECTOR_DIMENSION = 384
+import { LITE_AI_DIR, embeddingDimension } from '../config.js'
 
 export type KbChunkInput = {
   embedding: Float32Array
@@ -47,9 +45,10 @@ function getDb(): Database.Database {
   mkdirSync(path.dirname(dbPath), { recursive: true })
   const db = new Database(dbPath)
   sqliteVec.load(db)
+  const dim = embeddingDimension()
   db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS incident_vectors USING vec0(
-      embedding float[${VECTOR_DIMENSION}]
+      embedding float[${dim}]
     );
     CREATE TABLE IF NOT EXISTS incident_chunks (
       id INTEGER PRIMARY KEY,
@@ -64,8 +63,27 @@ function getDb(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_chunks_file ON incident_chunks(file_path, file_mtime);
   `)
+  assertTableDimension(db, dim)
   dbInstance = db
   return db
+}
+
+/**
+ * 校验既有向量表维度是否与当前配置一致。
+ * vec0 虚拟表建表即锁死维度，若旧库维度与 LITE_AI_EMBED_DIMENSION 不符，
+ * 直接读写会产生维度错乱/底层报错，这里给出明确指引。
+ */
+function assertTableDimension(db: Database.Database, dim: number): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='incident_vectors'")
+    .get() as { sql?: string } | undefined
+  const match = row?.sql?.match(/float\s*\[\s*(\d+)\s*\]/)
+  if (match && Number(match[1]) !== dim) {
+    throw new Error(
+      `Knowledge base vector dimension ${match[1]} does not match LITE_AI_EMBED_DIMENSION=${dim}. ` +
+        `Set the env var to ${match[1]}, or rebuild the KB by deleting ${kbDbPath()} and re-indexing.`,
+    )
+  }
 }
 
 /**

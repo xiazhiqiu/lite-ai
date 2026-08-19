@@ -3,6 +3,25 @@ import os from 'node:os'
 import path from 'node:path'
 import { isEnoentError } from './utils/errors.js'
 
+export const DEFAULT_EMBEDDING_DIMENSION = 384
+
+/**
+ * 向量库（sqlite-vec 虚拟表）的 embedding 维度。
+ * 默认 384，用户自备维度不同的模型时可用 LITE_AI_EMBED_DIMENSION 覆盖。
+ * 向量库在首次建表时维度即锁定，改动维度需重建知识库表。
+ */
+export function embeddingDimension(): number {
+  const raw = process.env.LITE_AI_EMBED_DIMENSION
+  if (raw === undefined || raw.trim() === '') return DEFAULT_EMBEDDING_DIMENSION
+  const n = Number(raw.trim())
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(
+      `Invalid LITE_AI_EMBED_DIMENSION "${raw}". Must be a positive integer (e.g. 384, 768, 1536).`,
+    )
+  }
+  return n
+}
+
 export type ProviderName = 'anthropic' | 'openai'
 
 export function resolveProviderName(raw: unknown): ProviderName {
