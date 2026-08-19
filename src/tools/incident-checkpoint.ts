@@ -12,6 +12,8 @@ import {
   validateCheckpointList,
 } from '../utils/checkpoint-store.js'
 import { readHypotheses } from '../utils/hypothesis-store.js'
+import { existsSync } from 'node:fs'
+import { postmortemFilePath } from './generate-postmortem.js'
 
 const ACTIONS = [
   'create',
@@ -80,6 +82,10 @@ async function buildHandover(cwd: string, cp: IncidentCheckpoint): Promise<strin
     .map((cmd, i) => `| ${i + 1} | \`${cmd}\` |`)
     .join('\n')
 
+  const pmPath = postmortemFilePath(cwd, cp.id)
+  const pmSection = `## 事件复盘
+${existsSync(pmPath) ? `已生成：${pmPath}` : `未生成（可用 generate_postmortem 生成，路径预计：${pmPath}）`}`
+
   const sections = [
     `## 事故简报：${cp.incident_title}`,
     '',
@@ -99,6 +105,8 @@ async function buildHandover(cwd: string, cp: IncidentCheckpoint): Promise<strin
     '',
     '### 待验证的假设',
     facts.pending.length > 0 ? facts.pending.join('\n') : '(无)',
+    '',
+    pmSection,
     '',
     '### 推荐的下一步',
     '（需值班人员或 agent 基于上述状态继续排查）',
