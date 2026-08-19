@@ -46,7 +46,7 @@ function formatResults(query: string, results: Awaited<ReturnType<typeof searchI
 export const searchIncidentKbTool: ToolDefinition<Input> = {
   name: 'search_incident_kb',
   description:
-    'Search the incident knowledge base for semantically similar historical incidents using local embeddings. Before starting a diagnosis, call this with the incident symptoms / service name / fault type to find past postmortems that may share the same root cause. Returns the most similar report sections with a similarity score; use read_file on the returned file path to inspect the full report. Requires a pre-downloaded local embedding model (see scripts/download-embedding-model.mjs).',
+    'Search the incident knowledge base for semantically similar historical incidents using embeddings. Before starting a diagnosis, call this with the incident symptoms / service name / fault type to find past postmortems that may share the same root cause. Returns the most similar report sections with a similarity score; use read_file on the returned file path to inspect the full report. Embedding source is user-configurable: set LITE_AI_EMBED_API_URL for a remote embedding API, or use a local model via LITE_AI_EMBED_MODEL_ID / LITE_AI_EMBED_MODEL_DIR (see scripts/download-embedding-model.mjs).',
 
   inputSchema: {
     type: 'object',
@@ -73,11 +73,12 @@ export const searchIncidentKbTool: ToolDefinition<Input> = {
       return {
         ok: false,
         output:
-          '事故知识库不可用：本地 embedding 模型缺失。请先下载模型后重试：\n' +
-          '  1. 下载模型到项目默认目录 models/embedding：\n' +
-          '     node scripts/download-embedding-model.mjs models/embedding\n' +
-          '     （如需其他位置，可设置环境变量 LITE_AI_EMBED_MODEL_DIR 指向模型父目录）\n' +
-          '  2. 完成后重新调用本工具即可检索相似历史事故。\n' +
+          '事故知识库不可用：未找到可用的 embedding 模型，请任选一种方式配置后重试：\n' +
+          '  方式1（自备在线 API）：设置环境变量 LITE_AI_EMBED_API_URL 指向你自有的 OpenAI 兼容 embeddings 端点，\n' +
+          '        可选 LITE_AI_EMBED_API_KEY、LITE_AI_EMBED_MODEL。\n' +
+          '  方式2（本地模型）：设置 LITE_AI_EMBED_MODEL_ID（模型名）与 LITE_AI_EMBED_MODEL_DIR（模型根目录），\n' +
+          '        或运行 `node scripts/download-embedding-model.mjs <根目录>` 下载默认模型。\n' +
+          '  配置完成后重新调用本工具即可检索相似历史事故。\n' +
           `原始错误：${available.modelError ?? '未知错误'}`,
       }
     }
