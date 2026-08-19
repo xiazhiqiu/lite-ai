@@ -73,7 +73,12 @@ export const searchIncidentKbTool: ToolDefinition<Input> = {
       return {
         ok: false,
         output:
-          `事故知识库不可用：${available.modelError ?? '未知错误'}`,
+          '事故知识库不可用：本地 embedding 模型缺失。请先下载模型后重试：\n' +
+          '  1. 下载模型到项目默认目录 models/embedding：\n' +
+          '     node scripts/download-embedding-model.mjs models/embedding\n' +
+          '     （如需其他位置，可设置环境变量 LITE_AI_EMBED_MODEL_DIR 指向模型父目录）\n' +
+          '  2. 完成后重新调用本工具即可检索相似历史事故。\n' +
+          `原始错误：${available.modelError ?? '未知错误'}`,
       }
     }
 
