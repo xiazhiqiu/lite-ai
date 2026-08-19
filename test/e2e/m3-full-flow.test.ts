@@ -19,7 +19,7 @@ import { mkdtemp, rm, mkdir, writeFile, readFile, stat } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { startMockSources, cleanupKubeconfigDir } from './mock/harness.js'
+import { startMockSources, cleanupKubeconfigDir } from '../../src/eval/mock/harness.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const datasetRoot = path.resolve(__dirname, '..', '..', 'dataset', 'RE2-SS')

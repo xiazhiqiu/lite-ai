@@ -234,9 +234,11 @@ export function createElasticsearchServer(
           // 将 LogEntry 展开为文档（含 container_name 等字段）再过滤
           const docs = entries.map(e => ({ doc: toDoc(e), original: e }))
           let matched = docs.filter(d => filter(d.doc))
-          matched = [...matched].sort((a, b) =>
-            sortDesc ? b.doc.timestamp - a.doc.timestamp : a.doc.timestamp - b.doc.timestamp,
-          )
+          matched = [...matched].sort((a, b) => {
+            const tsA = Number(a.doc.timestamp)
+            const tsB = Number(b.doc.timestamp)
+            return sortDesc ? tsB - tsA : tsA - tsB
+          })
           const page = matched.slice(from, from + size)
 
           res.writeHead(200)

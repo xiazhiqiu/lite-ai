@@ -2,8 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   isReadOnlyCommandCall,
-  isSreReadOnlyCommand,
 } from '../src/tools/run-command.js'
+import { isSreReadOnlyCommand } from '../src/tools/sre-whitelist.js'
 
 test('isSreReadOnlyCommand: kubectl 只读子命令放行', () => {
   assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'pods']), true)

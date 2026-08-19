@@ -36,6 +36,20 @@ export type WebhookConfig = {
 export const DEFAULT_WEBHOOK_PORT = 8787
 export const DEFAULT_WEBHOOK_HOST = '127.0.0.1'
 
+/** 读取 webhook 配置，与 settings.json 中的 webhook 覆盖项合并默认值。 */
+export async function loadWebhookConfig(): Promise<WebhookConfig> {
+  const effectiveSettings = await loadEffectiveSettings()
+  const webhook = effectiveSettings.webhook ?? {}
+  return {
+    port: webhook.port ?? DEFAULT_WEBHOOK_PORT,
+    host: webhook.host ?? DEFAULT_WEBHOOK_HOST,
+    secret: webhook.secret,
+    autoDiagnose: webhook.autoDiagnose ?? true,
+    notifyUrl: webhook.notifyUrl,
+    notifyHeaders: webhook.notifyHeaders ?? {},
+  }
+}
+
 export type McpServerConfig = {
   command: string
   args?: string[]
