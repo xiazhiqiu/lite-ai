@@ -11,7 +11,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch
 })
 
-function runtime(): RuntimeConfig {
+function runtime(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
     provider: 'openai',
     model: 'test-model',
@@ -19,11 +19,12 @@ function runtime(): RuntimeConfig {
     apiKey: 'test-key',
     mcpServers: {},
     sourceSummary: 'test',
+    ...overrides,
   }
 }
 
-function adapter(): OpenAIModelAdapter {
-  return new OpenAIModelAdapter(new ToolRegistry([]), async () => runtime())
+function adapter(overrides: Partial<RuntimeConfig> = {}): OpenAIModelAdapter {
+  return new OpenAIModelAdapter(new ToolRegistry([]), async () => runtime(overrides))
 }
 
 function captureFetch(): { url: string; headers: Record<string, string>; body: unknown } {
@@ -195,5 +196,104 @@ describe('OpenAI model adapter', () => {
 
     await assert.rejects(request, /fetch aborted/)
     assert.equal(fetchSignal, controller.signal)
+  })
+
+  it('普通模型默认不回传 reasoning_content', async () => {
+    const captured = captureFetch()
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'go' },
+      { role: 'assistant_thinking', blocks: [{ type: 'thinking', text: 'inner' }] },
+      { role: 'assistant', content: '<final>answer' },
+    ]
+
+    await adapter().next(messages)
+
+    const body = captured.body as { messages: Array<Record<string, unknown>> }
+    const assistant = body.messages.find(
+      m => m.role === 'assistant' && !Array.isArray(m.tool_calls),
+    )
+    assert.equal(assistant?.reasoning_content, undefined)
+  })
+
+  it('thinking 模型自动把 reasoning_content 回传', async () => {
+    const captured = captureFetch()
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'go' },
+      { role: 'assistant_thinking', blocks: [{ type: 'thinking', text: 'inner reasoning' }] },
+      { role: 'assistant', content: '<final>answer' },
+    ]
+
+    await adapter({ model: 'deepseek-reasoner' }).next(messages)
+
+    const body = captured.body as { messages: Array<Record<string, unknown>> }
+    const assistant = body.messages.find(
+      m => m.role === 'assistant' && !Array.isArray(m.tool_calls),
+    )
+    assert.equal(assistant?.content, '<final>answer')
+    assert.equal(assistant?.reasoning_content, 'inner reasoning')
+  })
+
+  it('tool_calls 轮也把 reasoning_content 回传', async () => {
+    const captured = captureFetch()
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'go' },
+      { role: 'assistant_thinking', blocks: [{ type: 'thinking', text: 'deciding' }] },
+      {
+        role: 'assistant_tool_call',
+        toolUseId: 'call-1',
+        toolName: 'read_file',
+        input: { path: 'a' },
+      },
+      {
+        role: 'tool_result',
+        toolUseId: 'call-1',
+        toolName: 'read_file',
+        content: 'x',
+        isError: false,
+      },
+    ]
+
+    await adapter({ model: 'deepseek-reasoner' }).next(messages)
+
+    const body = captured.body as { messages: Array<Record<string, unknown>> }
+    const assistant = body.messages.find(
+      m => m.role === 'assistant' && Array.isArray(m.tool_calls),
+    )
+    assert.ok(assistant)
+    assert.equal(assistant.reasoning_content, 'deciding')
+  })
+
+  it('显式 passBackReasoning=false 覆盖 thinking 模型名', async () => {
+    const captured = captureFetch()
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'go' },
+      { role: 'assistant_thinking', blocks: [{ type: 'thinking', text: 'inner' }] },
+      { role: 'assistant', content: '<final>answer' },
+    ]
+
+    await adapter({ model: 'deepseek-reasoner', passBackReasoning: false }).next(messages)
+
+    const body = captured.body as { messages: Array<Record<string, unknown>> }
+    const assistant = body.messages.find(
+      m => m.role === 'assistant' && !Array.isArray(m.tool_calls),
+    )
+    assert.equal(assistant?.reasoning_content, undefined)
+  })
+
+  it('显式 passBackReasoning=true 对普通模型生效', async () => {
+    const captured = captureFetch()
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'go' },
+      { role: 'assistant_thinking', blocks: [{ type: 'thinking', text: 'inner' }] },
+      { role: 'assistant', content: '<final>answer' },
+    ]
+
+    await adapter({ model: 'gpt-4o', passBackReasoning: true }).next(messages)
+
+    const body = captured.body as { messages: Array<Record<string, unknown>> }
+    const assistant = body.messages.find(
+      m => m.role === 'assistant' && !Array.isArray(m.tool_calls),
+    )
+    assert.equal(assistant?.reasoning_content, 'inner')
   })
 })

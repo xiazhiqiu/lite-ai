@@ -22,7 +22,12 @@ const MAX_RETRY_DELAY_MS = 8_000
 type OpenAIMessage =
   | { role: 'system'; content: string }
   | { role: 'user'; content: string }
-  | { role: 'assistant'; content: string | null; tool_calls?: OpenAIToolCall[] }
+  | {
+      role: 'assistant'
+      content: string | null
+      tool_calls?: OpenAIToolCall[]
+      reasoning_content?: string
+    }
   | { role: 'tool'; tool_call_id: string; content: string }
 
 type OpenAIToolCall = {
@@ -46,6 +51,12 @@ function getRetryLimit(): number {
     return DEFAULT_MAX_RETRIES
   }
   return Math.floor(value)
+}
+
+/** thinking 模式模型（如 deepseek-reasoner）多轮对话必须把 reasoning_content 回传给 API */
+function isThinkingModel(model: string): boolean {
+  const normalized = model.toLowerCase()
+  return normalized.includes('reasoner') || normalized.includes('thinking')
 }
 
 function shouldRetryStatus(status: number): boolean {
@@ -143,9 +154,14 @@ function toOpenAIToolCall(call: Extract<ChatMessage, { role: 'assistant_tool_cal
   }
 }
 
-function toOpenAIMessages(messages: ChatMessage[]): OpenAIMessage[] {
+function toOpenAIMessages(
+  messages: ChatMessage[],
+  opts: { passBackReasoning?: boolean } = {},
+): OpenAIMessage[] {
   const converted: OpenAIMessage[] = []
   let pendingToolCalls: Extract<ChatMessage, { role: 'assistant_tool_call' }>[] = []
+  // thinking 模式：把上一条 assistant_thinking 的推理文本回传到后续 assistant 消息的 reasoning_content
+  let pendingReasoning: string | undefined
 
   const flushToolCalls = (): void => {
     if (pendingToolCalls.length === 0) return
@@ -153,8 +169,10 @@ function toOpenAIMessages(messages: ChatMessage[]): OpenAIMessage[] {
       role: 'assistant',
       content: null,
       tool_calls: pendingToolCalls.map(toOpenAIToolCall),
+      ...(pendingReasoning ? { reasoning_content: pendingReasoning } : {}),
     })
     pendingToolCalls = []
+    pendingReasoning = undefined
   }
 
   for (const message of messages) {
@@ -176,13 +194,25 @@ function toOpenAIMessages(messages: ChatMessage[]): OpenAIMessage[] {
       continue
     }
 
-    // assistant_thinking 为内部推理，按最小改动不回传
+    // assistant_thinking 为内部推理，默认不回传；thinking 模式模型需原样回传 reasoning_content
     if (message.role === 'assistant_thinking') {
+      if (opts.passBackReasoning) {
+        const reasoning = message.blocks
+          .map(block => (typeof block.text === 'string' ? block.text : ''))
+          .filter(Boolean)
+          .join('\n')
+        if (reasoning) pendingReasoning = reasoning
+      }
       continue
     }
 
     if (message.role === 'assistant' || message.role === 'assistant_progress') {
-      converted.push({ role: 'assistant', content: message.content })
+      converted.push({
+        role: 'assistant',
+        content: message.content,
+        ...(pendingReasoning ? { reasoning_content: pendingReasoning } : {}),
+      })
+      pendingReasoning = undefined
       continue
     }
 
@@ -262,7 +292,10 @@ export class OpenAIModelAdapter implements ModelAdapter {
 
     const requestBody = {
       model: runtime.model,
-      messages: toOpenAIMessages(messages),
+      messages: toOpenAIMessages(messages, {
+        passBackReasoning:
+          runtime.passBackReasoning ?? isThinkingModel(runtime.model),
+      }),
       tools: (options.tools ?? this.tools.list()).map(tool => ({
         type: 'function' as const,
         function: {

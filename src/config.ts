@@ -33,6 +33,8 @@ export type LiteAISettings = {
   model?: string
   provider?: ProviderName
   maxOutputTokens?: number
+  /** thinking 模式模型（如 deepseek-reasoner）多轮对话是否把 reasoning_content 原样回传 */
+  passBackReasoning?: boolean
   mcpServers?: Record<string, McpServerConfig>
   webhook?: Partial<WebhookConfig>
 }
@@ -89,6 +91,8 @@ export type RuntimeConfig = {
   authToken?: string
   apiKey?: string
   maxOutputTokens?: number
+  /** thinking 模式模型多轮对话是否把 reasoning_content 原样回传；缺省时按模型名自动判断 */
+  passBackReasoning?: boolean
   mcpServers: Record<string, McpServerConfig>
   sourceSummary: string
 }
@@ -302,6 +306,17 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
       ? Math.floor(parsedMaxOutputTokens)
       : undefined
 
+  const rawPassBackReasoning =
+    env.LITE_AI_PASS_BACK_REASONING ??
+    effectiveSettings.passBackReasoning
+  const passBackReasoning =
+    typeof rawPassBackReasoning === 'string'
+      ? rawPassBackReasoning === '1' ||
+        rawPassBackReasoning.toLowerCase() === 'true'
+      : typeof rawPassBackReasoning === 'number'
+        ? rawPassBackReasoning === 1
+        : rawPassBackReasoning
+
   if (!model) {
     throw new Error(
       `No model configured. Set ~/.lite-ai/settings.json or env.${isOpenAI ? 'OPENAI_MODEL' : 'ANTHROPIC_MODEL'}.`,
@@ -327,6 +342,7 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     authToken,
     apiKey,
     maxOutputTokens,
+    passBackReasoning,
     mcpServers: effectiveSettings.mcpServers ?? {},
     sourceSummary: `config: ${LITE_AI_SETTINGS_PATH} > ${CLAUDE_SETTINGS_PATH} > process.env (provider=${provider})`,
   }
