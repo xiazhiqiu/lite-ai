@@ -5,42 +5,34 @@
 </p>
 
 <p align="center">
-  <b>终端原生、单会话可审计、可 resume/fork、面向 SRE 故障处置的事故诊断 Agent。</b>
+  <b>终端原生、轻量可 hack、面向 SRE 故障处置的事故诊断 Agent。</b>
 </p>
 
 <p align="center">
-  以 <a href="https://github.com/LiuMengxuan04/MiniCode">MiniCode</a>（Claude Code 风格的最小化终端 agent 内核）为底座二次开发，<br/>
-  在 `model → tool → model` 编码工作流之上沉淀了假设-验证链、检查点交接、复盘报告、事故知识库 RAG、告警 webhook 等诊断能力。<br/>
-  面向 SSH / jumpbox / 气隔环境 / 值班机等 SRE 真实工作流。
+  <b>告警响应 · 根因定位 · 交接与复盘 · 事故知识库</b><br/>
+  在 `model → tool → model` 编码工作流之上，围绕故障定位闭环沉淀了假设-验证、检查点交接、复盘归档与本地知识库检索，适配 SSH / jumpbox / 气隔 / 值班机等办公网络受限场景。
 </p>
 
 ---
 
-LiteAI 是一个**轻量、终端优先（terminal-first）**的 AI 助手：底层沿用小而可读的 MiniCode 内核（控制流、工具模型、TUI 均易于理解和扩展），上层叠加了专为故障定位设计的领域能力。实现紧凑、接口极小，适合学习、实验与二次开发。
+LiteAI 是一个**轻量、终端优先（terminal-first）**的 AI 助手：完整包含从 ReAct 循环、工具模型、会话管理到 TUI 的 agent 内核，并在此基础上实现了面向事故诊断的领域能力，运行状态全程可审计、可 resume/fork。实现紧凑、接口极小，易学、易改、易扩展。
 
 ## 核心能力
 
-### 事故诊断（SRE 领域能力）
-
-- **假设-验证链** —— 通过 `hypothesis_tracker` 工具维护结构化根因假设（pending / investigating / confirmed / refuted / inconclusive），每条结论附带可追溯证据
+- **标准 ReAct 循环** —— `model → tool → model` 单轮内可多步调用工具；超大工具结果自动落盘并在上下文里替换为短预览与文件路径
+- **全屏终端 TUI** —— 输入历史、会话滚动、斜杠命令菜单与审批流程
+- **并发子 agent** —— 最多 3 个并发**只读**子 agent，共享模型与工具子集，可并行搜证
+- **会话管理** —— 按项目持久化，支持 `resume` / `rename` / `fork` / `new`
+- **上下文压缩** —— 多级压缩（snip / microcompact / collapse / auto-compact），长会话可追踪
+- **内置工具集** —— 文件读写（写前审阅 diff）、搜索、命令执行、网页抓取/搜索、提问澄清；通过 `SKILL.md` 发现本地技能，支持 MCP 工具/资源/prompt（stdio 或远程 HTTP）
+- **假设-验证链** —— `hypothesis_tracker` 维护结构化根因假设（pending / investigating / confirmed / refuted / inconclusive），每条结论附带可追溯证据
 - **检查点与交接简报** —— `incident_checkpoint` 支持创建/切换检查点，一键生成跨班交接简报（现象 / 时间线 / 已排除假设 / 待验证假设 / 关键命令）
-- **复盘报告生成** —— `generate_postmortem` 从证据链提取时间线，模板化生成 Markdown 复盘，自动落盘到 `LITE_AI_HOME/postmortems/`，并索引进知识库
-- **事故知识库 RAG** —— `search_incident_kb` 用 sqlite-vec 做本地语义检索（离线 ONNX embedding，`models/` 由脚本按需下载），排查前先召回相似历史事故
-- **流式日志** —— `tail_logs` / `follow_logs` / `stop_follow` 按级别着色、支持超大文件与滚动读取
-- **告警 webhook** —— `lite-ai --webhook [port]` 启动独立监听进程，接收 Alertmanager 等事件源告警后自动去重、排队诊断并回推通知
-- **只读安全白名单** —— kubectl / docker / curl 等子命令级白名单，写操作（`kubectl delete`、`curl -X POST` 等）一律拦截，杜绝诊断误写扩大事故
+- **复盘报告生成** —— `generate_postmortem` 从证据链提取时间线，模板化生成 Markdown 复盘并落盘归档与入库
+- **事故知识库 RAG** —— `search_incident_kb` 用 sqlite-vec 做本地语义检索（离线 embedding，`models/` 按需下载），排查前先召回相似历史事故
+- **流式日志** —— `tail_logs` / `follow_logs` / `stop_follow` 按级别着色，支持超大文件与滚动读取
+- **告警 webhook** —— `lite-ai --webhook [port]` 独立监听进程，接收 Alertmanager 等事件源告警，自动去重、排队诊断并回推通知
+- **只读安全白名单** —— kubectl / docker / curl 等子命令级白名单，写操作（`kubectl delete`、`curl -X POST` 等）一律拦截
 - **评测基准** —— 内置 RE2-SS 评测框架，量化根因定位准确率（AC@1 / AC@3 / Steps / Evidence Rate）
-
-### 终端 agent 基础能力
-
-- 标准 `model → tool → model` ReAct 循环，单轮内可多步调用工具；`tool-result-storage` 把超大结果落盘并在上下文里替换为短预览与文件路径
-- 全屏终端 TUI：输入历史、会话滚动、斜杠命令菜单与审批流程
-- 最多 3 个并发**只读**子 agent，共享模型与工具子集，便于并行搜证
-- 按项目持久化会话，支持 `resume` / `rename` / `fork` / `new`
-- 多级上下文压缩（snip / microcompact / collapse / auto-compact），长会话可追踪
-- 内置文件读写（写前审阅 diff）、搜索、命令执行、网页抓取/搜索、提问澄清等工具
-- 通过 `SKILL.md` 发现本地技能，支持 MCP 工具/资源/prompt（stdio 或远程 HTTP）；`lite-ai mcp ...` / `lite-ai skills ...` 管理
-- 兼顾 Claude Code 的 `.claude/settings.json` 配置，与既有生态兼容
 
 ## 安装
 
@@ -50,13 +42,13 @@ npm install
 npm run install-local
 ```
 
-安装器会引导配置模型名、base URL 与认证 token，写入 `~/.lite-ai/settings.json`；并生成 `lite-ai` 启动器到 `~/.local/bin`（可用 `LITE_AI_BIN_DIR` 覆盖）。
+安装器会引导配置模型名、base URL 与认证 token，写入 `~/.lite-ai/settings.json`，并生成 `lite-ai` 启动器到 `~/.local/bin`（可用 `LITE_AI_BIN_DIR` 覆盖）。
 
 其他配置位置：
 
 - `~/.lite-ai/settings.json` —— 主配置
 - `~/.lite-ai/mcp.json` / 项目下 `.mcp.json` —— MCP server 配置
-- `~/.claude/settings.json` —— 兼容回退（Claude 既有配置）
+- `~/.claude/settings.json` —— Claude Code 兼容回退
 
 可用 `LITE_AI_HOME` 覆盖整个配置/数据目录。
 
@@ -90,7 +82,7 @@ lite-ai --webhook 8787
        ├─ hypothesis_tracker   注册假设 → 附着证据 → 判定状态
        ├─ incident_checkpoint  关键阶段打点 / 生成交接简报
        ├─ 定位根因 → 给出处置建议（写操作需审批）
-       └─ generate_postmortem  生成复盘报告并入库
+       └─ generate_postmortem  生成复盘报告并归档入库
 ```
 
 ## 常用入口点
@@ -169,8 +161,8 @@ npm test            # 测试（node test/run-tests.mjs）
 npm run dev         # 开发模式
 ```
 
-LiteAI 刻意保持小巧务实：架构分层清晰、接口极小化（核心围绕 `ModelAdapter.next()` 与 `ToolRegistry.execute()`），目标是易 hack、易扩展。事故诊断领域能力集中在 `src/webhook/`、`src/tools/`（SRE 工具）与知识库工具链中。
+架构分层清晰、接口极小化（核心围绕 `ModelAdapter.next()` 与 `ToolRegistry.execute()`），事故诊断领域能力集中在 `src/webhook/`、`src/tools/`（SRE 工具）与知识库工具链中。
 
 ## 致谢
 
-本项目基于 [MiniCode](https://github.com/LiuMengxuan04/MiniCode) 二次开发——一个 Claude Code 风格、刻意保持最小实现的终端 agent 内核。感谢 MiniCode 及其作者的出色工作。
+LiteAI 是基于 [MiniCode](https://github.com/LiuMengxuan04/MiniCode) 的二次开发。感谢 MiniCode 及其作者在终端 agent 内核上的出色工作。
