@@ -201,10 +201,12 @@ export function dataSourceToolsetsFor(sources: DataSourceConfig[]): ToolDefiniti
 {
   "mcpServers": {
     "gitlab": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-gitlab"], "env": { "GITLAB_PERSONAL_ACCESS_TOKEN": "{{ env.GITLAB_TOKEN }}" } },
-    "elasticsearch": { "command": "npx", "args": ["-y", "@wshobson/mcp-elasticsearch"], "env": {} }
+    "elasticsearch": { "command": "docker", "args": ["run", "--rm", "-i", "-e", "ES_URL", "-e", "ES_API_KEY", "docker.elastic.co/mcp/elasticsearch", "stdio"], "env": { "ES_URL": "...", "ES_API_KEY": "..." } }
   }
 }
 ```
+
+> 注：Elastic 官方 MCP server 为 `@elastic/mcp-server-elasticsearch`（npm 包已废弃，现行用 Docker 镜像 `docker.elastic.co/mcp/elasticsearch` 或 Elastic Agent Builder，见 [Elastic 官方仓库](https://github.com/elastic/mcp-server-elasticsearch)）。其 `search` 工具的 `queryBody` 接受完整 ES DSL，**可在 DSL 里写 `from`/`size` 做分页**，但受 `index.max_result_window`（默认 10000）限制；另有一个 Go 版社区 server（sonirico/mcp-elasticsearch）`search` 只暴露 `query/size/sort/aggs`，**没有 `from`，不支持分页**。选型时需甄别。
 
 工具自动以 `mcp__gitlab__xxx` 形式出现在工具列表（见 prompt.ts 的 MCP 段落）。这是"加数据源不改代码"的标准路径。
 
