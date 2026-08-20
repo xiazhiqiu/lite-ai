@@ -50,13 +50,17 @@ test('embeddingConfig: 未配置 API 时默认本地模型，模型 ID/目录可
 })
 
 test('checkEmbeddingAvailability: API 模式视为就绪；本地模型缺失时给出明确错误', async () => {
-  resetEnv()
   const { checkEmbeddingAvailability } = await import('../src/utils/kb-embedder.js')
 
   process.env.LITE_AI_EMBED_API_URL = 'https://embed.example/v1/embeddings'
   assert.deepEqual(checkEmbeddingAvailability(), { ok: true })
 
+  // 本地模式「缺失」分支：先清掉上方设置的 API_URL（否则会走 API 模式），
+  // 再把模型目录指向一个确定不存在的空目录，避免依赖默认路径恰好无模型。
   resetEnv()
+  const missRoot = await mkdtemp(path.join(os.tmpdir(), 'embed-miss-'))
+  process.env.LITE_AI_EMBED_MODEL_ID = 'some/absent-model'
+  process.env.LITE_AI_EMBED_MODEL_DIR = missRoot
   const miss = checkEmbeddingAvailability()
   assert.equal(miss.ok, false)
   if (miss.ok === false) {
@@ -74,6 +78,7 @@ test('checkEmbeddingAvailability: API 模式视为就绪；本地模型缺失时
   process.env.LITE_AI_EMBED_MODEL_DIR = root
   assert.deepEqual(checkEmbeddingAvailability(), { ok: true })
   await rm(root, { recursive: true, force: true })
+  await rm(missRoot, { recursive: true, force: true })
 })
 
 test('embeddingDimension: 默认 384，可由 LITE_AI_EMBED_DIMENSION 覆盖，非法值抛错', async () => {

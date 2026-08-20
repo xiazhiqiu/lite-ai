@@ -42,6 +42,14 @@ function isEmptyAssistantResponse(content: string): boolean {
   return content.trim().length === 0
 }
 
+/** 读取连续重复软提示阈值，缺省 3。非法值回退默认。 */
+function readToolRepeatNoticeMax(): number {
+  const raw = process.env.LITE_AI_TOOL_REPEAT_NOTICE_MAX
+  if (raw == null || raw.trim() === '') return 3
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 3
+}
+
 function withProviderUsage<T extends ChatMessage>(
   message: T,
   usage: ProviderUsage | undefined,
@@ -143,6 +151,7 @@ export async function runAgentTurn(args: {
   const maxSteps = args.maxSteps
   const modelName = args.modelName ?? ''
   const startTime = args.startTime ?? Date.now()
+  const noteRepeatMax = readToolRepeatNoticeMax()
   const statusBarToolCount = new Map<string, number>()
   let messages = args.messages
   let emptyResponseRetryCount = 0
@@ -426,6 +435,11 @@ export async function runAgentTurn(args: {
         for (const call of group.calls) {
           args.onToolStart?.(call.id, call.toolName, call.input)
         }
+        const notices = group.calls.map(call => {
+          const text = args.permissions
+            ?.noticeToolRepeat(call.toolName, call.input, noteRepeatMax)
+          return text ?? ''
+        })
         const results = await Promise.all(
           group.calls.map(call =>
             args.tools.execute(call.toolName, call.input, {
@@ -436,6 +450,10 @@ export async function runAgentTurn(args: {
         )
         group.calls.forEach((call, i) => {
           const result = results[i]!
+          const notice = notices[i]
+          if (notice) {
+            result.output = `${notice}\n${result.output}`
+          }
           sawToolResultThisTurn = true
           if (!result.ok) {
             toolErrorCount += 1
@@ -449,10 +467,15 @@ export async function runAgentTurn(args: {
         for (const call of group.calls) {
           throwIfAborted(args.signal)
           args.onToolStart?.(call.id, call.toolName, call.input)
+          const notice = args.permissions
+            ?.noticeToolRepeat(call.toolName, call.input, noteRepeatMax)
           const result = await args.tools.execute(call.toolName, call.input, {
             cwd: args.cwd,
             permissions: args.permissions,
           })
+          if (notice) {
+            result.output = `${notice}\n${result.output}`
+          }
           sawToolResultThisTurn = true
           if (!result.ok) {
             toolErrorCount += 1

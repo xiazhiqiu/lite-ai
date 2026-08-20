@@ -153,6 +153,21 @@ async function readPermissionStore(): Promise<PermissionStore> {
   }
 }
 
+/** 生成稳定 key：工具名 + 输入的确定性序列化 */
+function toolRepeatKey(toolName: string, input: unknown): string {
+  return `${toolName}\u0000${stableSerialize(input)}`
+}
+
+/** 确定性序列化；失败（循环引用等）时退化为工具名级 key 的占位 */
+function stableSerialize(input: unknown): string {
+  try {
+    if (input === undefined) return ''
+    return JSON.stringify(input) ?? ''
+  } catch {
+    return '<unserializable>'
+  }
+}
+
 async function writePermissionStore(store: PermissionStore): Promise<void> {
   await mkdir(LITE_AI_DIR, { recursive: true })
   await writeFile(PERMISSIONS_PATH, `${JSON.stringify(store, null, 2)}\n`, 'utf8')
@@ -173,6 +188,10 @@ export class PermissionManager {
   private readonly sessionDeniedEdits = new Set<string>()
   private readonly turnAllowedEdits = new Set<string>()
   private turnAllowAllEdits = false
+  /** 回合内「工具名+输入」key 的连续相邻重复次数 */
+  private readonly turnToolRepeatConsecutive = new Map<string, number>()
+  /** 上一次检查的工具 key（用于判定「连续相邻」） */
+  private lastToolRepeatKey: string | undefined
   private ready: Promise<void>
 
   constructor(
@@ -217,11 +236,57 @@ export class PermissionManager {
   beginTurn(): void {
     this.turnAllowedEdits.clear()
     this.turnAllowAllEdits = false
+    this.turnToolRepeatConsecutive.clear()
+    this.lastToolRepeatKey = undefined
   }
 
   endTurn(): void {
     this.turnAllowedEdits.clear()
     this.turnAllowAllEdits = false
+    this.turnToolRepeatConsecutive.clear()
+    this.lastToolRepeatKey = undefined
+  }
+
+  /**
+   * 检测「同一工具、同一输入」的连续相邻重复调用。
+   * 达到 noticeAt（含）后返回一段软提示文案，否则返回 null。
+   * 不拦截执行——调用方负责将文案附加到工具结果上。
+   *
+   * 计数语义：仅统计“连续相邻”出现的次数；一旦中间插入任一不同调用，
+   * 该 key 即清零重计。重复 key 之间互不影响。
+   */
+  noticeToolRepeat(
+    toolName: string,
+    input: unknown,
+    noticeAt = 3,
+  ): string | null {
+    const key = toolRepeatKey(toolName, input)
+
+    if (this.lastToolRepeatKey !== key) {
+      // 出现不同调用 → 重置上一 key，并认为当前 key 为新起点
+      if (this.lastToolRepeatKey !== undefined) {
+        this.turnToolRepeatConsecutive.delete(this.lastToolRepeatKey)
+      }
+      this.turnToolRepeatConsecutive.set(key, 1)
+    } else {
+      this.turnToolRepeatConsecutive.set(
+        key,
+        (this.turnToolRepeatConsecutive.get(key) ?? 1) + 1,
+      )
+    }
+    this.lastToolRepeatKey = key
+
+    const count = this.turnToolRepeatConsecutive.get(key) ?? 1
+    if (count < noticeAt) {
+      return null
+    }
+
+    const safeInput = stableSerialize(input)
+    const excerpt =
+      safeInput != null && safeInput.length > 0
+        ? `，输入：${safeInput.slice(0, 120)}`
+        : ''
+    return `! 提示：工具 ${toolName}${excerpt} 已连续出现 ${count} 次，结果未见进展。如非有意轮询，请考虑更换策略、修正输入，或确认任务是否已可结束。`
   }
 
   getSummary(): string[] {
