@@ -7,7 +7,7 @@ export type SkillSummary = {
   name: string
   description: string
   path: string
-  source: 'project' | 'user' | 'compat_project' | 'compat_user'
+  source: 'project' | 'user' | 'builtin' | 'compat_project' | 'compat_user'
 }
 
 export type LoadedSkill = SkillSummary & {
@@ -55,6 +55,11 @@ function getSkillRoots(cwd: string): SkillSourceRoot[] {
     {
       root: path.join(os.homedir(), '.lite-ai', 'skills'),
       source: 'user',
+    },
+    {
+      // lite-ai 内置技能：随包分发，任意 cwd 均可见；优先级低于项目级/用户级以便覆盖。
+      root: path.join(import.meta.dirname, '..', 'skills'),
+      source: 'builtin',
     },
     {
       root: path.join(cwd, '.claude', 'skills'),
