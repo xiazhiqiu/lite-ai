@@ -72,6 +72,9 @@ describe('data sources prompt injection', () => {
       assert.match(prompt, /Prometheus metrics: http:\/\/localhost:19090/)
       assert.match(prompt, /Elasticsearch logs: http:\/\/localhost:19200/)
       assert.match(prompt, /curl \/api\/v1\/query 查询/)
+      // 引导优先使用结构化只读工具
+      assert.match(prompt, /es_query \/ prom_query \/ kubectl_query/)
+      assert.match(prompt, /无需拼 curl/)
       // 要求模型走数据源，不读原始 CSV
       assert.match(prompt, /不要 Read 数据集原始 CSV/)
     } finally {

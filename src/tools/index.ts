@@ -1,6 +1,8 @@
 import type { McpServerConfig, RuntimeConfig } from '../config.js'
+import { loadDataSources } from '../config.js'
 import type { McpServerSummary } from '../mcp.js'
 import { createMcpBackedTools } from '../mcp.js'
+import { dataSourceToolsetsFor } from './data-sources/types.js'
 import { discoverSkills } from '../skills.js'
 import { ToolRegistry } from '../tool.js'
 import { isTodosEnabled } from '../utils/todo-store.js'
@@ -63,6 +65,8 @@ export async function createDefaultToolRegistry(args: {
 }): Promise<ToolRegistry> {
   const skills = await discoverSkills(args.cwd)
   const mcpServers = args.runtime?.mcpServers ?? {}
+  // 数据源工具按已配置类型动态注册（结构上只读，isReadOnly 自动进入子 agent 白名单）
+  const dataSourceTools = dataSourceToolsetsFor(await loadDataSources())
 
   return new ToolRegistry([
     askUserTool,
@@ -88,6 +92,7 @@ export async function createDefaultToolRegistry(args: {
     stopFollowTool,
     generatePostmortemTool,
     { ...searchIncidentKbTool, isParallelSafe: () => true },
+    ...dataSourceTools,
     ...(isTodosEnabled() ? [rewriteTodoListTool, updateTodoStatusTool] : []),
   ], {
     skills,

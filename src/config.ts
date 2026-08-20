@@ -46,7 +46,20 @@ export async function loadDataSources(): Promise<DataSourceConfig[]> {
   }
 }
 
-/** 一个只读实时数据源描述。配置后自动注入系统提示词，模型即可开箱即用地 curl 查询。 */
+/**
+ * 数据源类型：内置值 + 开放扩展。
+ * 内置类型命中注册表路由；未注册/自定义类型不报错，仅无法用结构化工具（可 hint 提示）。
+ * 设计对齐 Keep `Provider` 模型：一个类型 = 一类工具集，type 是路由键。
+ */
+export type DataSourceType =
+  | 'elasticsearch'
+  | 'prometheus'
+  | 'kubernetes'
+  | 'gitlab' // 后续批次
+  | 'skywalking' // 后续批次
+  | (string & {}) // 开放扩展：自定义类型无需改本文件
+
+/** 一个只读实时数据源描述。配置后自动注入系统提示词，模型即可开箱即用地查询。 */
 export type DataSourceConfig = {
   /** 数据源名称，如 "Prometheus metrics" / "Elasticsearch logs" */
   name: string
@@ -54,6 +67,20 @@ export type DataSourceConfig = {
   baseUrl: string
   /** 补充说明（索引名、query 示例、认证等），可多行字符串 */
   hint?: string
+  /** 数据源类型：优先精确路由到对应工具集；缺省时按 name/hint 关键词回退匹配 */
+  type?: DataSourceType
+  /** 请求头（认证/自定义），值支持 {{ env.NAME }} 引用环境变量，密钥不落盘 */
+  headers?: Record<string, string>
+}
+
+/**
+ * 解析请求头值中的 `{{ env.NAME }}` 占位符为 process.env[NAME]。
+ * 未命中对应环境变量时保留占位符原文，密钥不落盘（仅运行期注入）。
+ */
+export function resolveHeaderValue(value: string): string {
+  return value.replace(/\{\{\s*env\.([A-Za-z0-9_]+)\s*\}\}/g, (match, name: string) => {
+    return process.env[name] ?? match
+  })
 }
 
 export type LiteAISettings = {
