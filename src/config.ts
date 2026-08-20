@@ -28,6 +28,34 @@ export function resolveProviderName(raw: unknown): ProviderName {
   return String(raw ?? 'openai').toLowerCase() === 'anthropic' ? 'anthropic' : 'openai'
 }
 
+/** 从有效 settings 中读取实时数据源列表（读取失败视为空）。 */
+export async function loadDataSources(): Promise<DataSourceConfig[]> {
+  try {
+    const settings = await loadEffectiveSettings()
+    const list = settings.dataSources
+    if (!Array.isArray(list)) return []
+    return list.filter(
+      (s): s is DataSourceConfig =>
+        typeof s === 'object' &&
+        s !== null &&
+        typeof s.name === 'string' &&
+        typeof s.baseUrl === 'string',
+    )
+  } catch {
+    return []
+  }
+}
+
+/** 一个只读实时数据源描述。配置后自动注入系统提示词，模型即可开箱即用地 curl 查询。 */
+export type DataSourceConfig = {
+  /** 数据源名称，如 "Prometheus metrics" / "Elasticsearch logs" */
+  name: string
+  /** 基础 URL，如 "http://localhost:19090" */
+  baseUrl: string
+  /** 补充说明（索引名、query 示例、认证等），可多行字符串 */
+  hint?: string
+}
+
 export type LiteAISettings = {
   env?: Record<string, string | number>
   model?: string
@@ -37,6 +65,8 @@ export type LiteAISettings = {
   passBackReasoning?: boolean
   mcpServers?: Record<string, McpServerConfig>
   webhook?: Partial<WebhookConfig>
+  /** 实时只读数据源；配置后自动注入系统提示词 */
+  dataSources?: DataSourceConfig[]
 }
 
 export type WebhookConfig = {

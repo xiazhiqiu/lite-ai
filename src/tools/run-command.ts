@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { registerBackgroundShellTask } from '../background-tasks.js'
 import type { ToolDefinition } from '../tool.js'
 import { resolveToolPath } from '../workspace.js'
+import { loadDataSources } from '../config.js'
 import { SRE_READONLY_COMMANDS, isSreReadOnlyCommand } from './sre-whitelist.js'
 
 const execFileAsync = promisify(execFile)
@@ -63,6 +64,8 @@ const CONCURRENT_READONLY_COMMANDS = new Set([
   'tail',
   'wc',
   'grep',
+  'egrep',
+  'fgrep',
   'rg',
   'find',
   'echo',
@@ -76,6 +79,14 @@ const CONCURRENT_READONLY_COMMANDS = new Set([
   'du',
   'free',
   'uptime',
+  // 只读过滤管道工具（不写盘、不执行外部程序，可与 curl/kubectl 安全管道联用）
+  'tr',
+  'sort',
+  'uniq',
+  'cut',
+  'awk',
+  'basename',
+  'dirname',
 ])
 
 const CONCURRENT_READONLY_GIT_SUBCOMMANDS = new Set([
@@ -100,21 +111,28 @@ function hasDangerousToken(token: string): boolean {
  * - 单字符串 command：按 shell 分隔符拆段，逐段校验 argv0 与危险符号。
  * 绝不复用 isReadOnlyCommand（其白名单含 sed）。
  */
-export function isReadOnlyCommandCall(input: {
-  command: string
-  args?: string[]
-}): boolean {
+export function isReadOnlyCommandCall(
+  input: {
+    command: string
+    args?: string[]
+  },
+  allowedUrlPrefixes?: Iterable<string>,
+): boolean {
   const trimmed = input.command.trim()
   if (!trimmed) return false
 
   if ((input.args?.length ?? 0) > 0) {
-    return isReadOnlyArgv(trimmed, input.args!)
+    return isReadOnlyArgv(trimmed, input.args!, allowedUrlPrefixes)
   }
 
-  return isReadOnlySnippet(trimmed)
+  return isReadOnlySnippet(trimmed, allowedUrlPrefixes)
 }
 
-function isReadOnlyArgv(argv0: string, args: string[]): boolean {
+function isReadOnlyArgv(
+  argv0: string,
+  args: string[],
+  allowedUrlPrefixes?: Iterable<string>,
+): boolean {
   if (args.some(hasDangerousToken)) return false
 
   if (argv0 === 'git') {
@@ -123,45 +141,144 @@ function isReadOnlyArgv(argv0: string, args: string[]): boolean {
   }
 
   // SRE 只读诊断命令（kubectl get/logs、docker ps/logs、curl GET 等）
-  if (isSreReadOnlyCommand(argv0, args)) return true
+  if (isSreReadOnlyCommand(argv0, args, allowedUrlPrefixes)) return true
 
   return CONCURRENT_READONLY_COMMANDS.has(argv0)
 }
 
-function isReadOnlySnippet(command: string): boolean {
-  // 拆成 shell 段（| & && || ; 各自成段），但若是命令替换/重定向等，直接拒。
-  const segments = command
-    .split(/(&&|\|\||[|;])/g)
-    .map(segment => segment.trim())
-    .filter(Boolean)
+/**
+ * 引号感知地按 shell 管道/分隔符拆分命令串。
+ * 与 splitCommandLine 保持同样的引号转义规则，避免引号内的 `|`（如 grep 正则）被误拆。
+ */
+function splitShellSegments(commandLine: string): string[] {
+  const segments: string[] = []
+  let current = ''
+  let quote: '"' | "'" | null = null
+  let escaping = false
 
-  for (const segment of segments) {
-    if (segment === '&&' || segment === '||' || segment === '|' || segment === ';') {
+  for (let i = 0; i < commandLine.length; i++) {
+    const char = commandLine[i]
+
+    if (escaping) {
+      current += char
+      escaping = false
       continue
     }
-    if (!isReadOnlySegment(segment)) {
+
+    if (char === '\\') {
+      current += char
+      escaping = true
+      continue
+    }
+
+    if (quote) {
+      current += char
+      if (char === quote) quote = null
+      continue
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char
+      current += char
+      continue
+    }
+
+    // 引号外的分隔符：| ; && ||。裸 &（后台符）直接判为不安全，不得静默放行。
+    if (char === '|' || char === ';') {
+      segments.push(current.trim())
+      current = ''
+      continue
+    }
+    if (char === '&') {
+      if (commandLine[i + 1] === '&') {
+        segments.push(current.trim())
+        current = ''
+        i++
+        continue
+      }
+      // 裸 &（后台执行）：追加哨兵段，使整条命令不可放行
+      segments.push(current.trim(), '\u0000background')
+      current = ''
+      return segments.filter(s => s !== '')
+    }
+
+    current += char
+  }
+
+  if (escaping) current += '\\'
+  segments.push(current.trim())
+  return segments.filter(Boolean)
+}
+
+function isReadOnlySnippet(command: string, allowedUrlPrefixes?: Iterable<string>): boolean {
+  // 引号感知地拆成 shell 段，逐段校验；命令替换/重定向等危险符号直接拒。
+  const segments = splitShellSegments(command)
+
+  for (const segment of segments) {
+    if (!isReadOnlySegment(segment, allowedUrlPrefixes)) {
       return false
     }
   }
   return true
 }
 
-function isReadOnlySegment(segment: string): boolean {
-  // 重定向 / 命令替换 / 后台符 / 子 shell —— 一律非只读
-  if (hasDangerousToken(segment)) return false
+/**
+ * 剥离前导的 shell 包装（bash -lc / bash -c），返回真正的可执行命令与参数。
+ * 用于只读判定，避免模型偶发用 "bash -lc <cmd>" 包装时被误判为非只读。
+ * 支持多层嵌套剥离；包装后若为单个引号串命令，则按引号串重新分词。
+ */
+function stripShellWrapper(argv0: string, args: string[]): { cmd: string; argv: string[] } {
+  let cmd = argv0
+  let argv = args
+  for (;;) {
+    if (cmd !== 'bash' && cmd !== 'sh') break
+    const flag = argv[0]
+    if (flag !== '-lc' && flag !== '-c' && flag !== '-c ') break
+    if (argv[1] === undefined) break
+    // 包装后的剩余部分可能是整体引号串命令，也可能是分开的 token
+    const rest = argv.slice(1)
+    if (rest.length === 1) {
+      const sub = splitCommandLine(rest[0]!)
+      cmd = sub[0] ?? ''
+      argv = sub.slice(1)
+    } else {
+      cmd = rest[0]!
+      argv = rest.slice(1)
+    }
+  }
+  return { cmd, argv }
+}
 
-  const [argv0, ...argv] = splitCommandLine(segment)
+function isReadOnlySegment(
+  segment: string,
+  allowedUrlPrefixes?: Iterable<string>,
+): boolean {
+  const tokens = splitCommandLine(segment)
+  if (tokens.length === 0) return false
+
+  // 引号感知拆分后，逐 token 检查危险符号（重定向/命令替换/后台符等），
+  // 引号内的 `|`、`&` 等已随引号剥离，不会误报。
+  for (const token of tokens) {
+    if (token.includes('>') || token.includes('<') || token.includes('$') || token.includes('`')) {
+      return false
+    }
+  }
+
+  const [argv0, ...argv] = tokens
   if (!argv0) return false
 
-  if (argv0 === 'git') {
-    const sub = argv[0]
+  // 剥离可能的 bash -c/-lc 前导包装，再判定真实命令是否只读
+  const { cmd, argv: innerArgv } = stripShellWrapper(argv0, argv)
+
+  if (cmd === 'git') {
+    const sub = innerArgv[0]
     return sub !== undefined && CONCURRENT_READONLY_GIT_SUBCOMMANDS.has(sub)
   }
 
   // SRE 只读诊断命令
-  if (isSreReadOnlyCommand(argv0, argv)) return true
+  if (isSreReadOnlyCommand(cmd, innerArgv, allowedUrlPrefixes)) return true
 
-  return CONCURRENT_READONLY_COMMANDS.has(argv0)
+  return CONCURRENT_READONLY_COMMANDS.has(cmd)
 }
 
 type Input = {
@@ -339,12 +456,18 @@ export const runCommandTool: ToolDefinition<Input> = {
 
     // 子 agent 无 permissions 时，强制只允许只读命令（fail-closed）。
     // 防止子 agent 在无审批通道的情况下执行写操作。
+    // 已配置的实时数据源 baseUrl 作为授权前缀，命中前缀的只读 curl 也可放行。
+    const authorizedUrlPrefixes = (await loadDataSources()).map(s => s.baseUrl)
+
     if (!context.permissions) {
       if (
-        !isReadOnlyCommandCall({
-          command: normalized.command,
-          args: normalized.args,
-        })
+        !isReadOnlyCommandCall(
+          {
+            command: normalized.command,
+            args: normalized.args,
+          },
+          authorizedUrlPrefixes,
+        )
       ) {
         return {
           ok: false,
@@ -358,11 +481,21 @@ export const runCommandTool: ToolDefinition<Input> = {
         ? `Unknown command '${normalized.command}' is not in the built-in read-only/development set`
         : undefined
 
+    // 命中已授权数据源前缀的只读 curl/wget（含检索型 POST），无论 shell 与否，均视为只读安全，
+    // 跳过审批弹窗，恢复诊断流畅性；仅当命令显著非只读时才走 ensureCommand。
+    const readonlyShellPipeline = isReadOnlyCommandCall(
+      {
+        command: input.command,
+        args: input.args,
+      },
+      authorizedUrlPrefixes,
+    )
+
     if (forcePromptReason) {
       await context.permissions?.ensureCommand(command, args, effectiveCwd, {
         forcePromptReason,
       })
-    } else if (useShell || !isReadOnlyCommand(normalized.command)) {
+    } else if (!readonlyShellPipeline && (useShell || !isReadOnlyCommand(normalized.command))) {
       await context.permissions?.ensureCommand(command, args, effectiveCwd)
     }
 

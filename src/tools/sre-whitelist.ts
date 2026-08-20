@@ -38,11 +38,32 @@ const DANGEROUS_HTTP_METHODS = new Set([
   'DELETE',
 ])
 
+/** 从 curl/wget 参数中提取目标 URL（https:// 或 http:// 开头的参数），用于授权前缀匹配。 */
+export function extractUrlFromRequestArgs(args?: string[]): string | undefined {
+  return args?.find(a => /^https?:\/\//i.test(a))
+}
+
+/**
+ * 判定是否为 ES 只读检索端点（_search/_count/_sql 等）。
+ * 这类端点的 POST 本质是查询，属只读操作，允许放行。
+ */
+function isSearchEndpoint(url: string): boolean {
+  return /\/_(search|msearch|count|sql|eql|validate)(\/|\?|$)/.test(url)
+}
+
 /**
  * 判定 SRE 命令是否为只读诊断命令（子命令级白名单）。
  * kubectl/docker 需校验子命令；curl/wget 需校验无写方法；jq/column 纯只读。
+ *
+ * @param allowedUrlPrefixes 可选：已授权只读数据源的 URL 前缀白名单。
+ *   提供时，curl/wget 的目标 URL 必须先命中任一前缀才会被放行（fail-closed），
+ *   防止"GET 到任意内网地址"也被静默放行。
  */
-export function isSreReadOnlyCommand(command: string, args?: string[]): boolean {
+export function isSreReadOnlyCommand(
+  command: string,
+  args?: string[],
+  allowedUrlPrefixes?: Iterable<string>,
+): boolean {
   if (!SRE_READONLY_COMMANDS.has(command)) return false
 
   if (command === 'kubectl') {
@@ -56,23 +77,34 @@ export function isSreReadOnlyCommand(command: string, args?: string[]): boolean 
   }
 
   if (command === 'curl' || command === 'wget') {
-    // 目标 URL 指向只读检索端点（Elasticsearch 的 _search/_count/_sql 等）时，
-    // POST 是只读查询操作，允许放行（ES 检索惯用 POST /_search）。
-    const url = args?.find(a => /^https?:\/\//.test(a)) ?? ''
-    const isSearchEndpoint =
-      /\/_(search|msearch|count|sql|eql|validate)(\/|\?|$)/.test(url)
+    const url = extractUrlFromRequestArgs(args)
+    if (!url) return false
+
+    // 若配置了授权前缀，目标 URL 必须先命中其一（普通 GET 也不能跨前缀放行）。
+    if (allowedUrlPrefixes) {
+      let hit = false
+      for (const prefix of allowedUrlPrefixes) {
+        if (url.startsWith(prefix)) {
+          hit = true
+          break
+        }
+      }
+      if (!hit) return false
+    }
+
+    const searchEndpoint = isSearchEndpoint(url)
 
     // 检查是否含写方法标志（-X POST / --method PUT 等）
     const hasWriteMethod = args?.some((arg, idx) => {
       if (arg === '-X' || arg === '--request') {
         const method = args[idx + 1]?.toUpperCase()
-        if (method === 'POST' && isSearchEndpoint) return false
+        if (method === 'POST' && searchEndpoint) return false
         return method !== undefined && DANGEROUS_HTTP_METHODS.has(method)
       }
       // -XPOST 紧凑形式
       const compact = arg.match(/^-[Xx](\w+)$/)
       if (compact) {
-        if (compact[1].toUpperCase() === 'POST' && isSearchEndpoint) return false
+        if (compact[1].toUpperCase() === 'POST' && searchEndpoint) return false
         return DANGEROUS_HTTP_METHODS.has(compact[1].toUpperCase())
       }
       return false

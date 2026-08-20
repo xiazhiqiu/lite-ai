@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   isReadOnlyCommandCall,
 } from '../src/tools/run-command.js'
-import { isSreReadOnlyCommand, classifySreMutatingCommand } from '../src/tools/sre-whitelist.js'
+import { isSreReadOnlyCommand, classifySreMutatingCommand, extractUrlFromRequestArgs } from '../src/tools/sre-whitelist.js'
 
 test('isSreReadOnlyCommand: kubectl 只读子命令放行', () => {
   assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'pods']), true)
@@ -107,6 +107,61 @@ test('isReadOnlyCommandCall: 多段命令含 SRE 只读可并发', () => {
   )
 })
 
+test('isReadOnlyCommandCall: 只读管道（含引号内 | 正则）放行', () => {
+  assert.equal(
+    isReadOnlyCommandCall({
+      command:
+        'curl -s "http://localhost:19090/api/v1/label/__name__/values" | tr "," "\\n" | grep -iE "cpu|container|process" | head -50',
+    }),
+    true,
+  )
+  assert.equal(
+    isReadOnlyCommandCall({
+      command: 'kubectl get pods -n sock-shop | grep -i carts | head',
+    }),
+    true,
+  )
+})
+
+test('isReadOnlyCommandCall: 前导 bash -lc 包装的只读命令放行', () => {
+  assert.equal(
+    isReadOnlyCommandCall({
+      command: 'bash -lc curl -s "http://localhost:19200/sock-shop-logs/_count"',
+    }),
+    true,
+  )
+  assert.equal(
+    isReadOnlyCommandCall({
+      command:
+        'bash -lc bash -lc curl -s "http://localhost:19090/api/v1/label/__name__/values" | tr "," "\\n" | grep -iE "cpu|container|process" | head -50',
+    }),
+    true,
+  )
+})
+
+test('isReadOnlyCommandCall: 管道内写操作仍拒绝', () => {
+  assert.equal(
+    isReadOnlyCommandCall({ command: 'curl -X DELETE "http://localhost:19200/sock-shop-logs" | head' }),
+    false,
+  )
+  assert.equal(
+    isReadOnlyCommandCall({ command: 'ls; rm -rf /tmp' }),
+    false,
+  )
+  assert.equal(
+    isReadOnlyCommandCall({ command: 'bash -lc rm -rf /tmp/x' }),
+    false,
+  )
+  assert.equal(
+    isReadOnlyCommandCall({ command: 'curl -s "http://x" > /tmp/f' }),
+    false,
+  )
+  assert.equal(
+    isReadOnlyCommandCall({ command: 'echo $(rm -rf /)' }),
+    false,
+  )
+})
+
 test('classifySreMutatingCommand: kubectl 写子命令返回原因', () => {
   const reason = classifySreMutatingCommand('kubectl', ['delete', 'pod', 'nginx'], 'kubectl delete pod nginx')
   assert.ok(reason?.includes('kubectl delete is a mutating operation'))
@@ -137,4 +192,88 @@ test('classifySreMutatingCommand: curl 写方法返回原因，GET 不返回', (
     ),
   )
   assert.equal(classifySreMutatingCommand('curl', ['http://host/health'], 'curl http://host/health'), null)
+})
+
+test('extractUrlFromRequestArgs: 提取 curl/wget 目标 URL', () => {
+  assert.equal(
+    extractUrlFromRequestArgs(['-s', 'http://localhost:19200/sock-shop-logs/_count']),
+    'http://localhost:19200/sock-shop-logs/_count',
+  )
+  assert.equal(extractUrlFromRequestArgs(['-H', 'Accept: json', 'https://host/api']), 'https://host/api')
+  assert.equal(extractUrlFromRequestArgs(['-s']), undefined)
+})
+
+test('isSreReadOnlyCommand: 命中授权前缀的 GET 放行', () => {
+  const prefixes = new Set(['http://localhost:19200', 'http://localhost:19090'])
+  assert.equal(
+    isSreReadOnlyCommand('curl', ['-s', 'http://localhost:19090/api/v1/label/__name__/values'], prefixes),
+    true,
+  )
+  assert.equal(
+    isSreReadOnlyCommand('curl', ['-s', 'http://localhost:19200/sock-shop-logs/_count'], prefixes),
+    true,
+  )
+})
+
+test('isSreReadOnlyCommand: 命中授权前缀的检索型 POST 放行', () => {
+  const prefixes = new Set(['http://localhost:19200'])
+  assert.equal(
+    isSreReadOnlyCommand('curl', ['-X', 'POST', 'http://localhost:19200/sock-shop-logs/_search'], prefixes),
+    true,
+  )
+  assert.equal(
+    isSreReadOnlyCommand('curl', ['-XPOST', 'http://localhost:19200/sock-shop-logs/_count'], prefixes),
+    true,
+  )
+})
+
+test('isSreReadOnlyCommand: 非授权前缀的 GET 不放行（fail-closed）', () => {
+  const prefixes = new Set(['http://localhost:19200'])
+  assert.equal(
+    isSreReadOnlyCommand('curl', ['-s', 'http://evil.example/metrics'], prefixes),
+    false,
+  )
+  assert.equal(
+    isSreReadOnlyCommand('curl', ['-s', 'http://localhost:19090/api/v1/query'], prefixes),
+    false,
+  )
+})
+
+test('isSreReadOnlyCommand: 授权前缀内写方法仍拒绝', () => {
+  const prefixes = new Set(['http://localhost:19200'])
+  assert.equal(
+    isSreReadOnlyCommand('curl', ['-X', 'DELETE', 'http://localhost:19200/sock-shop-logs'], prefixes),
+    false,
+  )
+  assert.equal(
+    isSreReadOnlyCommand('curl', ['-X', 'PUT', 'http://localhost:19200/sock-shop-logs/_doc/1'], prefixes),
+    false,
+  )
+})
+
+test('isReadOnlyCommandCall: 授权前缀放行且跨前缀拦截', () => {
+  const prefixes = new Set(['http://localhost:19200', 'http://localhost:19090'])
+  assert.equal(
+    isReadOnlyCommandCall(
+      { command: 'curl -s "http://localhost:19090/api/v1/query" -X POST' },
+      prefixes,
+    ),
+    false,
+  )
+  // GET 到授权前缀
+  assert.equal(
+    isReadOnlyCommandCall(
+      { command: 'curl -s "http://localhost:19090/api/v1/label/__name__/values"' },
+      prefixes,
+    ),
+    true,
+  )
+  // GET 到未授权前缀
+  assert.equal(
+    isReadOnlyCommandCall(
+      { command: 'curl -s "http://evil.example/x"' },
+      prefixes,
+    ),
+    false,
+  )
 })
