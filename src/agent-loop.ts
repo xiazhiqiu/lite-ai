@@ -159,6 +159,14 @@ export async function runAgentTurn(args: {
   let toolErrorCount = 0
   let sawToolResultThisTurn = false
   let snippedThisTurn = false
+  // microcompact 只折叠只读（可重建）工具结果；名单由注册表按 isReadOnly 推导，
+  // 使数据源 / MCP 只读工具自动纳入，无需维护静态前缀清单。
+  const foldableToolNames = new Set(
+    args.tools
+      .list()
+      .filter(tool => tool.isReadOnly === true)
+      .map(tool => tool.name),
+  )
   const contentReplacementState =
     args.contentReplacementState ?? createContentReplacementState()
   let contextCollapseState =
@@ -218,7 +226,7 @@ export async function runAgentTurn(args: {
       }
 
       const beforeMicrocompact = messages
-      messages = microcompact(messages, modelName)
+      messages = microcompact(messages, modelName, foldableToolNames)
       if (messages !== beforeMicrocompact) {
         latestStats = computeContextStats(messages, modelName)
         args.onContextStats?.(latestStats)

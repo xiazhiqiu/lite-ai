@@ -115,6 +115,7 @@ export function resolveMaxOutputTokens(
   return limits.default
 }
 
+/** 无注册表时 microcompact 的默认可折叠工具名单（纯函数回退）。 */
 export const COMPACTABLE_TOOLS = new Set([
   'read_file',
   'run_command',
@@ -122,11 +123,3 @@ export const COMPACTABLE_TOOLS = new Set([
   'list_files',
   'web_fetch',
 ])
-
-/** 数据源工具集统一使用固定前缀命名；其 tool_result 可被 microcompact 清空以释放上下文。
- *  database 工具名用动态实例名前缀，未列入，由调用方可重复查询重建。 */
-export const COMPACTABLE_TOOL_PREFIXES = [
-  'prometheus_',
-  'elasticsearch_',
-  'kubernetes_',
-] as const
