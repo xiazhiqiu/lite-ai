@@ -1,14 +1,18 @@
 import { z } from 'zod'
 import type { ToolDefinition } from '../../tool.js'
-import { clampToolOutput, httpGet, type ToolsetStatus } from './base.js'
+import {
+  clampToolOutput,
+  httpGet,
+  summarizeStringList,
+  DEFAULT_OUTPUT_CHARS,
+  type ToolsetStatus,
+} from './base.js'
 import type { ResolvedToolsetConfig } from '../../config.js'
 
 /**
  * Prometheus / VictoriaMetrics 只读查询工具集。
  * 路由对齐 HolmesGPT 的 prometheus/metrics：prometheus_url。
  */
-
-const OUTPUT_CHARS = 30_000
 
 export function checkPrometheusConfig(
   toolset: ResolvedToolsetConfig,
@@ -25,24 +29,30 @@ export function checkPrometheusConfig(
   return { name: toolset.name, type: 'prometheus', enabled: true }
 }
 
-/** 发送 GET 请求并解析 JSON；非 2xx 或非 JSON 时给出稳定错误信息。 */
+/** 发送 GET 请求并解析 JSON；非 2xx 或非 JSON 时给出稳定错误信息。
+ *  listData 用于 label values 类接口：data 是字符串数组时压缩为摘要，避免一次性输出几千条占满上下文。 */
 async function apiQuery(
   baseUrl: string,
   path: string,
   params: Record<string, string>,
+  listData = false,
 ): Promise<{ ok: boolean; output: string }> {
   const url = new URL(`${baseUrl}${path}`)
   for (const [key, value] of Object.entries(params)) {
     url.searchParams.set(key, value)
   }
   const http = await httpGet(url.toString())
-  const body = clampToolOutput(http.text, OUTPUT_CHARS)
-  if (!http.ok) return { ok: false, output: `HTTP ${http.status}: ${body}` }
+  if (!http.ok) {
+    return { ok: false, output: clampToolOutput(`HTTP ${http.status}: ${http.text}`, DEFAULT_OUTPUT_CHARS) }
+  }
   try {
-    const parsed = JSON.parse(http.text) as unknown
-    return { ok: true, output: JSON.stringify(parsed, null, 2) }
+    const parsed = JSON.parse(http.text) as { data?: unknown }
+    if (listData && Array.isArray(parsed.data)) {
+      parsed.data = summarizeStringList(parsed.data as string[])
+    }
+    return { ok: true, output: clampToolOutput(JSON.stringify(parsed, null, 2), DEFAULT_OUTPUT_CHARS) }
   } catch {
-    return { ok: false, output: `Invalid JSON (HTTP ${http.status}): ${body}` }
+    return { ok: false, output: clampToolOutput(`Invalid JSON (HTTP ${http.status}): ${http.text}`, DEFAULT_OUTPUT_CHARS) }
   }
 }
 
@@ -102,7 +112,7 @@ export function buildPrometheusTools(
       (base, input) => {
         const params: Record<string, string> = {}
         if (input.matcher !== undefined) params.matcher = input.matcher
-        return apiQuery(base, '/api/v1/label/__name__/values', params)
+        return apiQuery(base, '/api/v1/label/__name__/values', params, true)
       },
       baseUrl,
     ),
@@ -113,7 +123,7 @@ export function buildPrometheusTools(
       (base, input) => {
         const params: Record<string, string> = {}
         if (input.matcher !== undefined) params.matcher = input.matcher
-        return apiQuery(base, `/api/v1/label/${input.label}/values`, params)
+        return apiQuery(base, `/api/v1/label/${input.label}/values`, params, true)
       },
       baseUrl,
     ),

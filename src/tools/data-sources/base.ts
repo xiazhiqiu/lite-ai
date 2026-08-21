@@ -57,7 +57,24 @@ export function clampToolOutput(text: string, maxChars: number): string {
   return text.slice(0, maxChars) + `\n...[truncated at ${maxChars} chars]`
 }
 
-export const DEFAULT_OUTPUT_CHARS = 30_000
+export const DEFAULT_OUTPUT_CHARS = 8_000
+
+/**
+ * 把字符串数组（如指标名/标签值列表）压缩为摘要，避免一次性输出几千条占满上下文。
+ * 仅返回总数 + 前缀采样，列表过大时标注截断并给出数量上限。
+ */
+export function summarizeStringList(
+  values: string[],
+  maxItems = 30,
+): string {
+  if (values.length <= maxItems) {
+    return `${values.length} total: [${values.join(', ')}]`
+  }
+  return (
+    `${values.length} total: [${values.slice(0, maxItems).join(', ')}] ` +
+    `...(${values.length - maxItems} more omitted)`
+  )
+}
 
 /** 把 ES/Prometheus 的 JSON 响应解析为稳定字符串（失败时给原始文本与原因）。 */
 export function resultFromJson(

@@ -1,14 +1,12 @@
 import { z } from 'zod'
 import type { ToolDefinition } from '../../tool.js'
-import { clampToolOutput, type ToolsetStatus } from './base.js'
+import { clampToolOutput, DEFAULT_OUTPUT_CHARS, type ToolsetStatus } from './base.js'
 import type { ResolvedToolsetConfig } from '../../config.js'
 
 /**
  * Elasticsearch 只读查询工具集。
  * 路由对齐 HolmesGPT 的 ELK（es_url）。全部走 ES REST API，避免 shell/curl 造成权限弹窗。
  */
-
-const OUTPUT_CHARS = 30_000
 
 export function checkElasticsearchConfig(
   toolset: ResolvedToolsetConfig,
@@ -25,12 +23,15 @@ export function checkElasticsearchConfig(
   return { name: toolset.name, type: 'elasticsearch', enabled: true }
 }
 
-/** 发送 GET/POST 请求并解析 JSON；非 2xx 或非 JSON 时给出稳定错误信息。 */
+/** 发送 GET/POST 请求并解析 JSON；非 2xx 或非 JSON 时给出稳定错误信息。
+ *  hitsLimit 用于搜索类接口：命中过多时只保留前 N 条 + 命中总数，避免整段原文占满上下文。
+ *  解析使用完整原文（避免先截断导致大 JSON 无法解析），仅在最终输出阶段按上限截断。 */
 async function esRequest(
   baseUrl: string,
   method: 'GET' | 'POST',
   path: string,
   body?: unknown,
+  hitsLimit?: number,
 ): Promise<{ ok: boolean; output: string }> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15_000)
@@ -45,13 +46,24 @@ async function esRequest(
   } finally {
     clearTimeout(timer)
   }
-  const text = clampToolOutput(await res.text(), OUTPUT_CHARS)
-  if (!res.ok) return { ok: false, output: `HTTP ${res.status}: ${text}` }
+  const rawText = await res.text()
+  if (!res.ok) {
+    return { ok: false, output: clampToolOutput(`HTTP ${res.status}: ${rawText}`, DEFAULT_OUTPUT_CHARS) }
+  }
   try {
-    const parsed = JSON.parse(text) as unknown
-    return { ok: true, output: JSON.stringify(parsed, null, 2) }
+    const parsed = JSON.parse(rawText) as { hits?: { hits?: unknown[]; [key: string]: unknown } }
+    if (hitsLimit !== undefined && Array.isArray(parsed.hits?.hits) && parsed.hits.hits.length > hitsLimit) {
+      const hits = parsed.hits.hits
+      parsed.hits = {
+        _truncated: true,
+        _shown: hitsLimit,
+        _shownOf: hits.length,
+        hits: hits.slice(0, hitsLimit),
+      }
+    }
+    return { ok: true, output: clampToolOutput(JSON.stringify(parsed, null, 2), DEFAULT_OUTPUT_CHARS) }
   } catch {
-    return { ok: false, output: `Invalid JSON (HTTP ${res.status}): ${text}` }
+    return { ok: false, output: clampToolOutput(`Invalid JSON (HTTP ${res.status}): ${rawText}`, DEFAULT_OUTPUT_CHARS) }
   }
 }
 
@@ -100,7 +112,7 @@ export function buildElasticsearchTools(
         esRequest(base, 'POST', `/${input.index}/_search`, {
           query: input.query,
           ...(input.size !== undefined ? { size: input.size } : {}),
-        }),
+        }, 50),
       baseUrl,
     ),
     tool(
