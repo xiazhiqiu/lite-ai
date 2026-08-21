@@ -24,14 +24,16 @@ test('subsetForSubAgent: 内置只读白名单工具被纳入', () => {
     makeTool('read_file'),
     makeTool('write_file'),
     makeTool('run_command'),
+    makeTool('load_skill'),
   ])
   const sub = registry.subsetForSubAgent(SUB_AGENT_TOOL_NAMES)
   const names = sub.list().map(t => t.name)
 
-  assert.ok(names.includes('list_files'))
-  assert.ok(names.includes('grep_files'))
-  assert.ok(names.includes('read_file'))
   assert.ok(names.includes('run_command'))
+  assert.ok(names.includes('load_skill'))
+  assert.ok(!names.includes('list_files'), '通用文件工具不应在子 agent 工具集中')
+  assert.ok(!names.includes('grep_files'), '通用文件工具不应在子 agent 工具集中')
+  assert.ok(!names.includes('read_file'), '通用文件工具不应在子 agent 工具集中')
   assert.ok(!names.includes('write_file'), 'write_file 不应在子 agent 工具集中')
 })
 

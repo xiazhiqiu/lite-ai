@@ -25,28 +25,6 @@ export class MockModelAdapter implements ModelAdapter {
   async next(messages: ChatMessage[]): Promise<AgentStep> {
     const toolMessage = lastToolMessage(messages)
     if (toolMessage?.role === 'tool_result') {
-      const lastCall = extractLatestAssistantCall(messages)
-      if (lastCall === 'list_files') {
-        return {
-          type: 'assistant',
-          content: `目录内容如下：\n\n${toolMessage.content}`,
-        }
-      }
-
-      if (lastCall === 'read_file') {
-        return {
-          type: 'assistant',
-          content: `文件内容如下：\n\n${toolMessage.content}`,
-        }
-      }
-
-      if (lastCall === 'write_file' || lastCall === 'edit_file') {
-        return {
-          type: 'assistant',
-          content: toolMessage.content,
-        }
-      }
-
       return {
         type: 'assistant',
         content: `我拿到了工具结果：\n\n${toolMessage.content}`,
@@ -58,46 +36,7 @@ export class MockModelAdapter implements ModelAdapter {
     if (userText === '/tools') {
       return {
         type: 'assistant',
-        content: '可用工具：ask_user, list_files, grep_files, read_file, write_file, edit_file, run_command',
-      }
-    }
-
-    if (userText.startsWith('/ls')) {
-      const dir = userText.replace('/ls', '').trim()
-      return {
-        type: 'tool_calls',
-        calls: [{
-          id: `mock-${Date.now()}`,
-          toolName: 'list_files',
-          input: dir ? { path: dir } : {},
-        }],
-      }
-    }
-
-    if (userText.startsWith('/grep ')) {
-      const payload = userText.slice('/grep '.length).trim()
-      const [pattern, searchPath] = payload.split('::')
-      return {
-        type: 'tool_calls',
-        calls: [{
-          id: `mock-${Date.now()}`,
-          toolName: 'grep_files',
-          input: {
-            pattern: pattern.trim(),
-            path: searchPath?.trim() || undefined,
-          },
-        }],
-      }
-    }
-
-    if (userText.startsWith('/read ')) {
-      return {
-        type: 'tool_calls',
-        calls: [{
-          id: `mock-${Date.now()}`,
-          toolName: 'read_file',
-          input: { path: userText.slice('/read '.length).trim() },
-        }],
+        content: '可用工具：ask_user, run_command',
       }
     }
 
@@ -125,39 +64,15 @@ export class MockModelAdapter implements ModelAdapter {
       }
 
       return {
-        type: 'tool_calls',
-        calls: [{
-          id: `mock-${Date.now()}`,
-          toolName: 'write_file',
-          input: {
-            path: payload.slice(0, splitAt).trim(),
-            content: payload.slice(splitAt + 2),
-          },
-        }],
+        type: 'assistant',
+        content: '已移除通用写文件工具，agent 不再具备本地写文件能力。',
       }
     }
 
     if (userText.startsWith('/edit ')) {
-      const payload = userText.slice('/edit '.length)
-      const [targetPath, search, replace] = payload.split('::')
-      if (!targetPath || search === undefined || replace === undefined) {
-        return {
-          type: 'assistant',
-          content: '用法: /edit 路径::查找文本::替换文本',
-        }
-      }
-
       return {
-        type: 'tool_calls',
-        calls: [{
-          id: `mock-${Date.now()}`,
-          toolName: 'edit_file',
-          input: {
-            path: targetPath.trim(),
-            search,
-            replace,
-          },
-        }],
+        type: 'assistant',
+        content: '已移除通用文件编辑工具，agent 不再具备本地编辑文件能力。',
       }
     }
 
@@ -167,12 +82,7 @@ export class MockModelAdapter implements ModelAdapter {
         '这是一个最小骨架版本。',
         '你可以试试：',
         '/tools',
-        '/ls',
-        '/grep pattern::src',
-        '/read README.md',
         '/cmd pwd',
-        '/write notes.txt::hello',
-        '/edit notes.txt::hello::hello world',
       ].join('\n'),
     }
   }

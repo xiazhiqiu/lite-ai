@@ -108,16 +108,17 @@ test('isReadOnlyCommandCall: 多段命令含 SRE 只读可并发', () => {
 })
 
 test('isReadOnlyCommandCall: 只读管道（含引号内 | 正则）放行', () => {
+  // 注：head 可读任意本地文件、需审批，过滤示例改用同为只读过滤段的 sort -u。
   assert.equal(
     isReadOnlyCommandCall({
       command:
-        'curl -s "http://localhost:19090/api/v1/label/__name__/values" | tr "," "\\n" | grep -iE "cpu|container|process" | head -50',
+        'curl -s "http://localhost:19090/api/v1/label/__name__/values" | tr "," "\\n" | grep -iE "cpu|container|process" | sort -u',
     }),
     true,
   )
   assert.equal(
     isReadOnlyCommandCall({
-      command: 'kubectl get pods -n sock-shop | grep -i carts | head',
+      command: 'kubectl get pods -n sock-shop | grep -i carts | sort -u',
     }),
     true,
   )
@@ -133,7 +134,7 @@ test('isReadOnlyCommandCall: 前导 bash -lc 包装的只读命令放行', () =>
   assert.equal(
     isReadOnlyCommandCall({
       command:
-        'bash -lc bash -lc curl -s "http://localhost:19090/api/v1/label/__name__/values" | tr "," "\\n" | grep -iE "cpu|container|process" | head -50',
+        'bash -lc bash -lc curl -s "http://localhost:19090/api/v1/label/__name__/values" | tr "," "\\n" | grep -iE "cpu|container|process" | sort -u',
     }),
     true,
   )

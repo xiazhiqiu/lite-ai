@@ -2,7 +2,7 @@ import type { McpServerSummary } from './mcp.js'
 import type { SkillSummary } from './skills.js'
 import { loadMemory } from './memory.js'
 import { isTodosEnabled } from './utils/todo-store.js'
-import { loadDataSources } from './config.js'
+import { toolsetStatuses } from './tools/data-sources/registry.js'
 
 export async function buildSystemPrompt(
   cwd: string,
@@ -59,7 +59,7 @@ export async function buildSystemPrompt(
     '## 历史事故检索协议（search_incident_kb）',
     '- 开始诊断前，调用 search_incident_kb 用事故现象/服务名/故障类型的自然语言查询是否有相似历史事故。',
     '- 若命中相似事故，优先参考其根因分析与处置方案，再结合当前证据推进。',
-    '- 检索返回的 file 路径可用 read_file 深入查看完整复盘报告；section_title 指示命中的章节。',
+    '- 检索返回的 file 路径指向历史复盘报告，section_title 指示命中的章节。复盘报告由值班员自行查看，agent 不做通用文件读取。',
     '- 无相似事故或知识库不可用时，正常从零开始诊断，不依赖历史。',
     '## 故障域排查技能（load_skill）',
     '- 开始诊断前，查看 Available skills：若存在与当前告警/故障现象匹配的技能（如 OOM/内存告警对应 oom-troubleshoot、延迟告警对应 latency-degradation、错误率/5xx 告警对应 error-rate-spike、日志刷屏对应 log-burst-analysis），先调用 load_skill 加载其 SOP，再按该 SOP 取证。',
@@ -76,7 +76,6 @@ export async function buildSystemPrompt(
     '- 不在无证据时给确定根因；拿不到证据时明确说"未定位"，不编造。',
     '- 不执行未经审批的写操作。',
     '- 事故结束后，主动建议调用 generate_postmortem 生成复盘报告。',
-    'When using read_file, pay attention to the header fields. If it says TRUNCATED: yes, continue reading with a larger offset before concluding that the file itself is cut off.',
     'If the user names a skill or clearly asks for a workflow that matches a listed skill, call load_skill before following it.',
   ]
 
@@ -167,26 +166,21 @@ export async function buildSystemPrompt(
     parts.push(memorySection)
   }
 
-  const dataSources = await loadDataSources()
-  if (dataSources.length > 0) {
-    parts.push(
-      [
-        '## 实时数据源（可读写探测，均只读查询）',
-        '使用 run_command + curl 查询下列数据源取证。所有查询都是只读 GET / 检索型 POST，无需审批。',
-        ...dataSources.map(source => {
-          const hint = source.hint ? `  ${source.hint}` : ''
-          return `- ${source.name}: ${source.baseUrl}${hint ? `\n${hint}` : ''}`
-        }),
-        '取证时从这些数据源取数，不要 Read 数据集原始 CSV 文件。',
+  const toolsetList = await toolsetStatuses()
+  if (toolsetList.length > 0) {
+    const enabled = toolsetList.filter(t => t.enabled)
+    if (enabled.length > 0) {
+      parts.push([
+        '## 实时数据源（已启用 toolset，使用结构化只读工具查询）',
+        `已启用内置只读工具集（工具已注入工具列表）：${enabled.map(t => t.name).join('、')}。`,
+        `优先用这些 ${
+          enabled.length > 1 ? 'prometheus_*/elasticsearch_*/kubernetes_*/database 工具' : '结构化工具'
+        } 查询指标、日志与集群状态，不要手搓 curl 请求这些数据源。`,
         '',
-        '命令写法规范（避免触发审批弹窗）：',
-        // eslint-disable-next-line no-control-regex
-        '1. 发 curl/查询时用简单命令，URL 用双引号包裹。',
-        '2. 禁止把命令拼成一整条复杂 shell：不要用 $() 命令替换、$(( )) 算术、$VAR 变量、分号或换行拼接、python3/jq -c 解析同一行内。这些会被判定为危险命令并弹窗审批。',
-        '3. 需要动态时间范围时，分步执行：先 date 取当前时间戳，再用字面时间戳参数发一条简单 curl（如 start/end 直接写数字或用上一步 date 的输出）。',
-        '4. 需要筛选结果时，简单管道可用（grep/tr/head 等只读过滤是允许的）。',
-      ].join('\n'),
-    )
+        '禁止把命令拼成一整条复杂 shell：不要用 $() 命令替换、$(( )) 算术、$VAR 变量、分号或换行拼接、python3/jq -c 解析同一行内。这些会被判定为危险命令并弹窗审批。',
+        '需要简单筛选时可用简单管道（grep/tr/head 等只读过滤）。',
+      ].join('\n'))
+    }
   }
 
   return parts.join('\n\n')

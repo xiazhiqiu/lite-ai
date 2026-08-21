@@ -3,24 +3,24 @@ import assert from 'node:assert/strict'
 import { parseLocalToolShortcut } from '../src/local-tool-shortcuts.js'
 
 describe('parseLocalToolShortcut', () => {
-  it('parses /ls with an optional path', () => {
-    assert.deepEqual(parseLocalToolShortcut('/ls'), {
-      toolName: 'list_files',
-      input: {},
-    })
-    assert.deepEqual(parseLocalToolShortcut('/ls src'), {
-      toolName: 'list_files',
-      input: { path: 'src' },
+  it('parses /cmd with a command and args', () => {
+    assert.deepEqual(parseLocalToolShortcut('/cmd ls -la'), {
+      toolName: 'run_command',
+      input: { command: 'ls', args: ['-la'], cwd: undefined },
     })
   })
 
-  it('does not treat adjacent command text as an /ls path', () => {
-    assert.equal(parseLocalToolShortcut('/lsfoo'), null)
+  it('parses /cmd with an optional cwd', () => {
+    assert.deepEqual(parseLocalToolShortcut('/cmd /tmp::ls'), {
+      toolName: 'run_command',
+      input: { command: 'ls', args: [], cwd: '/tmp' },
+    })
   })
 
-  it('rejects file edit shortcuts with blank paths', () => {
-    assert.equal(parseLocalToolShortcut('/write ::content'), null)
-    assert.equal(parseLocalToolShortcut('/modify ::content'), null)
-    assert.equal(parseLocalToolShortcut('/edit   ::before::after'), null)
+  it('returns null for empty command or non /cmd input', () => {
+    assert.equal(parseLocalToolShortcut('/cmd '), null)
+    assert.equal(parseLocalToolShortcut('/ls'), null)
+    assert.equal(parseLocalToolShortcut('/read foo'), null)
+    assert.equal(parseLocalToolShortcut('plain text'), null)
   })
 })

@@ -6,7 +6,6 @@ export async function buildSubAgentPrompt(cwd: string): Promise<string> {
     `Current cwd: ${cwd}`,
     'Investigate only the task assigned in the user message.',
     'You can use the following tools to gather evidence:',
-    '- File tools: list_files, grep_files, read_file',
     '- Web tools: web_fetch, web_search',
     '- Read-only diagnostic commands via run_command (e.g. kubectl get/describe/logs, docker ps/logs, curl GET)',
     '- Read-only MCP tools (mcp__* tools marked as read-only)',

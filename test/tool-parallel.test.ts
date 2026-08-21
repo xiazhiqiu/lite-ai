@@ -59,7 +59,7 @@ test('partitionToolCalls: isSafe 抛异常 → 该调用串行（fail-closed）'
 
 test('isReadOnlyCommandCall: 白名单命令 safe', () => {
   assert.equal(isReadOnlyCommandCall({ command: 'ls -la' }), true)
-  assert.equal(isReadOnlyCommandCall({ command: 'cat a.txt' }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'cat a.txt' }), false)
   assert.equal(isReadOnlyCommandCall({ command: 'grep foo' }), true)
 })
 

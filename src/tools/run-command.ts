@@ -4,25 +4,21 @@ import { z } from 'zod'
 import { registerBackgroundShellTask } from '../background-tasks.js'
 import type { ToolDefinition } from '../tool.js'
 import { resolveToolPath } from '../workspace.js'
-import { loadDataSources } from '../config.js'
 import { SRE_READONLY_COMMANDS, isSreReadOnlyCommand } from './sre-whitelist.js'
 
 const execFileAsync = promisify(execFile)
 
-// Claude Code separates "read-only shell commands" from mutating/runtime commands.
-// We keep the same shape here so safe observability commands are easy to extend.
+// lite-ai 作为 SRE 事故诊断助手，run_command 只保留只读诊断命令（SRE 通道）。
+// 值班机默认无源码，不暴露开发类命令与本地文件读取，避免 agent 越权访问测试数据/任意文件。
+// 本地日志读取统一走 tail_logs，不依赖 run_command 读文件。
+//
+// 注：以下常量已不含 dev 命令（git/npm/node/python/bash 等）以及任意读文件命令（cat/tail/head/wc
+// 读取本地文件需审批）。但管道的过滤段（grep/tr/sort/head 等）仍保留在
+// CONCURRENT_READONLY_COMMANDS 中，因为 `kubectl ... | grep` 这类过滤是 SRE 诊断的合法用法，
+// 且过滤工具不直接读取本地文件（fail-closed：文件读取需经过审批）。
 const READONLY_COMMANDS = new Set([
   'pwd',
   'ls',
-  'find',
-  'rg',
-  'grep',
-  'cat',
-  'head',
-  'tail',
-  'wc',
-  'sed',
-  'echo',
   'df',
   'du',
   'free',
@@ -31,43 +27,23 @@ const READONLY_COMMANDS = new Set([
   'whoami',
 ])
 
-const DEVELOPMENT_COMMANDS = new Set([
-  'git',
-  'npm',
-  'node',
-  'python3',
-  'pytest',
-  'bash',
-  'sh',
-  'bun',
-])
-
 function isAllowedCommand(command: string): boolean {
-  return (
-    READONLY_COMMANDS.has(command) ||
-    DEVELOPMENT_COMMANDS.has(command) ||
-    SRE_READONLY_COMMANDS.has(command)
-  )
+  return READONLY_COMMANDS.has(command) || SRE_READONLY_COMMANDS.has(command)
 }
 
 function isReadOnlyCommand(command: string): boolean {
   return READONLY_COMMANDS.has(command)
 }
 
-// 并发安全只读命令白名单（保守集，不含 sed/vim 等可写工具）。
-// 与上层 READONLY_COMMANDS 解耦：该集合仅供 run_command 执行路径的权限判断，
-// 而并发的只读判定必须排除一切可能写盘的命令。
+// 并发安全只读命令白名单（保守集）。
+// 不含 sed/vim 等可写工具，也不含 cat/tail/head/wc（它们可读任意本地文件，需审批，不可并发放行）；
+// 仅含纯系统状态查询 + 不落盘的外部命令 + 过滤管道段。
 const CONCURRENT_READONLY_COMMANDS = new Set([
   'ls',
-  'cat',
-  'head',
-  'tail',
-  'wc',
   'grep',
   'egrep',
   'fgrep',
   'rg',
-  'find',
   'echo',
   'pwd',
   'which',
@@ -80,6 +56,7 @@ const CONCURRENT_READONLY_COMMANDS = new Set([
   'free',
   'uptime',
   // 只读过滤管道工具（不写盘、不执行外部程序，可与 curl/kubectl 安全管道联用）
+  // 注意：head/tail/cat/wc 因可直接读本地文件，未纳入并发放行。
   'tr',
   'sort',
   'uniq',
@@ -456,19 +433,8 @@ export const runCommandTool: ToolDefinition<Input> = {
 
     // 子 agent 无 permissions 时，强制只允许只读命令（fail-closed）。
     // 防止子 agent 在无审批通道的情况下执行写操作。
-    // 已配置的实时数据源 baseUrl 作为授权前缀，命中前缀的只读 curl 也可放行。
-    const authorizedUrlPrefixes = (await loadDataSources()).map(s => s.baseUrl)
-
     if (!context.permissions) {
-      if (
-        !isReadOnlyCommandCall(
-          {
-            command: normalized.command,
-            args: normalized.args,
-          },
-          authorizedUrlPrefixes,
-        )
-      ) {
+      if (!isReadOnlyCommandCall({ command: normalized.command, args: normalized.args })) {
         return {
           ok: false,
           output: `Command not allowed without permission manager (sub-agent read-only mode): ${normalized.command}`,
@@ -481,15 +447,11 @@ export const runCommandTool: ToolDefinition<Input> = {
         ? `Unknown command '${normalized.command}' is not in the built-in read-only/development set`
         : undefined
 
-    // 命中已授权数据源前缀的只读 curl/wget（含检索型 POST），无论 shell 与否，均视为只读安全，
-    // 跳过审批弹窗，恢复诊断流畅性；仅当命令显著非只读时才走 ensureCommand。
-    const readonlyShellPipeline = isReadOnlyCommandCall(
-      {
-        command: input.command,
-        args: input.args,
-      },
-      authorizedUrlPrefixes,
-    )
+    // 命中 SRE 只读白名单的管道/命令跳过审批弹窗；仅当显著非只读时才走 ensureCommand。
+    const readonlyShellPipeline = isReadOnlyCommandCall({
+      command: input.command,
+      args: input.args,
+    })
 
     if (forcePromptReason) {
       await context.permissions?.ensureCommand(command, args, effectiveCwd, {

@@ -40,13 +40,13 @@ function formatResults(query: string, results: Awaited<ReturnType<typeof searchI
       `   片段: ${r.content.slice(0, 300)}${r.content.length > 300 ? '…' : ''}`
     )
   })
-  return `为 "${query}" 找到 ${results.length} 条相似历史事故（可按 file 用 read_file 查看完整报告）：\n\n${lines.join('\n\n')}`
+  return `为 "${query}" 找到 ${results.length} 条相似历史事故（file 指向复盘报告，供值班员人工查看）：\n\n${lines.join('\n\n')}`
 }
 
 export const searchIncidentKbTool: ToolDefinition<Input> = {
   name: 'search_incident_kb',
   description:
-    'Search the incident knowledge base for semantically similar historical incidents using embeddings. Before starting a diagnosis, call this with the incident symptoms / service name / fault type to find past postmortems that may share the same root cause. Returns the most similar report sections with a similarity score; use read_file on the returned file path to inspect the full report. Embedding source is user-configurable: set LITE_AI_EMBED_API_URL for a remote embedding API, or use a local model via LITE_AI_EMBED_MODEL_ID / LITE_AI_EMBED_MODEL_DIR (see scripts/download-embedding-model.mjs).',
+    'Search the incident knowledge base for semantically similar historical incidents using embeddings. Before starting a diagnosis, call this with the incident symptoms / service name / fault type to find past postmortems that may share the same root cause. Returns the most similar report sections with a similarity score and the report file path for the on-duty engineer to review. Embedding source is user-configurable: set LITE_AI_EMBED_API_URL for a remote embedding API, or use a local model via LITE_AI_EMBED_MODEL_ID / LITE_AI_EMBED_MODEL_DIR (see scripts/download-embedding-model.mjs).',
 
   inputSchema: {
     type: 'object',
