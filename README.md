@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./docs/logo.jpg" alt="LiteAI Logo" width="120" />
+  <img src="./assets/logo.jpg" alt="LiteAI Logo" width="120" />
   <h1 align="center">LiteAI</h1>
   <p align="center">
     <strong>终端原生、轻量可 hack、面向 SRE 故障处置的事故诊断 Agent</strong><br/>
