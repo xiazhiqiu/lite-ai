@@ -168,12 +168,24 @@ LiteAI 默认**只读优先**，放心用于生产排查：
 
 ## 评测
 
-```bash
-# 全量 RE2-SS 评测
-npm run eval:re2ss
+LiteAI 评测基于 [ITBench](https://github.com/itbench-hub/ITBench)（真实 K8s 集群 + otel-demo + 故障注入，方案 A：内置只读工具连真实数据源），评分采用 precision@full-recall。
 
-# 仅指定故障类型
-npm run eval:re2ss -- --filter=payment_loss
+### 前置
+
+1. 本地起 ITBench 场景环境（k3d + otel-demo + Prometheus/ES + 故障注入），见 ITBench 官方 `local_cluster` 文档（建议 16GB+ 内存）。
+2. 在 `~/.lite-ai/settings.json` 的 `toolsets` 中配置真实端点（`prometheus_url` / `es_url` / kubernetes 用本机 kubeconfig）。
+3. 从 [ITBench-AA](https://huggingface.co/datasets/ArtificialAnalysis/ITBench-AA) 导出场景清单到 `dataset/itbench/manifest.jsonl`，每行：
+   `{ "id": "sre_task_003", "name": "…", "description": "…", "namespace": "otel-demo", "groundTruth": { "entities": ["paymentservice"] } }`
+
+### 运行
+
+```bash
+# 全量 ITBench 评测
+npm run eval:itbench
+
+# 仅指定场景 / 前 N 个场景
+npm run eval:itbench -- --filter=payment
+npm run eval:itbench -- --limit=3
 ```
 
 ## 开发
