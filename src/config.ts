@@ -28,32 +28,25 @@ export function resolveProviderName(raw: unknown): ProviderName {
   return String(raw ?? 'openai').toLowerCase() === 'anthropic' ? 'anthropic' : 'openai'
 }
 
-/** 从有效 settings 中读取实时数据源列表（读取失败视为空）。 */
-export async function loadDataSources(): Promise<DataSourceConfig[]> {
-  try {
-    const settings = await loadEffectiveSettings()
-    const list = settings.dataSources
-    if (!Array.isArray(list)) return []
-    return list.filter(
-      (s): s is DataSourceConfig =>
-        typeof s === 'object' &&
-        s !== null &&
-        typeof s.name === 'string' &&
-        typeof s.baseUrl === 'string',
-    )
-  } catch {
-    return []
-  }
+/**
+ * 替换 dataSources[]：内置 toolset 的启用与连接配置。
+ * 与 mcpServers 平级；key 为 toolset 名，value 描述该 toolset 的类型 + 连接参数。
+ * 未配置任何 toolsets 时，各内置 toolset 因 config 不完整 → disabled，行为与老配置一致。
+ */
+export type LLMToolSetConfig = {
+  /** 启用该 toolset。缺省 true；但 config 不完整时仍按 prerequisite 判 disabled。 */
+  enabled?: boolean
+  /** 工具集类型：prometheus | elasticsearch | kubernetes | database */
+  type?: string
+  /** 连接参数，随 toolset 而异；支持 {{ env.NAME }} 占位，解析时替换、密钥不落盘。 */
+  config?: Record<string, unknown>
 }
 
-/** 一个只读实时数据源描述。配置后自动注入系统提示词，模型即可开箱即用地 curl 查询。 */
-export type DataSourceConfig = {
-  /** 数据源名称，如 "Prometheus metrics" / "Elasticsearch logs" */
+/** 解析后的 toolset 配置：env 占位已替换、合并默认值。 */
+export type ResolvedToolsetConfig = {
   name: string
-  /** 基础 URL，如 "http://localhost:19090" */
-  baseUrl: string
-  /** 补充说明（索引名、query 示例、认证等），可多行字符串 */
-  hint?: string
+  type: string
+  config: Record<string, unknown>
 }
 
 export type LiteAISettings = {
@@ -65,8 +58,8 @@ export type LiteAISettings = {
   passBackReasoning?: boolean
   mcpServers?: Record<string, McpServerConfig>
   webhook?: Partial<WebhookConfig>
-  /** 实时只读数据源；配置后自动注入系统提示词 */
-  dataSources?: DataSourceConfig[]
+  /** 内置/可扩展 toolset 启用配置。name → 配置；见 LLMToolSetConfig。 */
+  toolsets?: Record<string, LLMToolSetConfig>
 }
 
 export type WebhookConfig = {
@@ -264,6 +257,10 @@ function mergeSettings(
       ...(override.env ?? {}),
     },
     mcpServers: mergedMcpServers,
+    toolsets: {
+      ...(base.toolsets ?? {}),
+      ...(override.toolsets ?? {}),
+    },
   }
 }
 
@@ -375,5 +372,65 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     passBackReasoning,
     mcpServers: effectiveSettings.mcpServers ?? {},
     sourceSummary: `config: ${LITE_AI_SETTINGS_PATH} > ${CLAUDE_SETTINGS_PATH} > process.env (provider=${provider})`,
+  }
+}
+
+/**
+ * 递归替换 value 中 string 里的 `{{ env.NAME }}` 占位为 env[NAME]。
+ * 未命中的占位保留原文；非 string 值原样返回。
+ * 用于 headers/url/凭据等，避免敏感信息离开运行时。
+ */
+export function resolveEnvTemplate(
+  value: unknown,
+  env: Record<string, string>,
+): unknown {
+  if (typeof value === 'string') {
+    return value.replace(/\{\{\s*env\.([A-Za-z0-9_]+)\s*\}\}/g, (_, name: string) =>
+      name in env ? env[name]! : `{{ env.${name} }}`,
+    )
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => resolveEnvTemplate(item, env))
+  }
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, val]) => [
+        key,
+        resolveEnvTemplate(val, env),
+      ]),
+    )
+  }
+  return value
+}
+
+/**
+ * 读取已启用的 toolset 配置列表，并把 config 中的 env 占位替换为运行时环境变量。
+ * enabled 缺省视为 true；enabled:false 的项被剔除。
+ * prerequisite（config 完整性）由各 toolset 的 checkConfig 判定，这里不判。
+ */
+export async function loadResolvedToolsets(): Promise<ResolvedToolsetConfig[]> {
+  try {
+    const settings = await loadEffectiveSettings()
+    const raw = settings.toolsets
+    if (raw === undefined || typeof raw !== 'object') return []
+    const env: Record<string, string> = {}
+    for (const [k, v] of [
+      ...Object.entries(process.env),
+      ...Object.entries(settings.env ?? {}),
+    ]) {
+      if (v !== undefined && v !== null) env[k] = String(v)
+    }
+    const resolved: ResolvedToolsetConfig[] = []
+    for (const [name, entry] of Object.entries(raw)) {
+      if (entry === null || typeof entry !== 'object') continue
+      if (entry.enabled === false) continue
+      const type = typeof entry.type === 'string' ? entry.type : name
+      const config =
+        resolveEnvTemplate(entry.config ?? {}, env) as Record<string, unknown>
+      resolved.push({ name, type, config })
+    }
+    return resolved
+  } catch {
+    return []
   }
 }

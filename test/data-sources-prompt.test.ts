@@ -5,18 +5,16 @@ import os from 'node:os'
 import path from 'node:path'
 
 /**
- * 验证 dataSources 配置会注入系统提示词，使 LiteAI 开箱即用地查询真实数据源。
+ * 验证 toolsets 配置会注入系统提示词，使 LiteAI 开箱即用地查询真实数据源。
  * 通过临时 LITE_AI_HOME + 动态 import 隔离真实用户配置。
  */
-describe('data sources prompt injection', () => {
+describe('toolsets prompt injection', () => {
   let tempRoot: string
   let originalLiteAiHome: string | undefined
-  let originalDir: string
 
   before(async () => {
     tempRoot = await mkdtemp(path.join(os.tmpdir(), 'lite-ai-ds-test-'))
     originalLiteAiHome = process.env.LITE_AI_HOME
-    originalDir = process.cwd()
     process.env.LITE_AI_HOME = tempRoot
     await mkdir(tempRoot, { recursive: true })
   })
@@ -35,30 +33,35 @@ describe('data sources prompt injection', () => {
     return buildSystemPrompt(cwd, [])
   }
 
-  test('不配置 dataSources 时不注入数据源段落', async () => {
+  test('不配置 toolsets 时不注入数据源段落', async () => {
     const prompt = await buildPrompt(tempRoot)
     assert.ok(!prompt.includes('实时数据源'))
-    assert.ok(!prompt.includes('localhost'))
+    assert.ok(!prompt.includes('prometheus_url'))
   })
 
-  test('配置 dataSources 后注入可查询的数据源说明', async () => {
+  test('配置完整 toolsets 后注入可查询的数据源说明', async () => {
     const settingsPath = path.join(tempRoot, 'settings.json')
     await writeFile(
       settingsPath,
       JSON.stringify(
         {
-          dataSources: [
-            {
-              name: 'Prometheus metrics',
-              baseUrl: 'http://localhost:19090',
-              hint: 'curl /api/v1/query 查询',
+          toolsets: {
+            prometheus: {
+              enabled: true,
+              type: 'prometheus',
+              config: { prometheus_url: 'http://localhost:19090' },
             },
-            {
-              name: 'Elasticsearch logs',
-              baseUrl: 'http://localhost:19200',
-              hint: '索引 sock-shop-logs',
+            elasticsearch: {
+              enabled: true,
+              type: 'elasticsearch',
+              config: { es_url: 'http://localhost:19200' },
             },
-          ],
+            database: {
+              enabled: true,
+              type: 'database',
+              config: { connection_url: 'mysql://root@localhost:13306/sock_shop' },
+            },
+          },
         },
         null,
         2,
@@ -69,11 +72,36 @@ describe('data sources prompt injection', () => {
     try {
       const prompt = await buildPrompt(tempRoot)
       assert.match(prompt, /实时数据源/)
-      assert.match(prompt, /Prometheus metrics: http:\/\/localhost:19090/)
-      assert.match(prompt, /Elasticsearch logs: http:\/\/localhost:19200/)
-      assert.match(prompt, /curl \/api\/v1\/query 查询/)
-      // 要求模型走数据源，不读原始 CSV
-      assert.match(prompt, /不要 Read 数据集原始 CSV/)
+      assert.match(prompt, /prometheus、elasticsearch、database/)
+      assert.match(prompt, /不要手搓 curl 请求这些数据源/)
+    } finally {
+      await rm(settingsPath, { force: true })
+    }
+  })
+
+  test('config 不完整的 toolset 不注入数据源段落', async () => {
+    const settingsPath = path.join(tempRoot, 'settings.json')
+    await writeFile(
+      settingsPath,
+      JSON.stringify(
+        {
+          toolsets: {
+            prometheus: {
+              enabled: true,
+              type: 'prometheus',
+              config: {},
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    )
+
+    try {
+      const prompt = await buildPrompt(tempRoot)
+      assert.ok(!prompt.includes('实时数据源'))
     } finally {
       await rm(settingsPath, { force: true })
     }

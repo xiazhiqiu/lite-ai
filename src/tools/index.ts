@@ -5,29 +5,20 @@ import { discoverSkills } from '../skills.js'
 import { ToolRegistry } from '../tool.js'
 import { isTodosEnabled } from '../utils/todo-store.js'
 import { askUserTool } from './ask-user.js'
-import { editFileTool } from './edit-file.js'
-import { grepFilesTool } from './grep-files.js'
-import { listFilesTool } from './list-files.js'
 import { createLoadSkillTool } from './load-skill.js'
-import { modifyFileTool } from './modify-file.js'
-import { patchFileTool } from './patch-file.js'
-import { readFileTool } from './read-file.js'
 import { runCommandTool, isReadOnlyCommandCall } from './run-command.js'
 import { rewriteTodoListTool } from './todo-write.js'
 import { updateTodoStatusTool } from './todo-status.js'
 import { webFetchTool } from './web-fetch.js'
 import { webSearchTool } from './web-search.js'
-import { writeFileTool } from './write-file.js'
 import { hypothesisTrackerTool } from './hypothesis-tracker.js'
 import { incidentCheckpointTool } from './incident-checkpoint.js'
 import { tailLogsTool, followLogsTool, stopFollowTool } from './tail-logs.js'
 import { generatePostmortemTool } from './generate-postmortem.js'
 import { searchIncidentKbTool } from './search-incident-kb.js'
+import { buildEnabledTools } from './data-sources/registry.js'
 
 export const SUB_AGENT_TOOL_NAMES = [
-  'list_files',
-  'grep_files',
-  'read_file',
   'load_skill',
   'web_fetch',
   'web_search',
@@ -63,21 +54,16 @@ export async function createDefaultToolRegistry(args: {
 }): Promise<ToolRegistry> {
   const skills = await discoverSkills(args.cwd)
   const mcpServers = args.runtime?.mcpServers ?? {}
+  const enabledDataSourceTools = await buildEnabledTools()
 
   return new ToolRegistry([
     askUserTool,
-    { ...listFilesTool, isParallelSafe: () => true },
-    { ...grepFilesTool, isParallelSafe: () => true },
-    { ...readFileTool, isParallelSafe: () => true },
-    writeFileTool,
-    modifyFileTool,
-    editFileTool,
-    patchFileTool,
     {
       ...runCommandTool,
       isParallelSafe: input =>
         isReadOnlyCommandCall(input as { command: string; args?: string[] }),
     },
+    ...enabledDataSourceTools.map(tool => ({ ...tool, isParallelSafe: () => true })),
     { ...createLoadSkillTool(args.cwd), isParallelSafe: () => true },
     { ...webFetchTool, isParallelSafe: () => true },
     { ...webSearchTool, isParallelSafe: () => true },
