@@ -17,7 +17,7 @@ LiteAI 是一个开源的 AI agent，用于调查生产事故、定位根因并�
 
 - **标准 ReAct 循环** — `model → tool → model` 单轮可多步调用工具；超大工具结果自动落盘并在上下文里替换为短预览与文件路径
 - **多源事故默认并行子 agent** — 命中 ≥2 个独立数据源 / 服务（如 Prometheus + Elasticsearch + kubectl）时自动并发只读子 agent 各自归口取证，再汇总合并，避免串行拉低定位速度
-- **只读数据源工具集（toolset）** — 预置 Prometheus / Elasticsearch / Kubernetes / Database(SQL) 四类只读查询工具，`settings.json` 填 `toolsets` 即启用，无需写胶水代码；更多数据源适配中（Grafana / Loki / Datadog 等）
+- **只读数据源工具集（toolset）** — 预置 Prometheus / Elasticsearch / Kubernetes / Database(SQL) / Tempo 五类只读查询工具，`settings.json` 填 `toolsets` 即启用，无需写胶水代码；更多数据源适配中（Grafana / Loki / Datadog 等）
 - **上下文压缩** — 多级压缩（snip / microcompact / collapse / auto-compact）控制长会话体积；microcompact 自动折叠只读工具结果释放上下文
 - **假设-验证链** — `hypothesis_tracker` 维护结构化根因假设（pending / investigating / confirmed / refuted / inconclusive），每条结论附带可追溯证据
 - **检查点交接** — `incident_checkpoint` 支持创建 / 切换检查点，一键生成跨班交接简报（现象 / 时间线 / 已排除假设 / 待验证假设 / 关键命令）
@@ -51,6 +51,7 @@ built-in 只读 toolset，在 `settings.json` 按名字启用与配置：
 | `elasticsearch` | `elasticsearch_`（8） | `es_url` | 搜索 / 索引 / 集群健康 / 节点统计 |
 | `kubernetes` | `kubernetes_`（3） | 无（继承 kubeconfig） | pods / nodes / jq 读取 |
 | `database` | `{实例名}_`（每实例 3） | `connection_url` | 仅只读 SQL（SELECT/SHOW/DESCRIBE） |
+| `tempo` | `tempo_`（8） | `api_url`（可选 `grafana_datasource_uid` / `api_key` / `additional_headers`） | TraceQL 搜索 / 标签 / Trace 明细 / TraceQL 指标 |
 
 多个 database 实例用不同名字即可（如 `orders_db_query`）。新增数据源遵循同一模式在 `src/tools/data-sources/registry.ts` 登记即可。
 
@@ -121,6 +122,30 @@ lite-ai --webhook 8787
     "orders-db": {
       "type": "database",
       "config": { "connection_url": "mysql://user:pass@localhost:13306/orders" }
+    },
+    "tempo": {
+      "type": "tempo",
+      "config": {
+        "api_url": "http://tempo.monitoring:3200",
+        "additional_headers": { "X-Scope-OrgID": "team-a" }
+      }
+    }
+  }
+}
+```
+
+Tempo 也支持经 Grafana 数据源代理（推荐）：配置 `grafana_datasource_uid` + Grafana `api_key`，`api_url` 填 Grafana 地址，请求会走 `${api_url}/api/datasources/proxy/uid/{uid}`：
+
+```json
+{
+  "toolsets": {
+    "tempo": {
+      "type": "tempo",
+      "config": {
+        "api_url": "https://acme-corp.grafana.net",
+        "api_key": "{{ env.GRAFANA_API_KEY }}",
+        "grafana_datasource_uid": "klja8hsa-8a9c-4b35-1230-7baab22b02ee"
+      }
     }
   }
 }
