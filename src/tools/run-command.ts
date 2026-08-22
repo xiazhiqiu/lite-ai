@@ -48,7 +48,6 @@ const CONCURRENT_READONLY_COMMANDS = new Set([
   'pwd',
   'which',
   'date',
-  'env',
   'whoami',
   'uname',
   'df',
@@ -161,7 +160,9 @@ function splitShellSegments(commandLine: string): string[] {
     }
 
     // 引号外的分隔符：| ; && ||。裸 &（后台符）直接判为不安全，不得静默放行。
-    if (char === '|' || char === ';') {
+    // 换行 \n / 回车 \r 也视为分隔符，防止 "grep x\nrm -rf /" 这类多行片段被判定为单一只读段后经
+    // bash -lc 把换行后的写命令静默执行（判定器与执行器语义不一致）。
+    if (char === '|' || char === ';' || char === '\n' || char === '\r') {
       segments.push(current.trim())
       current = ''
       continue

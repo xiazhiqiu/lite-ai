@@ -92,6 +92,19 @@ describe('data-source toolset: sql 只读白名单', () => {
       assert.equal(isReadOnlySql(sql), false, sql)
     }
   })
+
+  it('拒绝注释混淆与多语句绕过（防写绕过）', () => {
+    // 块注释混淆写关键字
+    assert.equal(isReadOnlySql('del/**/ete from t'), false)
+    assert.equal(isReadOnlySql('d/**/rop table t'), false)
+    assert.equal(isReadOnlySql('sel/*x*/ect 1; x'), false)
+    // 行注释截断后附加写语句
+    assert.equal(isReadOnlySql('select 1; d/**/elete from users where 1=1 --'), false)
+    assert.equal(isReadOnlySql('select 1; drop table users --'), false)
+    assert.equal(isReadOnlySql('update t set a=1 -- comment'), false)
+    // 合法只读仍放行
+    assert.equal(isReadOnlySql('select * from users where id = 1'), true)
+  })
 })
 
 describe('data-source toolset: 工具构建', () => {

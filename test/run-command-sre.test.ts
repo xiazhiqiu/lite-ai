@@ -163,6 +163,53 @@ test('isReadOnlyCommandCall: 管道内写操作仍拒绝', () => {
   )
 })
 
+test('isSreReadOnlyCommand: kubectl get 敏感资源拒绝（Secret/ConfigMap）', () => {
+  assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'secrets']), false)
+  assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'secret', 'my-secret']), false)
+  assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'configmap', 'my-cm']), false)
+  assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'pods']), true)
+  assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'svc,secrets']), false)
+})
+
+test('isSreReadOnlyCommand: 写副作用参数（-d/-o/-O/-T）视为非只读', () => {
+  assert.equal(isSreReadOnlyCommand('curl', ['-d', 'x=1', 'http://host/api']), false)
+  assert.equal(isSreReadOnlyCommand('curl', ['--data', 'x=1', 'http://host/api']), false)
+  assert.equal(isSreReadOnlyCommand('curl', ['-F', 'file=@a', 'http://host/up']), false)
+  assert.equal(isSreReadOnlyCommand('curl', ['-o', '/tmp/f', 'http://host/metrics']), false)
+  assert.equal(isSreReadOnlyCommand('curl', ['-O', 'http://host/file.bin']), false)
+  assert.equal(isSreReadOnlyCommand('curl', ['-T', 'local.txt', 'http://host/up']), false)
+  assert.equal(isSreReadOnlyCommand('wget', ['--post-data', 'x=1', 'http://host/api']), false)
+  assert.equal(isSreReadOnlyCommand('wget', ['-O', '/tmp/f', 'http://host/file']), false)
+  // 检索端点携带 body 仍视为只读（ES _search）
+  assert.equal(
+    isSreReadOnlyCommand('curl', ['-X', 'POST', '-d', '{}', 'http://host:9200/logs/_search']),
+    true,
+  )
+})
+
+test('isSreReadOnlyCommand: 无前缀时默认拦截私网/链路本地/元数据（防 SSRF）', () => {
+  assert.equal(isSreReadOnlyCommand('curl', ['http://169.254.169.254/latest/meta-data/iam/security-credentials']), false)
+  assert.equal(isSreReadOnlyCommand('curl', ['http://10.0.0.5/metrics']), false)
+  assert.equal(isSreReadOnlyCommand('curl', ['http://172.16.0.2/metrics']), false)
+  assert.equal(isSreReadOnlyCommand('curl', ['http://192.168.1.10/metrics']), false)
+  assert.equal(isSreReadOnlyCommand('curl', ['http://metadata.google.internal/computeMetadata/v1/']), false)
+  // 公网 / 本机回环仍放行
+  assert.equal(isSreReadOnlyCommand('curl', ['http://example.com/metrics']), true)
+  assert.equal(isSreReadOnlyCommand('curl', ['http://127.0.0.1:9090/metrics']), true)
+  assert.equal(isSreReadOnlyCommand('curl', ['http://localhost:19090/api/v1/query']), true)
+  // 子代理只读通道（isReadOnlyCommandCall）同样拦截
+  assert.equal(
+    isReadOnlyCommandCall({ command: 'curl http://169.254.169.254/latest/meta-data/' }),
+    false,
+  )
+})
+
+test('isReadOnlyCommandCall: 多行多命令片段不被判为只读（换行分隔）', () => {
+  assert.equal(isReadOnlyCommandCall({ command: 'ls | grep x\nrm -rf /tmp/x' }), false)
+  assert.equal(isReadOnlyCommandCall({ command: 'grep x\nrm -rf /' }), false)
+  assert.equal(isReadOnlyCommandCall({ command: 'kubectl get pods\nkubectl delete pod nginx' }), false)
+})
+
 test('classifySreMutatingCommand: kubectl 写子命令返回原因', () => {
   const reason = classifySreMutatingCommand('kubectl', ['delete', 'pod', 'nginx'], 'kubectl delete pod nginx')
   assert.ok(reason?.includes('kubectl delete is a mutating operation'))

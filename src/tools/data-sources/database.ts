@@ -15,6 +15,34 @@ const MAX_ROWS_DEFAULT = 100
 const READ_ONLY_START = /^\s*(select|show|describe|explain|with)\b/i
 const WRITE_WORDS = /\b(insert|update|delete|drop|alter|create|grant|revoke|truncate|merge|replace|call|execute)\b/i
 
+/**
+ * 剥离 SQL 注释（块注释、-- 行注释、# 行注释），返回只读校验用 / 执行用的规范化 SQL。
+ * 注释剥离后，注释混淆关键字（如 D-E-L-<block>-E-T-E 即 DEL 与 ETE 之间夹注释）会被还原成明文
+ * 写关键字，从而被 WRITE_WORDS 拦下；同时移除 -- 行注释，防止其吞掉 queryRows 后拼的 LIMIT。
+ */
+function stripSqlComments(sql: string): string {
+  let s = sql.replace(/\/\*[\s\S]*?\*\//g, ' ')
+  s = s.replace(/--[^\n]*/g, ' ')
+  s = s.replace(/#[^\n]*/g, ' ')
+  return s
+}
+
+/** 规范化只读 SQL：去注释与两端空白。 */
+function normalizeReadOnlySql(sql: string): string {
+  return stripSqlComments(sql).trim()
+}
+
+/** 判断 SQL 是否只读（去注释、拒绝多语句、白名单开头、无写关键字）。 */
+export function isReadOnlySql(sql: string): boolean {
+  const s = normalizeReadOnlySql(sql)
+  if (!s) return false
+  // 拒绝带分号的多语句（postgres 的 simple query protocol 可一次执行多条）。
+  if (/;/.test(s)) return false
+  if (!READ_ONLY_START.test(s)) return false
+  if (WRITE_WORDS.test(s)) return false
+  return true
+}
+
 export function checkDatabaseConfig(
   toolset: ResolvedToolsetConfig,
 ): ToolsetStatus {
@@ -28,13 +56,6 @@ export function checkDatabaseConfig(
     }
   }
   return { name: toolset.name, type: 'database', enabled: true }
-}
-
-/** 判断 SQL 是否只读。 */
-export function isReadOnlySql(sql: string): boolean {
-  if (!READ_ONLY_START.test(sql)) return false
-  if (WRITE_WORDS.test(sql)) return false
-  return true
 }
 
 type Dialect = 'sqlite' | 'mysql' | 'postgres'
@@ -61,6 +82,9 @@ async function queryRows(
       const { default: pg } = await import('pg')
       const client = new pg.Client({
         connectionString: url.replace(/^postgresql/, 'postgres'),
+        // 只读诊断：限制单次查询挂起时间，防止长时间运行/阻塞拖垮 agent。
+        statement_timeout: 30_000,
+        query_timeout: 30_000,
       })
       await client.connect()
       try {
@@ -132,13 +156,15 @@ export function buildDatabaseTools(
       `Run a read-only SQL query (SELECT/SHOW/DESCRIBE/EXPLAIN/WITH) on database instance '${toolset.name}'.`,
       z.object({ sql: z.string().min(1).max(8192) }),
       async (baseUrl, input) => {
-        if (!isReadOnlySql(input.sql)) {
+        // 先规范化（去注释），再校验是否只读；校验通过后用规范化 SQL 执行，避免注释/分号绕过。
+        const sanitized = normalizeReadOnlySql(input.sql)
+        if (!isReadOnlySql(sanitized)) {
           return {
             ok: false,
-            output: '仅允许只读 SQL（SELECT/SHOW/DESCRIBE/EXPLAIN/WITH）',
+            output: '仅允许只读 SQL（SELECT/SHOW/DESCRIBE/EXPLAIN/WITH，单条语句）',
           }
         }
-        return queryRows(baseUrl, input.sql, MAX_ROWS_DEFAULT)
+        return queryRows(baseUrl, sanitized, MAX_ROWS_DEFAULT)
       },
       url,
     ),
