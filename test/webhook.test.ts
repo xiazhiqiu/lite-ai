@@ -210,14 +210,13 @@ test('runAlertDiagnosis: 诊断后存会话，loadSession 可读回', async () =
 
 test('createWebhookDiagnosisToolRegistry: 仅含只读数据源，排除命令/外联/写工具（C1）', async () => {
   const { createWebhookDiagnosisToolRegistry } = await import('../src/tools/index.js')
-  const registry = await createWebhookDiagnosisToolRegistry({ cwd: SRE_CWD })
+  const registry = await createWebhookDiagnosisToolRegistry({ cwd: SRE_CWD, runtime: null })
   const names = new Set(registry.list().map(t => t.name))
   // 必须排除一切可执行命令 / 外联 / 写能力的工具
   for (const forbidden of [
     'run_command',
     'web_fetch',
     'web_search',
-    'load_skill',
     'ask_user',
     'generate_postmortem',
     'rewrite_todo_list',
@@ -227,9 +226,10 @@ test('createWebhookDiagnosisToolRegistry: 仅含只读数据源，排除命令/�
   ]) {
     assert.equal(names.has(forbidden), false, `webhook 诊断不应包含 ${forbidden}`)
   }
-  // 至少应提供只读数据源 / 日志 / KB 检索
+  // 至少应提供只读数据源 / 日志 / KB 检索 / skill 目录检索
   assert.ok(names.has('tail_logs'), '应保留 tail_logs')
   assert.ok(names.has('search_incident_kb'), '应保留 search_incident_kb')
+  assert.ok(names.has('load_skill'), '应放行 load_skill（只读目录检索）')
 })
 
 // ---------- alert-store ----------

@@ -82,7 +82,7 @@ export async function runAlertDiagnosis(args: {
   })
 
   const runtime = await loadRuntimeConfig()
-  const tools = await createWebhookDiagnosisToolRegistry({ cwd })
+  const tools = await createWebhookDiagnosisToolRegistry({ cwd, runtime })
 
   // 只读诊断通道（C1）：工具集已限定为无副作用数据源查询，
   // 且无交互式 ask_user，无需 allow_once 权限放行。
