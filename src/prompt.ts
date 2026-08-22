@@ -175,7 +175,7 @@ export async function buildSystemPrompt(
         '## 实时数据源（已启用 toolset，使用结构化只读工具查询）',
         `已启用内置只读工具集（工具已注入工具列表）：${enabled.map(t => t.name).join('、')}。`,
         `优先用这些 ${
-          enabled.length > 1 ? 'prometheus_*/elasticsearch_*/kubernetes_*/database 工具' : '结构化工具'
+          enabled.length > 1 ? 'prometheus_*/elasticsearch_*/kubernetes_*/database/tempo 工具' : '结构化工具'
         } 查询指标、日志与集群状态，不要手搓 curl 请求这些数据源。`,
         '',
         '禁止把命令拼成一整条复杂 shell：不要用 $() 命令替换、$(( )) 算术、$VAR 变量、分号或换行拼接、python3/jq -c 解析同一行内。这些会被判定为危险命令并弹窗审批。',

@@ -10,6 +10,7 @@ import {
   __hooks,
 } from '../src/tools/data-sources/kubernetes.js'
 import { checkDatabaseConfig, buildDatabaseTools, isReadOnlySql } from '../src/tools/data-sources/database.js'
+import { checkTempoConfig, buildTempoTools } from '../src/tools/data-sources/tempo.js'
 
 function toolset(name: string, type: string, config: Record<string, unknown>): ResolvedToolsetConfig {
   return { name, type, config }
@@ -40,6 +41,14 @@ describe('data-source toolset: config checks', () => {
     assert.equal(checkDatabaseConfig(toolset('db', 'database', {})).enabled, false)
     assert.equal(
       checkDatabaseConfig(toolset('db', 'database', { connection_url: 'sqlite:///x' })).enabled,
+      true,
+    )
+  })
+
+  it('tempo 需要 api_url', () => {
+    assert.equal(checkTempoConfig(toolset('tp', 'tempo', {})).enabled, false)
+    assert.equal(
+      checkTempoConfig(toolset('tp', 'tempo', { api_url: 'http://tempo:3200' })).enabled,
       true,
     )
   })
@@ -105,6 +114,25 @@ describe('data-source toolset: 工具构建', () => {
     assert.equal(tools.every(t => t.isReadOnly), true)
   })
 
+  it('tempo 生成 8 个前缀工具且全部只读', () => {
+    const tools = buildTempoTools(toolset('tp', 'tempo', { api_url: 'http://x' }))
+    assert.equal(tools.length, 8)
+    for (const t of tools) assert.equal(t.isReadOnly, true)
+    const names = tools.map(t => t.name)
+    for (const n of [
+      'tempo_fetch_traces_comparative_sample',
+      'tempo_search_traces_by_query',
+      'tempo_search_traces_by_tags',
+      'tempo_query_trace_by_id',
+      'tempo_search_tag_names',
+      'tempo_search_tag_values',
+      'tempo_query_metrics_instant',
+      'tempo_query_metrics_range',
+    ]) {
+      assert.ok(names.includes(n), n)
+    }
+  })
+
   it('database 写 SQL 返回稳定错误', async () => {
     const [queryTool] = buildDatabaseTools(
       toolset('db', 'database', { connection_url: 'sqlite:///x' }),
@@ -133,6 +161,88 @@ describe('data-source toolset: kubernetes 执行（mock kubectl）', () => {
     )
     assert.equal(result.ok, true)
     assert.equal(result.output, JSON.stringify({ items: [] }))
+  })
+})
+
+describe('data-source toolset: tempo 执行（stub fetch）', () => {
+  afterEach(() => {
+    delete (globalThis as { fetch?: unknown }).fetch
+  })
+
+  it('对比采样：经 Grafana 代理 + Bearer，返回统计与样本', async () => {
+    let lastAuth = ''
+    let searchUrl = ''
+    let searchAuth = ''
+    const traces = [
+      { traceID: 'aaa', durationMs: 10, rootServiceName: 'svc', startTimeUnixNano: 1000000000000 },
+      { traceID: 'bbb', durationMs: 50, rootServiceName: 'svc', startTimeUnixNano: 2000000000000 },
+      { traceID: 'ccc', durationMs: 100, rootServiceName: 'svc', startTimeUnixNano: 3000000000000 },
+    ]
+    ;(globalThis as { fetch?: unknown }).fetch = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      const url = String(input)
+      const headers = init?.headers as Record<string, string> | Headers | undefined
+      lastAuth =
+        headers instanceof Headers
+          ? headers.get('Authorization') ?? ''
+          : (headers?.Authorization as string) ?? ''
+      if (url.includes('/api/search')) {
+        searchUrl = url
+        searchAuth = lastAuth
+        return new Response(JSON.stringify({ traces }), { status: 200 })
+      }
+      if (url.includes('/api/v2/traces/')) return new Response(JSON.stringify({ resourceSpans: [] }), { status: 200 })
+      return new Response('not found', { status: 404 })
+    }
+
+    const tools = buildTempoTools(
+      toolset('tp', 'tempo', {
+        api_url: 'http://grafana',
+        grafana_datasource_uid: 'uid1',
+        api_key: 'secret',
+      }),
+    )
+    const cmp = tools.find(t => t.name === 'tempo_fetch_traces_comparative_sample')!
+    const res = await cmp.run({ namespace_name: 'prod' }, { cwd: '/' })
+    assert.equal(res.ok, true)
+    assert.match(searchUrl, /http:\/\/grafana\/api\/datasources\/proxy\/uid\/uid1\/api\/search/)
+    assert.equal(searchAuth, 'Bearer secret')
+
+    const parsed = JSON.parse(res.output) as {
+      statistics: { trace_count: number; min_ms: number; max_ms: number }
+      fastest_traces: Array<{ traceID: string }>
+      median_trace: { traceID: string } | null
+    }
+    assert.equal(parsed.statistics.trace_count, 3)
+    assert.equal(parsed.statistics.min_ms, 10)
+    assert.equal(parsed.statistics.max_ms, 100)
+    assert.equal(parsed.fastest_traces[0]?.traceID, 'aaa')
+    assert.ok(parsed.median_trace)
+  })
+
+  it('对比采样：缺少过滤条件返回稳定错误', async () => {
+    const tools = buildTempoTools(toolset('tp', 'tempo', { api_url: 'http://x' }))
+    const cmp = tools.find(t => t.name === 'tempo_fetch_traces_comparative_sample')!
+    const res = await cmp.run({}, { cwd: '/' })
+    assert.equal(res.ok, false)
+    assert.match(res.output, /required but none were provided/)
+  })
+
+  it('search_traces_by_query 命中 /api/search', async () => {
+    ;(globalThis as { fetch?: unknown }).fetch = async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/api/search')) {
+        return new Response(JSON.stringify({ traces: [{ traceID: 'x' }] }), { status: 200 })
+      }
+      return new Response('not found', { status: 404 })
+    }
+    const tools = buildTempoTools(toolset('tp', 'tempo', { api_url: 'http://tempo:3200' }))
+    const search = tools.find(t => t.name === 'tempo_search_traces_by_query')!
+    const res = await search.run({ q: '{}' }, { cwd: '/' })
+    assert.equal(res.ok, true)
+    assert.match(res.output, /"traceID": "x"/)
   })
 })
 
