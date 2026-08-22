@@ -11,6 +11,7 @@ import {
 } from '../src/tools/data-sources/kubernetes.js'
 import { checkDatabaseConfig, buildDatabaseTools, isReadOnlySql } from '../src/tools/data-sources/database.js'
 import { checkTempoConfig, buildTempoTools } from '../src/tools/data-sources/tempo.js'
+import { checkLokiConfig, buildLokiTools } from '../src/tools/data-sources/loki.js'
 
 function toolset(name: string, type: string, config: Record<string, unknown>): ResolvedToolsetConfig {
   return { name, type, config }
@@ -49,6 +50,14 @@ describe('data-source toolset: config checks', () => {
     assert.equal(checkTempoConfig(toolset('tp', 'tempo', {})).enabled, false)
     assert.equal(
       checkTempoConfig(toolset('tp', 'tempo', { api_url: 'http://tempo:3200' })).enabled,
+      true,
+    )
+  })
+
+  it('loki 需要 api_url', () => {
+    assert.equal(checkLokiConfig(toolset('lk', 'loki', {})).enabled, false)
+    assert.equal(
+      checkLokiConfig(toolset('lk', 'loki', { api_url: 'http://loki:3100' })).enabled,
       true,
     )
   })
@@ -128,6 +137,21 @@ describe('data-source toolset: 工具构建', () => {
       'tempo_search_tag_values',
       'tempo_query_metrics_instant',
       'tempo_query_metrics_range',
+    ]) {
+      assert.ok(names.includes(n), n)
+    }
+  })
+
+  it('loki 生成 4 个前缀工具且全部只读', () => {
+    const tools = buildLokiTools(toolset('lk', 'loki', { api_url: 'http://x' }))
+    assert.equal(tools.length, 4)
+    for (const t of tools) assert.equal(t.isReadOnly, true)
+    const names = tools.map(t => t.name)
+    for (const n of [
+      'loki_query_logs',
+      'loki_query_labels',
+      'loki_query_label_values',
+      'loki_query_series',
     ]) {
       assert.ok(names.includes(n), n)
     }

@@ -127,20 +127,41 @@ const FILTER_OUT_TOOLS = new Set([
 
 /** 只读数据源工具白名单：评测中主要依靠这些查真数据。 */
 const ALLOW_DATA_TOOLS = new Set([
-  'prometheus_execute_prometheus_range_query',
+  // prometheus
+  'prometheus_list_rules',
+  'prometheus_get_metric_names',
+  'prometheus_get_label_values',
+  'prometheus_get_all_labels',
+  'prometheus_get_series',
+  'prometheus_get_metric_metadata',
   'prometheus_execute_prometheus_instant_query',
-  'prometheus_metric_names',
+  'prometheus_execute_prometheus_range_query',
+  // elasticsearch
   'elasticsearch_search',
-  'elasticsearch_indices',
-  'tempo_trace_search',
-  'tempo_trace_detail',
-  'kubernetes_scan_namespace',
-  'kubernetes_get_pods',
-  'kubernetes_get_deployments',
-  'kubernetes_get_services',
-  'kubernetes_get_events',
-  'loki_alertlabels',
-  'loki_series',
+  'elasticsearch_mappings',
+  'elasticsearch_list_indices',
+  'elasticsearch_cluster_health',
+  'elasticsearch_index_stats',
+  'elasticsearch_nodes_stats',
+  // tempo
+  'tempo_fetch_traces_comparative_sample',
+  'tempo_search_traces_by_query',
+  'tempo_search_traces_by_tags',
+  'tempo_query_trace_by_id',
+  'tempo_search_tag_names',
+  'tempo_search_tag_values',
+  'tempo_query_metrics_instant',
+  'tempo_query_metrics_range',
+  // kubernetes
+  'kubernetes_jq_query',
+  'kubernetes_tabular_query',
+  'kubernetes_count',
+  // loki
+  'loki_query_logs',
+  'loki_query_labels',
+  'loki_query_label_values',
+  'loki_query_series',
+  // 假设链
   'hypothesis_tracker',
 ])
 
