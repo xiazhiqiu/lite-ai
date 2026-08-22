@@ -130,7 +130,12 @@ export function scoreInstance(
   const hasTrue = submitted.filter(s =>
     truth.some(e => e.includes(s) || s.includes(e)),
   ).length
-  const precision = submitted.length > 0 ? hasTrue / submitted.length : 0
+  // submitted 为空：若已 full-recall（agent 用纯文本正确陈述根因），则 precision 视为 1
+  const precision = submitted.length > 0
+    ? hasTrue / submitted.length
+    : recallFull
+      ? 1
+      : 0
   const score = recallFull ? precision : 0
 
   const steps = Math.max(0, totalSteps)
