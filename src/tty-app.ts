@@ -1,6 +1,6 @@
 import crypto from 'node:crypto'
 import process from 'node:process'
-import { listBackgroundTasks } from './background-tasks.js'
+import { killBackgroundShellTasks, listBackgroundTasks } from './background-tasks.js'
 import { runAgentTurn } from './agent-loop.js'
 import {
   SLASH_COMMANDS,
@@ -1791,6 +1791,8 @@ export async function runTtyApp(args: TtyAppArgs): Promise<void> {
       clearInterval(welcomeAnimationTimer)
       clearInterval(inputHintTimer)
       unsubscribeSubAgents()
+      // 清理仍在运行的后台任务，避免退出后留下孤儿进程
+      killBackgroundShellTasks()
       process.stdin.off('data', onData)
       process.stdin.off('end', onEnd)
       process.stdin.off('close', onClose)

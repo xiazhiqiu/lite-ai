@@ -18,6 +18,15 @@ const DEFAULT_MAX_RETRIES = 4
 const BASE_RETRY_DELAY_MS = 500
 const MAX_RETRY_DELAY_MS = 8_000
 
+/** 单次模型请求超时，防止上游无响应时无限阻塞 agent turn。 */
+const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
+
+function withRequestTimeout(signal: AbortSignal | undefined): AbortSignal {
+  const timeout = AbortSignal.timeout(MODEL_REQUEST_TIMEOUT_MS)
+  if (!signal) return timeout
+  return AbortSignal.any([signal, timeout])
+}
+
 type AnthropicContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
@@ -273,6 +282,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
     options: ModelRequestOptions = {},
   ) {
     throwIfAborted(options.signal)
+    const requestSignal = withRequestTimeout(options.signal)
     const runtime = await this.getRuntimeConfig()
     const payload = toAnthropicMessages(messages)
     const url = `${runtime.baseUrl.replace(/\/$/, '')}/v1/messages`
@@ -311,7 +321,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
-        signal: options.signal,
+        signal: requestSignal,
       })
       if (response.ok) {
         break
@@ -322,7 +332,7 @@ export class AnthropicModelAdapter implements ModelAdapter {
       const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'))
       await abortableDelay(
         getRetryDelayMs(attempt + 1, retryAfterMs),
-        options.signal,
+        requestSignal,
       )
     }
 

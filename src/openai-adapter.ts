@@ -19,6 +19,15 @@ const DEFAULT_MAX_RETRIES = 4
 const BASE_RETRY_DELAY_MS = 500
 const MAX_RETRY_DELAY_MS = 8_000
 
+/** 单次模型请求超时，防止上游无响应时无限阻塞 agent turn。 */
+const MODEL_REQUEST_TIMEOUT_MS = 5 * 60 * 1000
+
+function withRequestTimeout(signal: AbortSignal | undefined): AbortSignal {
+  const timeout = AbortSignal.timeout(MODEL_REQUEST_TIMEOUT_MS)
+  if (!signal) return timeout
+  return AbortSignal.any([signal, timeout])
+}
+
 type OpenAIMessage =
   | { role: 'system'; content: string }
   | { role: 'user'; content: string }
@@ -276,6 +285,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
     options: ModelRequestOptions = {},
   ): Promise<AgentStep> {
     throwIfAborted(options.signal)
+    const requestSignal = withRequestTimeout(options.signal)
     const runtime = await this.getRuntimeConfig()
     const url = `${runtime.baseUrl.replace(/\/$/, '')}/chat/completions`
     const maxOutputTokens = resolveMaxOutputTokens(
@@ -314,7 +324,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
         method: 'POST',
         headers,
         body: JSON.stringify(requestBody),
-        signal: options.signal,
+        signal: requestSignal,
       })
       if (response.ok) {
         break
@@ -325,7 +335,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
       const retryAfterMs = parseRetryAfterMs(response.headers.get('retry-after'))
       await abortableDelay(
         getRetryDelayMs(attempt + 1, retryAfterMs),
-        options.signal,
+        requestSignal,
       )
     }
 

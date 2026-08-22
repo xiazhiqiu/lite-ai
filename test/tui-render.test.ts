@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderMarkdownish } from '../src/tui/markdown.ts'
+import { renderTranscriptLines } from '../src/tui/transcript.ts'
 import { isLogTool, detectLogLevel, renderLogBody } from '../src/tui/logs.ts'
 
 const RESET = '\u001b[0m'
@@ -64,6 +65,24 @@ describe('markdown table rendering', () => {
     assert.equal(out.split('\n')[1], '> a quote')
     assert.equal(out.split('\n')[2], '• an item')
     assert.equal(out.split('\n')[3], 'Title')
+  })
+
+  it('strips injected ANSI control sequences from untrusted entry bodies', () => {
+    const out = renderTranscriptLines([
+      {
+        id: 1,
+        kind: 'user',
+        body: 'Hello \u001b]0;OWNED\u0007 World\ncolor \u001b[31mRED\u001b[0m done',
+      },
+    ]).join('\n')
+
+    // OSC 标题注入（ESC ]...BEL）被整体剔除，标题文本不应残留
+    assert.equal(out.includes('OWNED'), false)
+    assert.equal(out.includes('\u001b]0;'), false)
+    // 注入的 CSI 颜色码被剥离，仅剩可见文本
+    assert.equal(out.includes('\u001b[31m'), false)
+    assert.equal(out.includes('World'), true)
+    assert.equal(out.includes('RED'), true)
   })
 })
 

@@ -69,3 +69,17 @@ export function getBackgroundTask(taskId: string): BackgroundTaskResult | null {
   }
   return refreshRecord(task)
 }
+
+/** 应用退出时清理仍在运行的本地后台任务，避免孤儿进程残留。 */
+export function killBackgroundShellTasks(): void {
+  for (const record of tasks.values()) {
+    if (record.status !== 'running') {
+      continue
+    }
+    try {
+      process.kill(record.pid, 'SIGTERM')
+    } catch {
+      // 进程可能已退出
+    }
+  }
+}

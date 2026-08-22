@@ -24,7 +24,15 @@ export type TranscriptSelection = {
 }
 
 function stripAnsi(str: string): string {
-  return str.replace(/\[[\d;]*[A-Za-z]/g, '')
+  return str
+    // OSC (ESC ] ... BEL 或 ESC \)：可改标题/剪贴板，需整体剔除
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    // CSI (ESC [ ... 终结字节 @-~)：控制光标/颜色等
+    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')
+    // 其它两字节转义（ESC X）
+    .replace(/\x1b[()][0-9A-Za-z]/g, '')
+    // 兜底：删除一切遗留的 ESC
+    .replace(/\x1b/g, '')
 }
 
 function sliceByDisplayColumns(input: string, startCol: number, endCol: number): string {
@@ -160,13 +168,17 @@ function renderWorkedForDivider(seconds: number): string {
 }
 
 function renderTranscriptEntry(entry: TranscriptEntry): string {
+  // 终端注入防护：模型回复 / 工具输出 / 用户输入都可能携带 ANSI 控制序列，
+  // 先剥离再套用本 TUI 自己的着色，防止改写标题/光标/剪贴板等。
+  const clean = stripAnsi(entry.body)
+
   if (entry.kind === 'user') {
-    return `${CYAN}${BOLD}you${RESET}\n${renderUserBody(entry.body)}`
+    return `${CYAN}${BOLD}you${RESET}\n${renderUserBody(clean)}`
   }
 
   if (entry.kind === 'assistant') {
     const header = `${GREEN}${BOLD}LiteAI${RESET}\n${indentBlock(
-      renderMarkdownish(entry.body),
+      renderMarkdownish(clean),
     )}`
     return entry.workedForSeconds === undefined
       ? header
@@ -175,7 +187,7 @@ function renderTranscriptEntry(entry: TranscriptEntry): string {
 
   if (entry.kind === 'progress') {
     return `${YELLOW}${BOLD}progress${RESET}\n${indentBlock(
-      renderMarkdownish(entry.body),
+      renderMarkdownish(clean),
     )}`
   }
 
@@ -188,12 +200,12 @@ function renderTranscriptEntry(entry: TranscriptEntry): string {
 
   const body =
     entry.status === 'running'
-      ? entry.body
+      ? clean
       : entry.collapsed
         ? `${DIM}${entry.collapsedSummary ?? 'output collapsed'}${RESET}`
         : entry.collapsePhase
           ? `${DIM}collapsing${'.'.repeat(entry.collapsePhase)}${RESET}`
-          : previewToolBody(entry.toolName, isLogTool(entry.toolName) ? renderLogBody(entry.body) : renderMarkdownish(entry.body))
+          : previewToolBody(entry.toolName, isLogTool(entry.toolName) ? renderLogBody(clean) : renderMarkdownish(clean))
 
   return `${MAGENTA}${BOLD}tool${RESET} ${entry.toolName} ${status}\n${indentBlock(body)}`
 }
