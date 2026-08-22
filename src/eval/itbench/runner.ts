@@ -176,39 +176,60 @@ function filterTools(all: { name: string; isReadOnly?: boolean }[]): {
   )
 }
 
-/** 执行一条注入/恢复命令。失败时抛错（依赖错误是否致命由调用方定）。 */
-async function runCommandScript(command: string): Promise<string> {
+/** 执行一条注入/恢复命令，返回是否成功与输出。失败是否致命由调用方决定。 */
+async function runCommandScript(command: string): Promise<{
+  ok: boolean,
+  output: string,
+}> {
   try {
     const { stdout, stderr } = await execFileAsync('sh', ['-c', command], {
       timeout: 60_000,
       maxBuffer: 8 * 1024 * 1024,
     })
-    return `${stdout}${stderr ? `\n[stderr] ${stderr}` : ''}`.trim()
+    return {
+      ok: true,
+      output: `${stdout}${stderr ? `\n[stderr] ${stderr}` : ''}`.trim(),
+    }
   } catch (error) {
     const e = error as { stderr?: string; message?: string }
-    return `命令失败: ${e.message ?? String(error)}${e.stderr ? `\n${e.stderr}` : ''}`
+    return {
+      ok: false,
+      output:
+        `命令失败: ${e.message ?? String(error)}` +
+        `${e.stderr ? `\n${e.stderr}` : ''}`,
+    }
   }
 }
 
-/** 注入故障。returns 是否注入导致致命错误。 */
+/**
+ * 注入故障。setup/pre 任一命令失败即抛错，避免 agent 在健康集群上诊断
+ * 导致评测结果全部失真且无告警（失败会在 finally 恢复后记为 error 实例）。
+ */
 async function injectFault(scenario: ItbenchScenario): Promise<void> {
   const fi = scenario.faultInjection
   if (!fi) return
-  if (fi.pre && fi.pre.length > 0) {
-    for (const cmd of fi.pre) await runCommandScript(cmd)
+  for (const phase of ['pre', 'setup'] as const) {
+    const cmds = fi[phase] ?? []
+    for (const cmd of cmds) {
+      const { ok, output } = await runCommandScript(cmd)
+      if (!ok) {
+        throw new Error(`故障注入 ${phase} 命令失败: ${cmd}\n${output}`)
+      }
+    }
   }
-  for (const cmd of fi.setup) await runCommandScript(cmd)
   const wait = fi.setupWaitSeconds ?? 0
   if (wait > 0) {
     await new Promise(r => setTimeout(r, wait * 1000))
   }
 }
 
-/** 恢复故障。 */
+/** 恢复故障。teardown 失败不致命，仅尽力恢复。 */
 async function clearFault(scenario: ItbenchScenario): Promise<void> {
   const fi = scenario.faultInjection
   if (!fi) return
-  for (const cmd of fi.teardown) await runCommandScript(cmd)
+  for (const cmd of fi.teardown) {
+    await runCommandScript(cmd)
+  }
   const wait = fi.teardownWaitSeconds ?? 0
   if (wait > 0) {
     await new Promise(r => setTimeout(r, wait * 1000))
@@ -271,7 +292,13 @@ export async function runScenario(
     }
 
     const registry = await mods.createDefaultToolRegistry({ cwd: runCwd, runtime: null })
-    await mods.hydrateMcpTools({ cwd: runCwd, runtime: null, tools: registry })
+
+    // MCP 初始化失败不阻断评测：数据源工具集（prometheus/tempo/loki/k8s）不依赖 MCP
+    try {
+      await mods.hydrateMcpTools({ cwd: runCwd, runtime: null, tools: registry })
+    } catch {
+      // 忽略：某个 MCP server 连不上时整场评测不应因此记为 error
+    }
 
     const keptNames = filterTools(registry.list())
     const kept = new Set(keptNames.map(t => t.name))
