@@ -14,6 +14,7 @@ import {
 import { buildKubernetesTools, checkKubernetesConfig } from './kubernetes.js'
 import { buildDatabaseTools, checkDatabaseConfig } from './database.js'
 import { buildTempoTools, checkTempoConfig } from './tempo.js'
+import { buildLokiTools, checkLokiConfig } from './loki.js'
 import type { ToolsetStatus } from './base.js'
 
 /**
@@ -54,6 +55,11 @@ const BUILTIN_TOOLSETS: Record<string, ToolsetDef> = {
     type: 'tempo',
     check: checkTempoConfig,
     build: buildTempoTools,
+  },
+  loki: {
+    type: 'loki',
+    check: checkLokiConfig,
+    build: buildLokiTools,
   },
 }
 

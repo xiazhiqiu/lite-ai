@@ -52,6 +52,7 @@ built-in 只读 toolset，在 `settings.json` 按名字启用与配置：
 | `kubernetes` | `kubernetes_`（3） | 无（继承 kubeconfig） | pods / nodes / jq 读取 |
 | `database` | `{实例名}_`（每实例 3） | `connection_url` | 仅只读 SQL（SELECT/SHOW/DESCRIBE） |
 | `tempo` | `tempo_`（8） | `api_url`（可选 `grafana_datasource_uid` / `api_key` / `additional_headers`） | TraceQL 搜索 / 标签 / Trace 明细 / TraceQL 指标 |
+| `loki` | `loki_`（4） | `api_url`（可选 `grafana_datasource_uid` / `api_key` / `additional_headers`） | LogQL 日志查询 / 标签名 / 标签值 / 系列 |
 
 多个 database 实例用不同名字即可（如 `orders_db_query`）。新增数据源遵循同一模式在 `src/tools/data-sources/registry.ts` 登记即可。
 
@@ -193,12 +194,33 @@ LiteAI 默认**只读优先**，放心用于生产排查：
 
 ## 评测
 
-```bash
-# 全量 RE2-SS 评测
-npm run eval:re2ss
+LiteAI 评测基于 [ITBench](https://github.com/itbench-hub/ITBench)（真实 K8s 集群 + otel-demo + 故障注入，方案 A：内置只读工具连真实数据源），评分采用 precision@full-recall。
 
-# 仅指定故障类型
-npm run eval:re2ss -- --filter=payment_loss
+### 前置
+
+1. 本地起 ITBench 场景环境（kind 集群 + otel-demo + Prometheus/Tempo/Loki + K8s），完整步骤见 [dataset/itbench/deploy-kind.md](dataset/itbench/deploy-kind.md)。建议 16GB+ 内存。
+2. 在 `~/.lite-ai/settings.json` 的 `toolsets` 中配置真实端点：`prometheus`（`prometheus_url`）、`tempo`（`api_url`）、`loki`（`api_url`）、`kubernetes`（本机 kubeconfig）。
+3. 编写场景清单 `dataset/itbench/manifest.jsonl`，每行：
+   `{ "id": "sre_task_003", "name": "…", "description": "…", "namespace": "otel-demo", "groundTruth": { "entities": ["paymentservice"] }, "faultInjection": { "setup": ["kubectl patch …"], "teardown": ["kubectl patch …"] } }`
+   - `groundTruth.entities`：根因实体列表（precision@full-recall 的召回目标）
+   - `faultInjection`（可选）：`--live` 模式下 runner 在 agent 诊断前执行 `setup` 注入故障、诊断后执行 `teardown` 恢复；可用 `setupWaitSeconds` / `teardownWaitSeconds` 控制等待数据源生效/回稳
+
+### 运行
+
+```bash
+# 全量 ITBench 评测（不注入故障，仅查已有数据源）——适合数据源已带故障
+npm run eval:itbench
+
+# 全自动：每个场景执行 setup 注入故障 → agent 诊断 → teardown 恢复
+npm run eval:itbench -- --live
+
+# 仅指定场景 / 前 N 个场景 / 每场景重复 2 次 / 限制 agent 步数
+npm run eval:itbench -- --filter=payment
+npm run eval:itbench -- --limit=3
+npm run eval:itbench -- --repeat=2
+npm run eval:itbench -- --max-steps=40
+
+# 产物：eval/results/ 下的 report.csv / report.json / report.md
 ```
 
 ## 开发

@@ -11,7 +11,7 @@
     "check": "tsc --noEmit",
     "lint": "eslint src test",
     "test": "node test/run-tests.mjs",
-    "eval:re2ss": "tsx src/eval/index.ts",
+    "eval:itbench": "tsx src/eval/itbench/index.ts",
     "install-local": "tsx src/install.ts"
   },
   "dependencies": {
