@@ -119,11 +119,17 @@ export function scoreInstance(
     submitted = extractEntities(confirmedText)
   }
 
-  const submittedSet = new Set(submitted)
-  const truthSet = new Set(truth)
+  // 归一化后的 confirmed 全文，供子串召回判断（真值常是完整根因句，agent 需陈述到同一粒度）
+  const confirmedLower = confirmedText.toLowerCase().replace(/[^a-z0-9]/g, '')
 
-  const recallFull = truth.every(e => submittedSet.has(e))
-  const hasTrue = submitted.filter(e => truthSet.has(e)).length
+  // ITBench 方向：真值实体 e 被召回当且仅当它出现在 agent confirmed 文本中
+  const isRecalled = (e: string): boolean => confirmedLower.includes(e)
+
+  const recallFull = truth.every(isRecalled)
+  // precision 的命中：提交实体为某真值的子串，或真值为提交实体的子串
+  const hasTrue = submitted.filter(s =>
+    truth.some(e => e.includes(s) || s.includes(e)),
+  ).length
   const precision = submitted.length > 0 ? hasTrue / submitted.length : 0
   const score = recallFull ? precision : 0
 
@@ -150,10 +156,12 @@ export function aggregateResults(
   const valid = instances.filter(i => i.completed && !i.error)
 
   const byScenario: Record<string, ItbenchAggregated> = {}
-  for (const inst of valid) {
-    const bucket = instances.filter(i => i.scenario === inst.scenario)
-    if (!byScenario[inst.scenario]) {
-      byScenario[inst.scenario] = aggregateResults(bucket)
+  const scenarios = new Set(valid.map(i => i.scenario))
+  // 单场景时不再递归（否则与自身互为 bucket 无限循环）
+  if (scenarios.size > 1) {
+    for (const scenario of scenarios) {
+      const bucket = instances.filter(i => i.scenario === scenario)
+      byScenario[scenario] = aggregateResults(bucket)
     }
   }
 
