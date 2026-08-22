@@ -11,15 +11,13 @@ import { OpenAIModelAdapter } from '../openai-adapter.js'
 import { AnthropicModelAdapter } from '../anthropic-adapter.js'
 import { PermissionManager } from '../permissions.js'
 import { buildSystemPrompt } from '../prompt.js'
-import {
-  createDefaultToolRegistry,
-  hydrateMcpTools,
-} from '../tools/index.js'
+import { createWebhookDiagnosisToolRegistry } from '../tools/index.js'
 import { runAgentTurn } from '../agent-loop.js'
 import { saveSession } from '../session.js'
 import { createContentReplacementState } from '../utils/tool-result-storage.js'
 import { createContextCollapseState } from '../compact/context-collapse.js'
 import type { ChatMessage, ModelAdapter } from '../types.js'
+import type { ToolRegistry } from '../tool.js'
 import type { Alert } from './types.js'
 import { alertSessionId, normalizeToUserMessage } from './types.js'
 import { notifyIfConfigured } from './notify.js'
@@ -41,7 +39,7 @@ export type DiagnosisResult = {
 
 function pickModel(
   runtime: Awaited<ReturnType<typeof loadRuntimeConfig>>,
-  tools: Awaited<ReturnType<typeof createDefaultToolRegistry>>,
+  tools: ToolRegistry,
   injected?: ModelAdapter,
 ): ModelAdapter {
   if (injected) return injected
@@ -84,9 +82,10 @@ export async function runAlertDiagnosis(args: {
   })
 
   const runtime = await loadRuntimeConfig()
-  const tools = await createDefaultToolRegistry({ cwd, runtime })
-  await hydrateMcpTools({ cwd, runtime, tools }).catch(() => {})
+  const tools = await createWebhookDiagnosisToolRegistry({ cwd })
 
+  // 只读诊断通道（C1）：工具集已限定为无副作用数据源查询，
+  // 且无交互式 ask_user，无需 allow_once 权限放行。
   const permissions = new PermissionManager(cwd, async () => ({
     decision: 'allow_once' as const,
   }))

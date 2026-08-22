@@ -3,6 +3,7 @@
  * 串行队列自动诊断 → 存会话 → 通知。单会话串行，满足"无并发写"约束。
  */
 import http from 'node:http'
+import { timingSafeEqual } from 'node:crypto'
 import type { WebhookConfig } from '../config.js'
 import { routeAlertSource } from './sources/index.js'
 import { AlertDedupe, truncateAlerts } from './dedupe.js'
@@ -43,11 +44,19 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   })
 }
 
-/** 校验 secret：支持 `Bearer <token>` 或裸 token。 */
+/** 校验 secret：支持 `Bearer <token>` 或裸 token，恒定时间比较防时序侧信道。 */
 function matchesSecret(secret: string, header: unknown): boolean {
   if (typeof header !== 'string') return false
   const raw = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : header
-  return raw.trim() === secret && raw.length > 0
+  const candidate = raw.trim()
+  if (candidate.length === 0 || candidate.length !== secret.length) return false
+  return timingSafeEqual(Buffer.from(secret), Buffer.from(candidate))
+}
+
+/** 判断监听地址是否为回环（仅回环时允许多进程本机访问，无需 secret）。 */
+function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase()
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1'
 }
 
 function reply(
@@ -64,6 +73,15 @@ export async function runWebhookServer(
   opts: WebhookServerOptions,
 ): Promise<void> {
   const config = opts.config
+  const host = config.host ?? '127.0.0.1'
+
+  // fail-closed：绑定到非回环地址时强制要求 secret，否则拒绝启动（防未授权触发诊断 / 提权 / RCE）。
+  if (!config.secret && !isLoopbackHost(host)) {
+    throw new Error(
+      `[webhook] 绑定到非回环地址 ${host} 时必须配置 webhook.secret，否则拒绝启动（防未授权诊断）`,
+    )
+  }
+
   const dedupe = new AlertDedupe()
   const diagnose = opts.diagnose ?? ((alert: Alert) => runAlertDiagnosis({ cwd: opts.cwd, alert }))
 

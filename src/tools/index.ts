@@ -81,6 +81,32 @@ export async function createDefaultToolRegistry(args: {
   })
 }
 
+/**
+ * 构建 webhook 自动诊断可用的只读工具子集（C1）。
+ *
+ * 只允许无副作用的诊断数据源（指标/链路/日志/SQL 只读查询）与只读告警检索，
+ * 严格排除：run_command / web_fetch / web_search / load_skill / ask_user /
+ * 写类工具（generate_postmortem、todo、follow）及任意 MCP 工具。
+ * 即使用户绕过 webhook.secret，通道也只能做只读诊断，无法执行命令或外联。
+ */
+export async function createWebhookDiagnosisToolRegistry(args: {
+  cwd: string
+}): Promise<ToolRegistry> {
+  const skills = await discoverSkills(args.cwd)
+  const enabledDataSourceTools = await buildEnabledTools()
+  return new ToolRegistry(
+    [
+      ...enabledDataSourceTools.map(tool => ({ ...tool, isParallelSafe: () => true })),
+      { ...tailLogsTool, isParallelSafe: () => true },
+      { ...searchIncidentKbTool, isParallelSafe: () => true },
+    ],
+    {
+      skills,
+      mcpServers: [],
+    },
+  )
+}
+
 export async function hydrateMcpTools(args: {
   cwd: string
   runtime: RuntimeConfig | null
