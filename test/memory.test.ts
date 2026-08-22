@@ -47,6 +47,29 @@ function write(dir: string, name: string, content: string): string {
 }
 
 describe('discoverInstructionFiles', () => {
+  test('include 指向目录外符号链接时被跳过（防恶意/include 外泄）', async () => {
+    const dir = makeTempDir() // scanRoot 与 home 同用
+    try {
+      const projectDir = path.join(dir, 'project')
+      // 目录外敏感文件
+      write(path.join(dir, 'outside'), 'secret.txt', 'SUPERSECRET_OUTSIDE')
+      // 项目内 LITE.local.md 引用一个指向外部的符号链接
+      write(projectDir, 'LITE.local.md', '正常指令行\n@escaped-link\n')
+      // symlink: project/escaped-link -> outside/secret.txt
+      fs.symlinkSync(path.join(dir, 'outside', 'secret.txt'), path.join(projectDir, 'escaped-link'))
+
+      const files = await discoverTestFiles(projectDir, dir)
+      const mem = files
+        .map(f => f.content)
+        .join('\n')
+      assert.match(mem, /正常指令行/)
+      assert.doesNotMatch(mem, /SUPERSECRET_OUTSIDE/, '不应把外部敏感文件读进上下文')
+      assert.match(mem, /out-of-root/, '应标记为 out-of-root 跳过')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test('returns empty when no files exist', async () => {
     const dir = makeTempDir()
     try {

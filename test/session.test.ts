@@ -129,6 +129,20 @@ describe('session persistence', () => {
     assert.equal(loaded![5].content, 'Assistant response 2')
   })
 
+  it('rejects path-traversal session ids (sessionId 穿越)', async () => {
+    const cwd = path.join(testDir, 'project-traversal')
+    const messages = makeMessages(2)
+    const badIds = ['../../evil', 'a/b', '..', '.', 'a\\b']
+    for (const badId of badIds) {
+      await assert.rejects(() => saveSession(cwd, badId, messages), /invalid session id/)
+      const loaded = await loadSession(cwd, badId)
+      assert.equal(loaded, null, `sessionId ${JSON.stringify(badId)} 不应可读`)
+    }
+    // 合法单段 id 不受影响
+    await saveSession(cwd, 'normal123', messages)
+    assert.notEqual(await loadSession(cwd, 'normal123'), null)
+  })
+
   it('returns null for nonexistent session', async () => {
     const cwd = path.join(testDir, 'no-such-project')
     const loaded = await loadSession(cwd, 'nonexist')

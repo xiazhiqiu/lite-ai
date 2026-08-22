@@ -1,4 +1,4 @@
-import { readFile, readdir } from 'node:fs/promises'
+import { readFile, readdir, realpath } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { LITE_AI_DIR } from './config.js'
@@ -67,6 +67,14 @@ function isUnsafeIncludePath(includePath: string): boolean {
   return parts.some(part => part === '..')
 }
 
+/** child 是否位于 root 目录内（均应为 realpath 解析后的绝对路径）。 */
+function isWithin(child: string, root: string): boolean {
+  const r = path.resolve(root)
+  const c = path.resolve(child)
+  if (c === r) return true
+  return c.startsWith(r + path.sep)
+}
+
 async function resolveIncludes(
   content: string,
   fromFile: string,
@@ -92,6 +100,25 @@ async function resolveIncludes(
     const includePath = path.resolve(fromDir, includeRef)
     if (visited.has(includePath)) {
       rendered.push(`<!-- include skipped: cycle detected ${includeRef} -->`)
+      continue
+    }
+
+    // 防符号链接逃逸：若 include 真实路径位于引用文件所在目录之外，
+    // 则把外部敏感文件读取进上下文，予以跳过。文件不存在时由下方 tryRead 报 not found。
+    let realDir: string | null = null
+    try {
+      realDir = await realpath(fromDir)
+    } catch {
+      realDir = path.resolve(fromDir)
+    }
+    let realTarget: string | null = null
+    try {
+      realTarget = await realpath(includePath)
+    } catch {
+      realTarget = null
+    }
+    if (realTarget && realDir && !isWithin(realTarget, realDir)) {
+      rendered.push(`<!-- include skipped: out-of-root ${includeRef} -->`)
       continue
     }
 

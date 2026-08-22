@@ -54,7 +54,18 @@ function projectDir(cwd: string): string {
   return path.join(LITE_AI_PROJECTS_DIR, projectDirName(cwd))
 }
 
+/** sessionId 必须是单一安全文件名段，禁止路径分隔符/`.`/`..`，防目录穿越写任意 jsonl。 */
+function isSafeSessionId(sessionId: string): boolean {
+  if (!sessionId || sessionId.length === 0) return false
+  if (sessionId.includes('/') || sessionId.includes('\\')) return false
+  const base = path.basename(sessionId)
+  return base === sessionId && base !== '.' && base !== '..'
+}
+
 function sessionFilePath(cwd: string, sessionId: string): string {
+  if (!isSafeSessionId(sessionId)) {
+    throw new Error(`invalid session id: ${sessionId}`)
+  }
   return path.join(projectDir(cwd), `${sessionId}.jsonl`)
 }
 

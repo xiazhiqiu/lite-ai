@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
+import path from 'node:path'
 import { z } from 'zod'
 import type { ToolDefinition } from '../tool.js'
 
@@ -49,6 +50,10 @@ function splitLines(s: string): string[] {
 /** 从数据源拉取最后 N 行。 */
 async function fetchTail(source: LogSource, lines: number): Promise<string[]> {
   if (source.type === 'file') {
+    // 路径校验：只允许绝对路径（防相对路径歧义/穿越），且拒绝目录。
+    if (!path.isAbsolute(source.path)) {
+      throw new Error(`Log file path must be absolute: ${source.path}`)
+    }
     let content: string
     try {
       content = await readFile(source.path, 'utf8')
@@ -69,7 +74,17 @@ async function fetchTail(source: LogSource, lines: number): Promise<string[]> {
     return splitLines(content).slice(-lines)
   }
 
-  // kubectl logs
+  // kubectl：pod/namespace/container 作为位置参数传给 kubectl，拒绝以 `-`
+  // 开头的值，避免被解析为 kubectl 标志（参数注入）。
+  for (const [label, value] of [
+    ['namespace', source.namespace],
+    ['pod', source.pod],
+    ['container', source.container ?? ''],
+  ] as const) {
+    if (value.startsWith('-')) {
+      throw new Error(`${label} must not start with '-'`)
+    }
+  }
   const args = [
     'logs',
     source.pod,

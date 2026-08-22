@@ -144,6 +144,37 @@ test('tail_logs: lines 超过上限被 schema 拒绝', async () => {
   assert.equal(result.ok, false)
 })
 
+test('tail_logs: 相对文件路径被拒绝（只允许绝对路径）', async () => {
+  const tools = await registry()
+  const result = await tools.execute(
+    'tail_logs',
+    { source: { type: 'file', path: 'logs/app.log' } },
+    { cwd: tempRoot },
+  )
+  assert.equal(result.ok, false)
+  assert.match(result.output, /must be absolute/)
+})
+
+test('tail_logs: kubectl pod/namespace 以 - 开头被拒绝（防 kubectl 标志注入）', async () => {
+  const tools = await registry()
+  for (const bad of ['--all-namespaces', '-o']) {
+    const r = await tools.execute(
+      'tail_logs',
+      { source: { type: 'kubectl', namespace: 'sock-shop', pod: bad } },
+      { cwd: tempRoot },
+    )
+    assert.equal(r.ok, false, `pod=${bad} 应被拒绝`)
+    assert.match(r.output, /must not start with '-'/)
+  }
+  const r2 = await tools.execute(
+    'tail_logs',
+    { source: { type: 'kubectl', namespace: '-n', pod: 'payment' } },
+    { cwd: tempRoot },
+  )
+  assert.equal(r2.ok, false)
+  assert.match(r2.output, /must not start with '-'/)
+})
+
 // --- follow_logs ---
 
 test('follow_logs create: 创建会话并返回初始尾部 + session_id', async () => {

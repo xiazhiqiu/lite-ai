@@ -135,7 +135,12 @@ export async function loadSkill(
   name: string,
 ): Promise<LoadedSkill | null> {
   const normalizedName = name.trim()
-  if (!normalizedName) {
+  // 技能名必须是单一目录段，禁止路径分隔符 / `..`，防目录穿越读取任意文件。
+  if (!normalizedName || normalizedName.includes('/') || normalizedName.includes('\\')) {
+    return null
+  }
+  const firstSegment = normalizedName.split(/[/\\]+/)[0]!
+  if (path.basename(firstSegment) !== firstSegment || firstSegment === '.' || firstSegment === '..') {
     return null
   }
 

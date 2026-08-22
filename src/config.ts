@@ -156,7 +156,10 @@ export async function saveMcpTokensFile(
   filePath = LITE_AI_MCP_TOKENS_PATH,
 ): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true })
-  await writeFile(filePath, `${JSON.stringify(tokens, null, 2)}\n`, 'utf8')
+  await writeFile(filePath, `${JSON.stringify(tokens, null, 2)}\n`, {
+    encoding: 'utf8',
+    mode: 0o600, // 令牌属于凭据，限制为仅本用户可读写
+  })
 }
 
 async function readSettingsFile(filePath: string): Promise<LiteAISettings> {
@@ -287,10 +290,11 @@ export async function saveLiteAISettings(
   await mkdir(LITE_AI_DIR, { recursive: true })
   const existing = await readSettingsFile(LITE_AI_SETTINGS_PATH)
   const next = mergeSettings(existing, updates)
+  // settings.json 可能含 apiKey 等凭据，限制为仅本用户可读写。
   await writeFile(
     LITE_AI_SETTINGS_PATH,
     `${JSON.stringify(next, null, 2)}\n`,
-    'utf8',
+    { encoding: 'utf8', mode: 0o600 },
   )
 }
 

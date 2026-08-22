@@ -61,3 +61,18 @@ test('load_skill 工具: 未知 skill 返回错误', async () => {
   assert.equal(result.ok, false)
   assert.match(result.output, /Unknown skill/)
 })
+
+test('loadSkill: 拒绝目录穿越技能名（防任意 SKILL.md 读取）', async () => {
+  const { loadSkill } = await import('../src/skills.js')
+  for (const name of [
+    '../../../../etc/passwd',
+    'a/b',
+    '..',
+    '.',
+    'a\\b',
+    '/etc/passwd',
+  ]) {
+    const skill = await loadSkill(tmpCwd, name)
+    assert.equal(skill, null, `技能名 ${JSON.stringify(name)} 应被拒绝`)
+  }
+})
