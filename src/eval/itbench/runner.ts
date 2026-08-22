@@ -17,7 +17,7 @@ import path from 'node:path'
 import { promisify } from 'node:util'
 import { LITE_AI_SETTINGS_PATH } from '../../config.js'
 import type { HypothesisList } from '../../utils/hypothesis-store.js'
-import type { ItbenchScenario } from './manifest.js'
+import type { ItbenchScenario, FaultInjection } from './manifest.js'
 import {
   scoreInstance,
   type ItbenchInstanceResult,
@@ -82,7 +82,7 @@ async function getModules() {
 }
 
 /** 设置临时 LITE_AI_HOME，复制真实 settings.json（含数据源端点与 API key）。 */
-async function setupTempHome(): Promise<{ dir: string; restore: () => void }> {
+async function setupTempHome(): Promise<{ dir: string; restore: () => Promise<void> }> {
   const tmp = path.join(
     os.tmpdir(),
     `lite-ai-itbench-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -91,17 +91,26 @@ async function setupTempHome(): Promise<{ dir: string; restore: () => void }> {
 
   try {
     const content = await readFile(LITE_AI_SETTINGS_PATH, 'utf8')
-    await writeFile(path.join(tmp, 'settings.json'), content, 'utf8')
+    // 沿用凭据文件 0600 权限，避免其他进程读到临时 settings.json 里的 API key
+    await writeFile(path.join(tmp, 'settings.json'), content, {
+      encoding: 'utf8',
+      mode: 0o600,
+    })
   } catch {
     // settings.json 不存在时靠 env vars 兜底
   }
 
   const original = process.env.LITE_AI_HOME
   process.env.LITE_AI_HOME = tmp
-  return { dir: tmp, restore: () => {
-    if (original === undefined) delete process.env.LITE_AI_HOME
-    else process.env.LITE_AI_HOME = original
-  } }
+  return {
+    dir: tmp,
+    restore: async () => {
+      if (original === undefined) delete process.env.LITE_AI_HOME
+      else process.env.LITE_AI_HOME = original
+      // 彻底删除临时目录，避免含 API key 的 settings.json 残留在系统临时目录
+      await rm(tmp, { recursive: true, force: true })
+    },
+  }
 }
 
 /** 评测中过滤掉的工具（写操作 / 交互 / 子 agent 无关项）。 */
@@ -262,12 +271,29 @@ function buildUserMessage(scenario: ItbenchScenario, sources: string[]): string 
   ].filter(Boolean).join('\n')
 }
 
+/**
+ * 场景是否携带故障注入命令。携带任意 shell 命令时需额外信任确认。
+ * 故障注入命令经 `sh -c` 以操作者完整权限执行，命中前必须显式认可目标集群。
+ */
+function scenarioHasFaultCommands(scenario: ItbenchScenario): boolean {
+  const fi = scenario.faultInjection as FaultInjection | undefined
+  if (!fi) return false
+  return [...(fi.pre ?? []), ...(fi.setup ?? []), ...(fi.teardown ?? [])].some(
+    cmd => typeof cmd === 'string' && cmd.trim().length > 0,
+  )
+}
+
 export type ItbenchRunOptions = {
   maxSteps?: number
   modelName?: string
   quiet?: boolean
   /** 跳过故障注入（用于调试数据源） */
   skipFaultInjection?: boolean
+  /**
+   * 信任故障注入命令。为 true 时才允许执行清单携带的任意 shell 命令。
+   * 默认 false，避免未经确认就在操作者环境中执行不可信清单命令。
+   */
+  trustFaultInjection?: boolean
   signal?: AbortSignal
 }
 
@@ -288,6 +314,13 @@ export async function runScenario(
 
   try {
     if (!options.skipFaultInjection) {
+      if (scenarioHasFaultCommands(scenario) && !options.trustFaultInjection) {
+        throw new Error(
+          '故障注入被拒绝：场景清单携带任意 shell 命令，默认不信任。' +
+            '请确认评测目标是本地测试集群，并通过内置清单的 --live 或设置 ' +
+            'LITE_AI_EVAL_FAULT_INJECTION=1 显式授权后再执行。',
+        )
+      }
       await injectFault(scenario)
     }
 
@@ -369,7 +402,9 @@ export async function runScenario(
     } catch {
       // teardown 失败不阻断结果返回
     }
-    tempHome.restore()
+    tempHome.restore().catch(() => {
+      // 临时目录清理失败不阻断结果返回
+    })
     await rm(runCwd, { recursive: true, force: true })
   }
 }

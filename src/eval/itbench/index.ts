@@ -18,6 +18,7 @@ import { runScenario, listDataSources } from './runner.js'
 import {
   loadManifest,
   filterScenarios,
+  ITBENCH_MANIFEST_PATH,
   type ItbenchScenario,
 } from './manifest.js'
 import { aggregateResults, type ItbenchInstanceResult } from './scorer.js'
@@ -100,10 +101,17 @@ async function main(): Promise<void> {
   }
 
   const dataSources = await listDataSources()
+  // 故障注入命令以操作者完整权限执行：内置清单默认信任，自定义/外部清单需显式
+  // 用 LITE_AI_EVAL_FAULT_INJECTION=1 授权，防止误对非测试集群执行任意 shell 命令。
+  const isBundledManifest =
+    args.manifest === undefined ||
+    path.resolve(args.manifest) === ITBENCH_MANIFEST_PATH
+  const trustFaultInjection =
+    args.live && (isBundledManifest || process.env.LITE_AI_EVAL_FAULT_INJECTION === '1')
   if (!args.quiet) {
     console.log(`Manifest: ${args.manifest ?? '(default dataset/itbench/manifest.jsonl)'}`)
     console.log(`Scenarios: ${limited.length} × ${args.repeat} repeat = ${limited.length * args.repeat} runs`)
-    console.log(`Fault injection: ${args.live ? 'ENABLED (--live)' : 'SKIPPED (use --live)'}`)
+    console.log(`Fault injection: ${args.live ? (trustFaultInjection ? 'ENABLED (trusted)' : 'BLOCKED (untrusted, set LITE_AI_EVAL_FAULT_INJECTION=1)') : 'SKIPPED (use --live)'}`)
     console.log('Enabled data sources (from ~/.lite-ai/settings.json toolsets):')
     for (const s of dataSources) console.log(`  - ${s}`)
     console.log('')
@@ -119,6 +127,7 @@ async function main(): Promise<void> {
       const result = await runScenario(scenario, r, {
         maxSteps: args.maxSteps,
         skipFaultInjection: !args.live,
+        trustFaultInjection,
         quiet: args.quiet,
       })
       results.push(result)

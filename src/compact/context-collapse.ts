@@ -8,6 +8,7 @@ import {
   CONTEXT_COLLAPSE_KEEP_RECENT_MESSAGES,
   CONTEXT_COLLAPSE_MAX_FAILURES,
   CONTEXT_COLLAPSE_MAX_SPANS_PER_PASS,
+  CONTEXT_COLLAPSE_MAX_SUMMARY_INPUT_CHARS,
   CONTEXT_COLLAPSE_MIN_TOKENS_TO_SAVE,
   CONTEXT_COLLAPSE_TARGET_USAGE,
   CONTEXT_COLLAPSE_UTILIZATION,
@@ -511,7 +512,16 @@ function messageToCollapseText(message: ChatMessage): string {
 }
 
 function messagesToCollapseText(messages: ChatMessage[]): string {
-  return messages.map(messageToCollapseText).join('\n\n')
+  let text = messages.map(messageToCollapseText).join('\n\n')
+  // 上限保护：跨度过大时截断汇总输入，保留末尾（选中 span 内相对更新的上下文）。
+  // 避免汇总请求携带超大正文导致上游 context 超限。
+  if (text.length > CONTEXT_COLLAPSE_MAX_SUMMARY_INPUT_CHARS) {
+    text =
+      `… (original ${text.length} chars, truncated to ` +
+      `${CONTEXT_COLLAPSE_MAX_SUMMARY_INPUT_CHARS}) …\n\n` +
+      text.slice(-CONTEXT_COLLAPSE_MAX_SUMMARY_INPUT_CHARS)
+  }
+  return text
 }
 
 export function buildContextCollapseSummaryPrompt(conversationText: string): string {

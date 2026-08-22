@@ -17,6 +17,19 @@ export type EmbedderConfig = {
 }
 
 /**
+ * 资源上限：防止超大/超多文本导致 embedding 成本失控或模型 token 截断异常。
+ * - 单条文本过长时先截断（embedding 模型通常有 token 上限）。
+ * - 批量嵌入时按 EMBED_BATCH_MAX 分批，返回顺序与条数不变。
+ */
+const EMBED_TEXT_MAX_CHARS = 16_000
+const EMBED_BATCH_MAX = 32
+
+function capText(text: string): string {
+  if (text.length <= EMBED_TEXT_MAX_CHARS) return text
+  return text.slice(0, EMBED_TEXT_MAX_CHARS)
+}
+
+/**
  * 决定 embedding 来源，优先级从高到低：
  * 1. 设置 LITE_AI_EMBED_API_URL → 使用用户自己的在线 embedding API。
  * 2. 否则使用本地模型：LITE_AI_EMBED_MODEL_ID 指定模型（默认 Xenova/all-MiniLM-L6-v2），
@@ -93,7 +106,7 @@ async function embedRemoteBatch(
       'Content-Type': 'application/json',
       ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
     },
-    body: JSON.stringify({ model: cfg.model, input: texts }),
+    body: JSON.stringify({ model: cfg.model, input: texts.map(capText) }),
   })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
@@ -137,7 +150,7 @@ async function getExtractor(modelId: string, modelRoot: string) {
 
 async function embedLocalSingle(text: string, modelId: string, modelRoot: string): Promise<Float32Array> {
   const pipe = await getExtractor(modelId, modelRoot)
-  const output = await pipe(text, { pooling: 'mean', normalize: true })
+  const output = await pipe(capText(text), { pooling: 'mean', normalize: true })
   return assertDimension(new Float32Array(output.data as Float32Array))
 }
 
@@ -149,7 +162,7 @@ async function embedLocalBatch(
   const pipe = await getExtractor(modelId, modelRoot)
   const results: Float32Array[] = []
   for (const t of texts) {
-    const output = await pipe(t, { pooling: 'mean', normalize: true })
+    const output = await pipe(capText(t), { pooling: 'mean', normalize: true })
     results.push(assertDimension(new Float32Array(output.data as Float32Array)))
   }
   return results
@@ -162,11 +175,16 @@ export async function embed(text: string): Promise<Float32Array> {
   return embedLocalSingle(text, cfg.modelId || DEFAULT_LOCAL_MODEL_ID, cfg.modelRoot)
 }
 
-/** 批量生成 embedding。 */
+/** 批量生成 embedding（自动分批，保持顺序与条数不变）。 */
 export async function embedBatch(texts: string[]): Promise<Float32Array[]> {
   const cfg = embeddingConfig()
-  if (cfg.mode === 'api') return embedRemoteBatch(texts, cfg)
-  return embedLocalBatch(texts, cfg.modelId || DEFAULT_LOCAL_MODEL_ID, cfg.modelRoot)
+  const batch = (t: string[]) =>
+    cfg.mode === 'api' ? embedRemoteBatch(t, cfg) : embedLocalBatch(t, cfg.modelId || DEFAULT_LOCAL_MODEL_ID, cfg.modelRoot)
+  const results: Float32Array[] = []
+  for (let i = 0; i < texts.length; i += EMBED_BATCH_MAX) {
+    results.push(...(await batch(texts.slice(i, i + EMBED_BATCH_MAX))))
+  }
+  return results
 }
 
 /** 重置已加载的本地 extractor（测试隔离用）。 */

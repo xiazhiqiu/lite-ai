@@ -3,6 +3,14 @@ export type Chunk = {
   content: string
 }
 
+/** 单个 chunk 内容长度上限：超长章节截断，避免 embedding 成本与存储失控。 */
+const CHUNK_MAX_CONTENT_CHARS = 16_000
+
+function capContent(content: string): string {
+  if (content.length <= CHUNK_MAX_CONTENT_CHARS) return content
+  return `${content.slice(0, CHUNK_MAX_CONTENT_CHARS)}\n...(truncated by lite-ai chunk cap)`
+}
+
 /**
  * 将 postmortem Markdown 按 `## ` 章节标题切片。
  * - 每个 `## ` 标题及其正文作为一个 chunk（标题行保留，便于检索定位来源章节）。
@@ -34,11 +42,11 @@ export function chunkMarkdown(md: string): Chunk[] {
   const chunks: Chunk[] = []
   const leadingText = leading.join('\n').trim()
   if (leadingText) {
-    chunks.push({ section_title: '', content: leadingText })
+    chunks.push({ section_title: '', content: capContent(leadingText) })
   }
   for (const section of sections) {
     const content = section.body.join('\n').trim()
-    chunks.push({ section_title: section.title, content })
+    chunks.push({ section_title: section.title, content: capContent(content) })
   }
   return chunks
 }
