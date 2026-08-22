@@ -36,7 +36,7 @@ export function resolveProviderName(raw: unknown): ProviderName {
 export type LLMToolSetConfig = {
   /** 启用该 toolset。缺省 true；但 config 不完整时仍按 prerequisite 判 disabled。 */
   enabled?: boolean
-  /** 工具集类型：prometheus | elasticsearch | kubernetes | database */
+  /** 工具集类型：prometheus | elasticsearch | kubernetes | database | tempo */
   type?: string
   /** 连接参数，随 toolset 而异；支持 {{ env.NAME }} 占位，解析时替换、密钥不落盘。 */
   config?: Record<string, unknown>

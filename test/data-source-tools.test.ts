@@ -10,6 +10,7 @@ import {
   __hooks,
 } from '../src/tools/data-sources/kubernetes.js'
 import { checkDatabaseConfig, buildDatabaseTools, isReadOnlySql } from '../src/tools/data-sources/database.js'
+import { checkTempoConfig, buildTempoTools } from '../src/tools/data-sources/tempo.js'
 
 function toolset(name: string, type: string, config: Record<string, unknown>): ResolvedToolsetConfig {
   return { name, type, config }
@@ -40,6 +41,14 @@ describe('data-source toolset: config checks', () => {
     assert.equal(checkDatabaseConfig(toolset('db', 'database', {})).enabled, false)
     assert.equal(
       checkDatabaseConfig(toolset('db', 'database', { connection_url: 'sqlite:///x' })).enabled,
+      true,
+    )
+  })
+
+  it('tempo 需要 api_url', () => {
+    assert.equal(checkTempoConfig(toolset('tp', 'tempo', {})).enabled, false)
+    assert.equal(
+      checkTempoConfig(toolset('tp', 'tempo', { api_url: 'http://tempo:3200' })).enabled,
       true,
     )
   })
