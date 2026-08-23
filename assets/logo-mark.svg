@@ -1,12 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- lite-ai wordmark glyph — transparent version of the lowercase "lt" monogram,
-     for dark backgrounds / editorial placements. -->
+<!-- lite-ai glyph — transparent version of the connected "lt" ligature.
+     For dark backgrounds / editorial placements. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" role="img" aria-label="lite-ai">
   <title>lite-ai</title>
-  <!-- "l": vertical stem -->
-  <path fill="#ffffff" d="M150 160 H290 V640 H150 Z"/>
-  <!-- "t": crossbar (short, centered over its own stem, distinct from "l") -->
-  <path fill="#ffffff" d="M480 180 H640 V310 H480 Z"/>
-  <!-- "t": stem -->
-  <path fill="#ffffff" d="M510 310 H640 V640 H510 Z"/>
+  <defs>
+    <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3ad3ff"/>
+      <stop offset="0.55" stop-color="#4f8bff"/>
+      <stop offset="1" stop-color="#8a5cff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- "l" stem — flows up into the "t" crossbar; foot chamfered inward -->
+  <path fill="url(#lg)" d="M176 200 H296 L296 596 L232 640 H176 Z"/>
+  <!-- "t" crossbar — continuous from the top of "l", extends right -->
+  <path fill="url(#lg)" d="M296 200 H624 V320 H296 Z"/>
+  <!-- "t" stem — descends from the crossbar; foot chamfered outward -->
+  <path fill="url(#lg)" d="M512 320 H624 L624 596 L560 640 H512 Z"/>
 </svg>
