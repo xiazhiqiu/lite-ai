@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- lite-ai mark — geometric lowercase "lt" monogram in the style of the Pi coding agent.
+     Pure-rectangle construction, white glyph, two distinct letter cells so it reads as "lt".
+     Badge version: deep-navy rounded tile + white glyph (light/dark safe). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" role="img" aria-label="lite-ai">
+  <title>lite-ai</title>
+  <!-- rounded tile -->
+  <rect x="40" y="40" width="720" height="720" rx="150" fill="#0a1628"/>
+  <!-- hairline ring to seat the mark on varied backgrounds -->
+  <rect x="39.5" y="39.5" width="721" height="721" rx="150.5" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2"/>
+
+  <!-- "l": vertical stem -->
+  <path fill="#ffffff" d="M150 160 H290 V640 H150 Z"/>
+  <!-- "t": crossbar (short, centered over its own stem, distinct from "l") -->
+  <path fill="#ffffff" d="M480 180 H640 V310 H480 Z"/>
+  <!-- "t": stem -->
+  <path fill="#ffffff" d="M510 310 H640 V640 H510 Z"/>
+</svg>
