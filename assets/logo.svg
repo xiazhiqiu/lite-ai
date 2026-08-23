@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- lite-ai mark — connected geometric "lt" ligature in the spirit of the Pi agent.
-     The "l" stem flows into the "t" crossbar, which branches down into the "t" stem,
-     forming one continuous monogram. Diagonal chamfer on both feet adds forward motion.
-     Badge version: deep-navy tile + cyan→violet gradient glyph. -->
+<!-- lite-ai mark — geometric "L" monogram for "lite".
+     Bold stem + chamfered inner corner (slanted joint) gives a modern,
+     forward-moving silhouette in the vein of the Pi agent. Deep-navy tile
+     + cyan→violet gradient. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" role="img" aria-label="lite-ai">
   <title>lite-ai</title>
   <defs>
@@ -18,10 +18,6 @@
   <!-- hairline ring to seat the mark on varied backgrounds -->
   <rect x="39.5" y="39.5" width="721" height="721" rx="150.5" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="2"/>
 
-  <!-- "l" stem — flows up into the "t" crossbar; foot chamfered inward -->
-  <path fill="url(#lg)" d="M176 200 H296 L296 596 L232 640 H176 Z"/>
-  <!-- "t" crossbar — continuous from the top of "l", extends right -->
-  <path fill="url(#lg)" d="M296 200 H624 V320 H296 Z"/>
-  <!-- "t" stem — descends from the crossbar; foot chamfered outward -->
-  <path fill="url(#lg)" d="M512 320 H624 L624 596 L560 640 H512 Z"/>
+  <!-- "L": vertical stem, chamfered inner joint, horizontal foot -->
+  <path fill="url(#lg)" d="M185 170 H315 V530 L565 530 V645 H185 Z"/>
 </svg>
