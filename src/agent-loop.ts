@@ -156,6 +156,10 @@ export async function runAgentTurn(args: {
   let messages = args.messages
   let emptyResponseRetryCount = 0
   let recoverableThinkingRetryCount = 0
+  // 本回合跑过工具后，若模型返回"纯文本且未标 <final>"，先当中间进度续跑；
+  // 上限防止模型长期不标 <final> 导致无限续跑。
+  let midTaskTextContinuationCount = 0
+  const midTaskTextContinuationMax = 3
   let toolErrorCount = 0
   let sawToolResultThisTurn = false
   let snippedThisTurn = false
