@@ -325,3 +325,25 @@ test('isReadOnlyCommandCall: 授权前缀放行且跨前缀拦截', () => {
     false,
   )
 })
+
+test('SRE 常用只读系统命令进交互式只读白名单（ps/ss/netstat/dmesg/journalctl/top）', () => {
+  for (const cmd of ['ps', 'ss', 'netstat', 'dmesg', 'journalctl', 'top']) {
+    assert.equal(
+      isReadOnlyCommandCall({ command: cmd }),
+      true,
+      `${cmd} 应被识别为只读命令`,
+    )
+  }
+  // 带常见参数的只读调用同样放行
+  assert.equal(isReadOnlyCommandCall({ command: 'ps', args: ['aux'] }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'ss', args: ['-tunap'] }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'journalctl', args: ['-u', 'nginx'] }), true)
+  // 关键可控命令不再放行（保守边界守住）：top 需要 -b -n1 配合非交互执行，仅命令命中时不在此断言
+  assert.equal(isReadOnlyCommandCall({ command: 'cat', args: ['/etc/shadow'] }), false)
+  assert.equal(isReadOnlyCommandCall({ command: 'ip', args: ['link', 'set', 'eth0', 'down'] }), false)
+})
+
+test('SRE 常用只读系统命令可并发（isReadOnlyCommandCall 口径一致）', () => {
+  assert.equal(isReadOnlyCommandCall({ command: 'ps aux' }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'journalctl -u nginx | grep -i error | tail -n 5' }), false)
+})
