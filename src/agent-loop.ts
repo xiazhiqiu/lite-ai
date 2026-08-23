@@ -156,6 +156,10 @@ export async function runAgentTurn(args: {
   let messages = args.messages
   let emptyResponseRetryCount = 0
   let recoverableThinkingRetryCount = 0
+  // 本回合跑过工具后，若模型返回"纯文本且未标 <final>"，先当中间进度续跑；
+  // 上限防止模型长期不标 <final> 导致无限续跑。
+  let midTaskTextContinuationCount = 0
+  const midTaskTextContinuationMax = 3
   let toolErrorCount = 0
   let sawToolResultThisTurn = false
   let snippedThisTurn = false
@@ -371,6 +375,26 @@ export async function runAgentTurn(args: {
             content: fallbackContent,
           },
         ]
+      }
+
+      // 本回合已跑过工具，但模型返回的纯文本既未带后续工具调用、也未标 <progress>/<final>。
+      // 长任务（如 RCA）中模型常这样"喘口气"，误判为最终答案会导致回合提前结束、退回 Ready。
+      // 这里改成当作中间进度续跑一次；若模型其实已完成，下一条应以 <final> 应答即止。
+      if (sawToolResultThisTurn && next.kind !== 'final' && next.kind !== 'progress') {
+        if (midTaskTextContinuationCount < midTaskTextContinuationMax) {
+          midTaskTextContinuationCount += 1
+          args.onProgressMessage?.(next.content)
+          appendThinkingBlocks(next.thinkingBlocks)
+          messages = [
+            ...messages,
+            { role: 'assistant_progress', content: next.content },
+          ]
+          pushContinuationPrompt(
+            '你上一条是纯文本但未标记 <final>，而本回合已经执行过工具，说明任务可能尚未完成。若任务确实已完成，请以 <final> 开头给出最终答案；否则继续下一步的具体工具调用。',
+          )
+          continue
+        }
+        // 达到续跑上限：放弃自动续跑，把最后这段文本当作本回合输出返回。
       }
 
       const assistantMessage: ChatMessage = {
