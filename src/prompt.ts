@@ -71,6 +71,7 @@ export async function buildSystemPrompt(
     '- Use ask_user when clarification is required; that tool ends the turn and waits for user input.',
     '- Do not stop after a progress update. After a <progress> message, continue the task in the next step.',
     '- Plain assistant text without <progress> is treated as a completed assistant message for this turn.',
+    '- For long multi-step tasks (e.g. RCA), never stop to report intermediate findings as plain text. Wrap every interim update in <progress> and keep driving tool calls until the deliverable is complete; only then emit <final>. A bare partial-status sentence will end the turn early.',
     '## 边界（不做什么）',
     '- 不替用户做生产写操作决策（如"该不该重启""该不该切流量"），只给数据支撑与风险标注。',
     '- 不在无证据时给确定根因；拿不到证据时明确说"未定位"，不编造。',
