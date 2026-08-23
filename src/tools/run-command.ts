@@ -8,8 +8,17 @@ import { SRE_READONLY_COMMANDS, isSreReadOnlyCommand } from './sre-whitelist.js'
 
 const execFileAsync = promisify(execFile)
 
-/** 前台命令执行超时，防止命令卡死阻塞整个 agent turn。 */
-const COMMAND_TIMEOUT_MS = 5 * 60 * 1000
+/** 前台命令执行超时，防止命令卡死阻塞整个 agent turn。默认 5 分钟。 */
+const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000
+
+/** 读取可配置的前台命令超时（毫秒），非法/缺省时回退默认值。 */
+function getCommandTimeoutMs(): number {
+  const value = Number(process.env.LITE_AI_COMMAND_TIMEOUT_MS)
+  if (!Number.isFinite(value) || value <= 0) {
+    return DEFAULT_COMMAND_TIMEOUT_MS
+  }
+  return Math.floor(value)
+}
 
 // lite-ai 作为 SRE 事故诊断助手，run_command 只保留只读诊断命令（SRE 通道）。
 // 值班机默认无源码，不暴露开发类命令与本地文件读取，避免 agent 越权访问测试数据/任意文件。
@@ -491,7 +500,7 @@ export const runCommandTool: ToolDefinition<Input> = {
       cwd: effectiveCwd,
       maxBuffer: 1024 * 1024,
       env: process.env,
-      timeout: COMMAND_TIMEOUT_MS,
+      timeout: getCommandTimeoutMs(),
       killSignal: 'SIGTERM',
     })
 

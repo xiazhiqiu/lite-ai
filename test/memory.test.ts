@@ -331,9 +331,50 @@ describe('discoverInstructionFiles', () => {
 
       const files = await discoverTestFiles(dir)
       assert.equal(files.length, 1)
-      assert.ok(files[0].content.includes('unsafe path ../outside.md'))
+      // `..` 现在按根目录边界校验：超出根目录且文件不存在 → not found
+      assert.ok(files[0].content.includes('not found ../outside.md'))
       assert.ok(files[0].content.includes('not found missing.md'))
+      // 绝对路径引用仍视为 unsafe
       assert.ok(files[0].content.includes('unsafe path'))
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('resolves ../ includes to sibling dirs within the project root', async () => {
+    const dir = makeTempDir()
+    const projectDir = path.join(dir, 'project')
+    try {
+      write(projectDir, 'docs/notes.md', 'SIBLING_CROSS_DIR_CONTENT')
+      write(projectDir + path.sep + 'sub', 'LITE.local.md', '@../docs/notes.md')
+
+      const files = await discoverInstructionFiles(
+        path.join(projectDir, 'sub'),
+        dir, // home
+        projectDir, // scanRoot
+      )
+      const mem = files.map(f => f.content).join('\n')
+      assert.ok(mem.includes('SIBLING_CROSS_DIR_CONTENT'), '同根目录内 ../ 跨子目录引用应被解析')
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('blocks textual ../ include escaping out of the project root', async () => {
+    const dir = makeTempDir()
+    const projectDir = path.join(dir, 'project')
+    try {
+      write(dir, 'outside', 'secret.md', 'LEAKED_OUTSIDE_SECRET')
+      write(projectDir + path.sep + 'sub', 'LITE.local.md', '@../../outside/secret.md')
+
+      const files = await discoverInstructionFiles(
+        path.join(projectDir, 'sub'),
+        dir, // home
+        projectDir, // scanRoot
+      )
+      const mem = files.map(f => f.content).join('\n')
+      assert.ok(mem.includes('out-of-root'), '逃逸出项目根（../..）应标记 out-of-root 并跳过')
+      assert.doesNotMatch(mem, /LEAKED_OUTSIDE_SECRET/, '不应读取项目根之外的敏感文件')
     } finally {
       fs.rmSync(dir, { recursive: true, force: true })
     }

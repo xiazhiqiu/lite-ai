@@ -50,13 +50,14 @@ function splitLines(s: string): string[] {
 /** 从数据源拉取最后 N 行。 */
 async function fetchTail(source: LogSource, lines: number): Promise<string[]> {
   if (source.type === 'file') {
-    // 路径校验：只允许绝对路径（防相对路径歧义/穿越），且拒绝目录。
-    if (!path.isAbsolute(source.path)) {
-      throw new Error(`Log file path must be absolute: ${source.path}`)
-    }
+    // 路径归一：绝对路径直接用；相对路径按当前工作目录归并为绝对路径
+    // （避免相对路径歧义/穿越到不可预期位置），并拒绝目录。
+    const filePath = path.isAbsolute(source.path)
+      ? source.path
+      : path.resolve(source.path)
     let content: string
     try {
-      content = await readFile(source.path, 'utf8')
+      content = await readFile(filePath, 'utf8')
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code
       if (code === 'ENOENT') {

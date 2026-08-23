@@ -144,7 +144,7 @@ test('tail_logs: lines 超过上限被 schema 拒绝', async () => {
   assert.equal(result.ok, false)
 })
 
-test('tail_logs: 相对文件路径被拒绝（只允许绝对路径）', async () => {
+test('tail_logs: 相对文件路径按当前目录归并（不存在时报 not found 而非硬拒绝）', async () => {
   const tools = await registry()
   const result = await tools.execute(
     'tail_logs',
@@ -152,7 +152,7 @@ test('tail_logs: 相对文件路径被拒绝（只允许绝对路径）', async 
     { cwd: tempRoot },
   )
   assert.equal(result.ok, false)
-  assert.match(result.output, /must be absolute/)
+  assert.match(result.output, /Log file not found/)
 })
 
 test('tail_logs: kubectl pod/namespace 以 - 开头被拒绝（防 kubectl 标志注入）', async () => {

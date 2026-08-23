@@ -62,9 +62,10 @@ async function discoverRuleFiles(rulesDir: string): Promise<string[]> {
 }
 
 function isUnsafeIncludePath(includePath: string): boolean {
+  // 仅拒绝绝对路径与空引用。`..` 字面相对引用在下方按知识根目录边界校验后放行
+  // （支持同一知识根目录内跨子目录 @include），不再一刀切拒绝。
   if (!includePath || path.isAbsolute(includePath)) return true
-  const parts = includePath.split(/[\\/]+/)
-  return parts.some(part => part === '..')
+  return false
 }
 
 /** child 是否位于 root 目录内（均应为 realpath 解析后的绝对路径）。 */
@@ -79,8 +80,20 @@ async function resolveIncludes(
   content: string,
   fromFile: string,
   visited: Set<string>,
+  includeRoot: string,
 ): Promise<string> {
   const fromDir = path.dirname(fromFile)
+  // include 根边界：默认取引用文件所在目录（与既有逻辑一致，安全兜底），
+  // 调用方会显式传入知识根目录以支持同根内跨目录引用。
+  let realRoot: string
+  try {
+    realRoot = await realpath(includeRoot)
+  } catch {
+    const fallback = await realpath(fromDir).catch(() => path.resolve(fromDir))
+    realRoot = isWithin(path.resolve(includeRoot), path.resolve(fallback))
+      ? includeRoot
+      : fallback
+  }
   const lines = content.split('\n')
   const rendered: string[] = []
 
@@ -103,21 +116,15 @@ async function resolveIncludes(
       continue
     }
 
-    // 防符号链接逃逸：若 include 真实路径位于引用文件所在目录之外，
+    // 防符号链接/路径逃逸：若 include 真实路径位于知识根目录之外，
     // 则把外部敏感文件读取进上下文，予以跳过。文件不存在时由下方 tryRead 报 not found。
-    let realDir: string | null = null
-    try {
-      realDir = await realpath(fromDir)
-    } catch {
-      realDir = path.resolve(fromDir)
-    }
     let realTarget: string | null = null
     try {
       realTarget = await realpath(includePath)
     } catch {
       realTarget = null
     }
-    if (realTarget && realDir && !isWithin(realTarget, realDir)) {
+    if (realTarget && !isWithin(realTarget, realRoot)) {
       rendered.push(`<!-- include skipped: out-of-root ${includeRef} -->`)
       continue
     }
@@ -129,7 +136,7 @@ async function resolveIncludes(
     }
 
     visited.add(includePath)
-    const resolved = await resolveIncludes(included, includePath, visited)
+    const resolved = await resolveIncludes(included, includePath, visited, includeRoot)
     visited.delete(includePath)
     rendered.push(
       `<!-- included from ${includeRef} -->`,
@@ -171,6 +178,16 @@ export async function discoverInstructionFiles(
   }
   dirs.reverse()
 
+  // 项目记忆文件的 include 根边界：取 scanRoot（带根目录检索时以它为界），
+  // 否则取最高一层非文件系统根目录的祖先，支持同一项目内跨子目录 @include，
+  // 同时挡住向上逃逸出项目根（如 /etc、家目录之外）的引用。
+  const isFilesystemRoot = (dir: string) =>
+    path.resolve(dir) === path.parse(path.resolve(dir)).root
+  const projectRoot =
+    resolvedScanRoot ??
+    dirs.find(dir => !isFilesystemRoot(dir)) ??
+    path.resolve(cwd)
+
   const files: ContextFile[] = []
 
   // User global first
@@ -182,7 +199,7 @@ export async function discoverInstructionFiles(
   for (const candidate of globalCandidates) {
     const content = await tryRead(candidate)
     if (content) {
-      files.push({ path: candidate, content: await resolveIncludes(content, candidate, new Set([candidate])) })
+      files.push({ path: candidate, content: await resolveIncludes(content, candidate, new Set([candidate]), home) })
       break // only one global file
     }
   }
@@ -190,7 +207,7 @@ export async function discoverInstructionFiles(
   for (const rulePath of await discoverRuleFiles(path.join(home, 'rules'))) {
     const content = await tryRead(rulePath)
     if (content) {
-      files.push({ path: rulePath, content: await resolveIncludes(content, rulePath, new Set([rulePath])) })
+      files.push({ path: rulePath, content: await resolveIncludes(content, rulePath, new Set([rulePath]), home) })
     }
   }
 
@@ -200,14 +217,14 @@ export async function discoverInstructionFiles(
       const filePath = path.join(dir, name)
       const content = await tryRead(filePath)
       if (content) {
-        files.push({ path: filePath, content: await resolveIncludes(content, filePath, new Set([filePath])) })
+        files.push({ path: filePath, content: await resolveIncludes(content, filePath, new Set([filePath]), projectRoot) })
       }
     }
 
     for (const rulePath of await discoverRuleFiles(path.join(dir, '.lite-ai', 'rules'))) {
       const content = await tryRead(rulePath)
       if (content) {
-        files.push({ path: rulePath, content: await resolveIncludes(content, rulePath, new Set([rulePath])) })
+        files.push({ path: rulePath, content: await resolveIncludes(content, rulePath, new Set([rulePath]), projectRoot) })
       }
     }
   }
