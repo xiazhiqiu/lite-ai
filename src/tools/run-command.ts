@@ -37,6 +37,13 @@ const READONLY_COMMANDS = new Set([
   'uname',
   'uptime',
   'whoami',
+  // SRE 常用只读系统状态查询：进程 / socket / 内核日志 / 上层日志，均无副作用，可直接执行不弹窗
+  'ps',
+  'ss',
+  'netstat',
+  'dmesg',
+  'journalctl',
+  'top',
 ])
 
 function isAllowedCommand(command: string): boolean {
@@ -75,6 +82,13 @@ const CONCURRENT_READONLY_COMMANDS = new Set([
   'awk',
   'basename',
   'dirname',
+  // SRE 常用只读系统状态查询：与 READONLY_COMMANDS 保持一致，保证并发/只读态与交互式口径相同
+  'ps',
+  'ss',
+  'netstat',
+  'dmesg',
+  'journalctl',
+  'top',
 ])
 
 const CONCURRENT_READONLY_GIT_SUBCOMMANDS = new Set([
