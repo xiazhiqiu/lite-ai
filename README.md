@@ -23,6 +23,7 @@ LiteAI 是一个开源的 AI agent，用于调查生产事故、定位根因并�
 - **检查点交接** — `incident_checkpoint` 支持创建 / 切换检查点，一键生成跨班交接简报（现象 / 时间线 / 已排除假设 / 待验证假设 / 关键命令）
 - **复盘与知识库** — `generate_postmortem` 模板化生成复盘并归档入库；`search_incident_kb` 用 sqlite-vec 本地语义检索相似历史事故
 - **流式日志** — `tail_logs` / `follow_logs` / `stop_follow` 按级别着色，支持超大文件与滚动读取
+- **可观测性** — 每回合自动落盘 LLM 调用 / 工具调用 / 回合统计（`LITE_AI_HOME/metrics.db`），`/metrics` 聚合展示，`/metrics --turn <id>` 按回合回溯调用链
 - **告警 webhook** — `lite-ai --webhook [port]` 独立监听进程，接收 Alertmanager 等事件源告警，自动去重、排队诊断并回推通知
 - **MCP 与本地技能** — 支持 MCP 工具 / 资源 / prompt（stdio 或远程 HTTP），通过 `SKILL.md` 发现本地技能
 
@@ -100,7 +101,7 @@ lite-ai --fork <session-id>
 lite-ai --webhook 8787
 ```
 
-常用入口点：`/help` `/tools` `/status` `/model [name]` `/config-paths` `/skills` `/mcp` `/alerts`；
+常用入口点：`/help` `/tools` `/status` `/model [name]` `/config-paths` `/skills` `/mcp` `/alerts` `/metrics [--turn <id>]`；
 会话管理：`/resume` `/rename` `/fork` `/new`；上下文：`/compact` `/collapse` `/snip`；
 项目管理：`/memory` `/init` `/permissions`；诊断：`/cmd <shell 命令>`（仅放行只读命令）。
 
@@ -163,7 +164,7 @@ Tempo 也支持经 Grafana 数据源代理（推荐）：配置 `grafana_datasou
 | `LITE_AI_HOME` | 覆盖配置 / 数据目录 |
 | `LITE_AI_BIN_DIR` | 覆盖启动器安装目录 |
 
-数据 / 产物落盘于 `LITE_AI_HOME`：会话（`projects/`）、权限（`permissions.json`）、webhook 记录（`webhook/alerts.jsonl`）、复盘报告（`postmortems/`）、事故知识库（`incident-kb/kb.db`）。
+数据 / 产物落盘于 `LITE_AI_HOME`：会话（`projects/`）、权限（`permissions.json`）、webhook 记录（`webhook/alerts.jsonl`）、复盘报告（`postmortems/`）、事故知识库（`incident-kb/kb.db`）、可观测性指标（`metrics.db`，`LITE_AI_METRICS=0` 可关闭）。
 
 ## 告警 webhook
 
