@@ -19,9 +19,11 @@ before(async () => {
 })
 
 after(async () => {
-  // 先释放事故知识库连接，避免 rm 临时目录时报 EBUSY
+  // 先释放事故知识库与可观测性指标连接，避免 rm 临时目录时报 EBUSY
   const { closeDb } = await import('../src/utils/kb-store.js')
   closeDb()
+  const { _resetMetricsForTest } = await import('../src/observability/metrics.js')
+  _resetMetricsForTest()
   delete process.env.LITE_AI_HOME
   await rm(tempRoot, { recursive: true, force: true })
 })

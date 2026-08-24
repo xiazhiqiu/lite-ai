@@ -43,6 +43,8 @@ before(async () => {
 })
 
 after(async () => {
+  const { _resetMetricsForTest } = await import('../src/observability/metrics.js')
+  _resetMetricsForTest()
   delete process.env.LITE_AI_HOME
   delete process.env.OPENAI_MODEL
   delete process.env.OPENAI_API_KEY

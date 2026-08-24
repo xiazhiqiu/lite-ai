@@ -21,6 +21,7 @@ import {
   type SnipCompactResult,
 } from './compact/snipCompact.js'
 import { computeContextStats } from './utils/token-estimator.js'
+import { createTurnScope, type TurnScope } from './observability/metrics.js'
 import {
   partitionToolCalls,
   isToolConcurrencyEnabled,
@@ -127,6 +128,19 @@ function isRecoverableThinkingStop(args: {
   )
 }
 
+type TurnStats = {
+  model?: string
+  steps: number
+  toolCalls: number
+  toolErrors: number
+  emptyResponses: number
+  thinkingRetries: number
+  midtaskContinuations: number
+  contextUtilization: number
+  maxStepsHit: boolean
+}
+
+/** 对外入口：执行一个 agent 回合并记录回合级指标（try/finally 覆盖抛错路径）。 */
 export async function runAgentTurn(args: {
   model: ModelAdapter
   tools: ToolRegistry
@@ -148,11 +162,68 @@ export async function runAgentTurn(args: {
   contextCollapseState?: ContextCollapseState
   signal?: AbortSignal
 }): Promise<ChatMessage[]> {
+  const startedAt = Date.now()
+  const scope = createTurnScope()
+  try {
+    const { messages, stats } = await runAgentTurnCore(args, scope)
+    scope.flush({ ...stats, durationMs: Date.now() - startedAt })
+    return messages
+  } catch (error) {
+    const statsErr = error as Error & { stats?: TurnStats }
+    // 优先用回合循环中断时携带的部分指标，保留已发生步骤的进度。
+    const stats = statsErr.stats ?? {
+      model: args.modelName,
+      steps: 0,
+      toolCalls: 0,
+      toolErrors: 0,
+      emptyResponses: 0,
+      thinkingRetries: 0,
+      midtaskContinuations: 0,
+      contextUtilization: 0,
+      maxStepsHit: false,
+    }
+    scope.flush({
+      ...stats,
+      durationMs: Date.now() - startedAt,
+      error: statsErr.message ?? String(error),
+    })
+    throw error
+  }
+}
+
+async function runAgentTurnCore(
+  args: {
+    model: ModelAdapter
+    tools: ToolRegistry
+    messages: ChatMessage[]
+    cwd: string
+    permissions?: PermissionManager
+    maxSteps?: number
+    modelName?: string
+    startTime?: number
+    onToolStart?: (toolUseId: string, toolName: string, input: unknown) => void
+    onToolResult?: (toolUseId: string, toolName: string, output: string, isError: boolean) => void
+    onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
+    onProgressMessage?: (content: string) => void
+    onAutoCompact?: (result: CompressionResult) => void | Promise<void>
+    onSnipCompact?: (result: SnipCompactResult) => void | Promise<void>
+    onContextCollapse?: (result: ContextCollapseResult) => void | Promise<void>
+    onContextStats?: (stats: import('./utils/token-estimator.js').ContextStats) => void
+    contentReplacementState?: ContentReplacementState
+    contextCollapseState?: ContextCollapseState
+    signal?: AbortSignal
+  },
+  scope: TurnScope,
+): Promise<{ messages: ChatMessage[]; stats: TurnStats }> {
   const maxSteps = args.maxSteps
   const modelName = args.modelName ?? ''
   const startTime = args.startTime ?? Date.now()
   const noteRepeatMax = readToolRepeatNoticeMax()
   const statusBarToolCount = new Map<string, number>()
+  let turnSteps = 0
+  let toolCallsTotal = 0
+  let maxStepsHit = false
+  let contextUtilization = 0
   let messages = args.messages
   let emptyResponseRetryCount = 0
   let recoverableThinkingRetryCount = 0
@@ -175,6 +246,18 @@ export async function runAgentTurn(args: {
     args.contentReplacementState ?? createContentReplacementState()
   let contextCollapseState =
     args.contextCollapseState ?? createContextCollapseState()
+
+  const buildStats = (): TurnStats => ({
+    model: modelName || undefined,
+    steps: turnSteps,
+    toolCalls: toolCallsTotal,
+    toolErrors: toolErrorCount,
+    emptyResponses: emptyResponseRetryCount,
+    thinkingRetries: recoverableThinkingRetryCount,
+    midtaskContinuations: midTaskTextContinuationCount,
+    contextUtilization: contextUtilization,
+    maxStepsHit,
+  })
 
   const replaceContextCollapseState = (nextState: ContextCollapseState) => {
     contextCollapseState = nextState
@@ -206,13 +289,16 @@ export async function runAgentTurn(args: {
     ]
   }
 
+  try {
   for (let step = 0; maxSteps == null || step < maxSteps; step++) {
     throwIfAborted(args.signal)
+    turnSteps += 1
     let latestStats: import('./utils/token-estimator.js').ContextStats | null = null
     let modelMessages = messages
 
     if (modelName) {
       latestStats = computeContextStats(messages, modelName)
+      contextUtilization = latestStats.utilization
 
       if (!snippedThisTurn) {
         const snipResult = await snipCompactConversation({
@@ -286,9 +372,31 @@ export async function runAgentTurn(args: {
       return [...modelMessages, { role: 'user' as const, content: status }]
     })()
 
-    const next = await args.model.next(nextInput, {
-      tools: args.tools.list(),
-      signal: args.signal,
+    const llmStartedAt = Date.now()
+    let next: Awaited<ReturnType<ModelAdapter['next']>>
+    try {
+      next = await args.model.next(nextInput, {
+        tools: args.tools.list(),
+        signal: args.signal,
+      })
+    } catch (error) {
+      scope.pushLlm({
+        model: modelName,
+        provider: undefined,
+        latencyMs: Date.now() - llmStartedAt,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw error
+    }
+    const llmLatencyMs = Date.now() - llmStartedAt
+    scope.pushLlm({
+      model: modelName,
+      provider: next.usage?.source,
+      inputTokens: next.usage?.inputTokens,
+      outputTokens: next.usage?.outputTokens,
+      totalTokens: next.usage?.totalTokens,
+      latencyMs: llmLatencyMs,
+      stopReason: next.diagnostics?.stopReason,
     })
 
     if (next.type === 'assistant') {
@@ -368,13 +476,16 @@ export async function runAgentTurn(args: {
 
         args.onAssistantMessage?.(fallbackContent, { final: true })
         appendThinkingBlocks(next.thinkingBlocks)
-        return [
-          ...messages,
-          {
-            role: 'assistant',
-            content: fallbackContent,
-          },
-        ]
+        return {
+          messages: [
+            ...messages,
+            {
+              role: 'assistant',
+              content: fallbackContent,
+            },
+          ],
+          stats: buildStats(),
+        }
       }
 
       // 本回合已跑过工具，但模型返回的纯文本既未带后续工具调用、也未标 <progress>/<final>。
@@ -411,7 +522,7 @@ export async function runAgentTurn(args: {
         args.onAssistantMessage?.(next.content, { final: true })
       }
 
-      return withAssistant
+      return { messages: withAssistant, stats: buildStats() }
     }
 
     appendThinkingBlocks(next.thinkingBlocks)
@@ -442,7 +553,7 @@ export async function runAgentTurn(args: {
     }
 
     if ((next.calls?.length ?? 0) === 0 && next.content && next.contentKind !== 'progress') {
-      return messages
+      return { messages, stats: buildStats() }
     }
 
     const executedToolResults: Array<{
@@ -477,6 +588,7 @@ export async function runAgentTurn(args: {
             args.tools.execute(call.toolName, call.input, {
               cwd: args.cwd,
               permissions: args.permissions,
+              scope,
             }),
           ),
         )
@@ -491,6 +603,7 @@ export async function runAgentTurn(args: {
             toolErrorCount += 1
           }
           args.onToolResult?.(call.id, call.toolName, result.output, !result.ok)
+          toolCallsTotal += 1
           statusBarToolCount.set(call.toolName, (statusBarToolCount.get(call.toolName) ?? 0) + 1)
           executedToolResults.push({ call, result })
         })
@@ -504,6 +617,7 @@ export async function runAgentTurn(args: {
           const result = await args.tools.execute(call.toolName, call.input, {
             cwd: args.cwd,
             permissions: args.permissions,
+            scope,
           })
           if (notice) {
             result.output = `${notice}\n${result.output}`
@@ -513,6 +627,7 @@ export async function runAgentTurn(args: {
             toolErrorCount += 1
           }
           args.onToolResult?.(call.id, call.toolName, result.output, !result.ok)
+          toolCallsTotal += 1
           statusBarToolCount.set(call.toolName, (statusBarToolCount.get(call.toolName) ?? 0) + 1)
           executedToolResults.push({ call, result })
         }
@@ -574,17 +689,28 @@ export async function runAgentTurn(args: {
             },
           ]
         }
-        return messages
+        return { messages, stats: buildStats() }
     }
+    }
+  } catch (error) {
+    // 回合在循环内中断：给错误挂上已累计的部分指标，供外层 runAgentTurn 落库，
+    // 避免 steps/tool_calls 等进度在抛错路径上全部记录为 0。
+    const statsErr = error as Error & { stats?: TurnStats }
+    statsErr.stats = buildStats()
+    throw error
   }
 
   const maxStepContent = `达到最大工具步数限制，已停止当前回合。`
   args.onAssistantMessage?.(maxStepContent, { final: true })
-  return [
-    ...messages,
-    {
-      role: 'assistant',
-      content: maxStepContent,
-    },
-  ]
+  maxStepsHit = true
+  return {
+    messages: [
+      ...messages,
+      {
+        role: 'assistant',
+        content: maxStepContent,
+      },
+    ],
+    stats: buildStats(),
+  }
 }

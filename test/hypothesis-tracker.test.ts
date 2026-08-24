@@ -20,6 +20,8 @@ before(async () => {
 })
 
 after(async () => {
+  const { _resetMetricsForTest } = await import('../src/observability/metrics.js')
+  _resetMetricsForTest()
   delete process.env.LITE_AI_HOME
   await rm(tempRoot, { recursive: true, force: true })
 })

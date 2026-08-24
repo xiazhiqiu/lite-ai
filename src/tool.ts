@@ -2,10 +2,12 @@ import { z } from 'zod'
 import type { PermissionManager } from './permissions.js'
 import type { SkillSummary } from './skills.js'
 import type { McpServerSummary } from './mcp.js'
+import { recordToolCall } from './observability/metrics.js'
 
 export type ToolContext = {
   cwd: string
   permissions?: PermissionManager
+  scope?: import('./observability/metrics.js').TurnScope
 }
 
 export type BackgroundTaskResult = {
@@ -126,8 +128,15 @@ export class ToolRegistry {
     input: unknown,
     context: ToolContext,
   ): Promise<ToolResult> {
+    const startedAt = Date.now()
+    // 有回合级 scope 时记录进内存（回合末统一落盘并带上 turn_id）；否则即时写，保持兼容。
+    const recordTool = (rec: Parameters<typeof recordToolCall>[0]) => {
+      if (context.scope) context.scope.pushTool(rec)
+      else recordToolCall(rec)
+    }
     const tool = this.find(toolName)
     if (!tool) {
+      recordTool({ toolName, ok: false, latencyMs: Date.now() - startedAt, mismatch: 'unknown' })
       return {
         ok: false,
         output: `Unknown tool: ${toolName}`,
@@ -136,6 +145,7 @@ export class ToolRegistry {
 
     const parsed = tool.schema.safeParse(input)
     if (!parsed.success) {
+      recordTool({ toolName, ok: false, latencyMs: Date.now() - startedAt, mismatch: 'schema', error: parsed.error.message })
       return {
         ok: false,
         output: parsed.error.message,
@@ -143,11 +153,15 @@ export class ToolRegistry {
     }
 
     try {
-      return await tool.run(parsed.data, context)
+      const result = await tool.run(parsed.data, context)
+      recordTool({ toolName, ok: result.ok, latencyMs: Date.now() - startedAt, error: result.ok ? undefined : result.output })
+      return result
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      recordTool({ toolName, ok: false, latencyMs: Date.now() - startedAt, error: message })
       return {
         ok: false,
-        output: error instanceof Error ? error.message : String(error),
+        output: message,
       }
     }
   }

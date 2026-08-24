@@ -22,6 +22,8 @@ after(async () => {
   // 先释放数据库连接，避免 rm 时 Windows 上报 EBUSY
   const { closeDb } = await import('../src/utils/kb-store.js')
   closeDb()
+  const { _resetMetricsForTest } = await import('../src/observability/metrics.js')
+  _resetMetricsForTest()
   delete process.env.LITE_AI_HOME
   delete process.env.LITE_AI_EMBED_MODEL_DIR
   await rm(tempRoot, { recursive: true, force: true })

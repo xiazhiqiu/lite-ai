@@ -83,6 +83,8 @@ describe('model request options', () => {
     controller.abort(new Error('closed'))
 
     await assert.rejects(request, /fetch aborted/)
-    assert.equal(fetchSignal, controller.signal)
+    // adapter 为支持超时会用 AbortSignal.any 组合信号（返回新实例），
+    // 因此断言 abort 语义而非引用相等：外部 abort 必须传播到 fetch。
+    assert.equal(fetchSignal?.aborted, true)
   })
 })

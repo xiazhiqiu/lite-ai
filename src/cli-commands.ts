@@ -10,6 +10,11 @@ import { initializeRepo, renderInitReport } from './init.js'
 import { discoverInstructionFiles, renderMemoryReport } from './memory.js'
 import type { ToolRegistry } from './tool.js'
 import { listAlertRecords } from './webhook/alert-store.js'
+import {
+  buildMetricsReport,
+  renderMetricsReport,
+  queryTurnTrace,
+} from './observability/query.js'
 
 export type SlashCommand = {
   name: string
@@ -158,6 +163,11 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     usage: '/alerts',
     description: 'List recent webhook-diagnosed incidents and their resume commands.',
   },
+  {
+    name: '/metrics',
+    usage: '/metrics [--turn <id>]',
+    description: 'Show agent observability stats; --turn <id> drills into one turn call-chain.',
+  },
 ]
 
 export function formatSlashCommands(): string {
@@ -277,6 +287,35 @@ export async function tryHandleLocalCommand(
   if (input === '/model') {
     const runtime = await loadRuntimeConfig()
     return `current model: ${runtime.model}`
+  }
+
+  if (input === '/metrics' || input.startsWith('/metrics ')) {
+    const turnArg = input.match(/^\/metrics\s+--turn\s+(\S+)/)
+    if (turnArg) {
+      const trace = queryTurnTrace(turnArg[1]!)
+      if (!trace) {
+        return '[metrics] 未找到该 turn_id 的回合。'
+      }
+      const lines: string[] = [`[metrics] turn ${turnArg[1]}（调用链）`]
+      lines.push(
+        `  steps: ${trace.turn.steps}  tool_calls: ${trace.turn.toolCalls}  tool_errors: ${trace.turn.toolErrors}  duration: ${trace.turn.durationMs}ms` +
+          `${trace.turn.error ? `  error: ${trace.turn.error}` : ''}`,
+      )
+      for (const c of trace.llmCalls) {
+        lines.push(
+          `  llm  model=${c.model ?? '-'}  in=${c.inputTokens ?? '-'}  out=${c.outputTokens ?? '-'}  ${c.latencyMs !== null ? `${c.latencyMs}ms` : '-'}` +
+            `${c.stopReason ? `  stop=${c.stopReason}` : ''}`,
+        )
+      }
+      for (const c of trace.toolCalls) {
+        lines.push(
+          `  tool ${c.toolName}  ok=${c.ok === 1 ? 'true' : 'false'}  ${c.latencyMs !== null ? `${c.latencyMs}ms` : '-'}` +
+            `${c.mismatch ? `  mismatch=${c.mismatch}` : ''}`,
+        )
+      }
+      return lines.join('\n')
+    }
+    return renderMetricsReport(buildMetricsReport())
   }
 
   if (input === '/alerts') {
