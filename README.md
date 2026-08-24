@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./assets/logo.jpg" alt="LiteAI Logo" width="120" />
+  <img src="./assets/logo.png" alt="LiteAI Logo" width="120" />
   <h1 align="center">LiteAI</h1>
   <p align="center">
     <strong>终端原生、轻量可 hack、面向 SRE 故障处置的事故诊断 Agent</strong><br/>
@@ -9,7 +9,7 @@
   </p>
 </div>
 
-LiteAI 是一个开源的 AI agent，用于调查生产事故、定位根因并生成复盘。它在 `model → tool → model` 的 agent 内核之上，沉淀了面向故障定位的完整闭环：**告警响应 → 多源并行取证 → 假设-验证 → 检查点交接 → 复盘归档 → 事故知识库检索**。天然适配 SSH / jumpbox / 气隔 / 值班机等办公网络受限场景，运行状态全程可审计、可 `resume` / `fork`。
+LiteAI 是一个开源的 AI agent，用于调查生产事故、定位根因并生成复盘。它在 `model → tool → model` 的 agent 内核之上，沉淀了面向故障定位的完整闭环：**告警响应 → 多源并行取证 → 假设-验证 → 检查点交接 → 复盘归档 → 事故知识库检索**。天然适配 SSH / jumpbox / 值班机等受限 egress 场景——只需连通白名单模型网关与内网数据源即可运行，无需向公网或任意第三方 SaaS 外发数据；运行状态全程可审计、可 `resume` / `fork`。
 
 > 我们是一个轻量、terminal-first 的实现：核心围绕 `ModelAdapter.next()` 与 `ToolRegistry.execute()` 两个极小接口，易学、易改、易扩展。
 
