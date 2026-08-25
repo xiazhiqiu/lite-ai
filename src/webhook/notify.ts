@@ -12,6 +12,7 @@ export async function notifyIfConfigured(
   alert: Alert,
   sessionId: string,
   diagnosisSummary: string,
+  status: 'firing' | 'failed' = 'firing',
 ): Promise<void> {
   const notifyUrl = config.notifyUrl?.trim()
   if (!notifyUrl) return
@@ -19,7 +20,7 @@ export async function notifyIfConfigured(
   const body = {
     alert: alert.title,
     severity: alert.severity,
-    status: 'firing',
+    status,
     summary: diagnosisSummary.trim() || '(无总结)',
     sessionId,
     resumeCommand: `lite-ai --resume ${sessionId}`,

@@ -119,6 +119,19 @@ export async function runAlertDiagnosis(args: {
       contentReplacementState,
       contextCollapseState,
     })
+  } catch (error) {
+    // 失败优雅降级：记录 failed + 尽力落可 resume 会话 + 失败通知，再抛给队列日志
+    const reason = error instanceof Error ? error.message : String(error)
+    const failureNote = `[诊断失败] ${reason}\n可执行 lite-ai --resume ${sessionId} 续查。`
+    const persistable = messages.filter(m => m.role !== 'system')
+    persistable.push({ role: 'assistant' as const, content: failureNote })
+    await saveSession(cwd, sessionId, persistable).catch(() => {})
+    await appendAlertRecord({
+      alertId: alert.id, sessionId, title: alert.title,
+      severity: alert.severity, summary: reason, status: 'failed' as const,
+    })
+    await notifyIfConfigured(config, alert, sessionId, failureNote, 'failed')
+    throw error
   } finally {
     await tools.dispose().catch(() => {})
   }

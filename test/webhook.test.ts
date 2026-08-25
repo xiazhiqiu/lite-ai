@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
+import http from 'node:http'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
@@ -391,4 +392,97 @@ test('HTTP: 硬截断 50 条 → 保留 10 条', async () => {
     srv.close()
   }
   await srv.done
+})
+
+// ---------- Task 1: alert-store 支持 failed 状态 ----------
+
+test('alert-store: 支持 failed 状态并保留', async () => {
+  const { appendAlertRecord, listAlertRecords } = await import('../src/webhook/alert-store.js')
+  await appendAlertRecord({
+    alertId: 'f1', sessionId: 'f1s', title: 'Fail', severity: 'warning',
+    summary: 'boom', status: 'failed',
+  })
+  const records = await listAlertRecords()
+  const f1 = records.find(r => r.alertId === 'f1')
+  assert.ok(f1)
+  assert.equal(f1!.status, 'failed')
+})
+
+// ---------- Task 2: notify 失败状态 ----------
+
+test('notifyIfConfigured: failure 时通知体 status=failed 且带 resume', async () => {
+  let capturedBody = ''
+  const listener = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', c => (body += c))
+    req.on('end', () => { capturedBody = body; res.end('ok') })
+  })
+  const port = await getFreePort()
+  await new Promise<void>(r => listener.listen(port, '127.0.0.1', r))
+  try {
+    const { notifyIfConfigured } = await import('../src/webhook/notify.js')
+    await notifyIfConfigured(
+      { port, host: '127.0.0.1', autoDiagnose: true, notifyHeaders: {}, notifyUrl: `http://127.0.0.1:${port}/n` } as never,
+      { id: 'f1', title: 'T', severity: 'warning', summary: '', status: 'firing', labels: {}, startsAt: new Date().toISOString() } as never,
+      'f1s',
+      '诊断失败：boom',
+      'failed',
+    )
+    await sleep(50)
+    const parsed = JSON.parse(capturedBody)
+    assert.equal(parsed.status, 'failed')
+    assert.match(parsed.summary, /boom/)
+    assert.match(parsed.resumeCommand, /f1s/)
+  } finally {
+    listener.close()
+  }
+})
+
+// ---------- Task 3: 诊断失败优雅降级 ----------
+
+test('runAlertDiagnosis: 模型抛错时落 failed 记录并可续查会话', async () => {
+  process.env.OPENAI_MODEL = 'fake-model'
+  process.env.OPENAI_API_KEY = 'test-key'
+
+  const { runAlertDiagnosis } = await import('../src/webhook/diagnose.js')
+  const { alertmanagerAdapter } = await import('../src/webhook/sources/alertmanager.js')
+  const { listAlertRecords } = await import('../src/webhook/alert-store.js')
+  const { loadSession } = await import('../src/session.js')
+  const { alertSessionId } = await import('../src/webhook/types.js')
+
+  const alert = alertmanagerAdapter.parse(FIRING_PAYLOAD)[0]!
+  const failingModel = {
+    next: async () => { throw new Error('boom: model unreachable') },
+  } as never
+
+  await assert.rejects(
+    runAlertDiagnosis({
+      cwd: SRE_CWD,
+      alert,
+      deps: { model: failingModel, config: { port: 0, host: '127.0.0.1', autoDiagnose: true, notifyHeaders: {} } },
+    }),
+    /boom/,
+  )
+
+  const records = await listAlertRecords()
+  const rec = records.find(r => r.status === 'failed')
+  assert.ok(rec, '应产生 failed 记录')
+  assert.equal(rec!.summary, 'boom: model unreachable')
+
+  const messages = await loadSession(SRE_CWD, alertSessionId(alert))
+  assert.ok(messages && messages.length >= 1, '失败也应落一份可 resume 会话')
+  assert.match(String(messages[messages.length - 1]!.content), /诊断失败/)
+})
+
+// ---------- Task 4: /alerts 数据源含全部状态 ----------
+
+test('/alerts 数据源：listAlertRecords 含全部状态并倒序', async () => {
+  const { appendAlertRecord, listAlertRecords } = await import('../src/webhook/alert-store.js')
+  await appendAlertRecord({ alertId: 's1', sessionId: 's1s', title: 'OK', severity: 'critical', summary: 'fine', status: 'diagnosed' })
+  await appendAlertRecord({ alertId: 's2', sessionId: 's2s', title: 'Wait', severity: 'warning', summary: '', status: 'received' })
+  const all = await listAlertRecords()
+  const s2 = all.find(r => r.alertId === 's2')
+  assert.equal(s2?.status, 'received')
+  // 按时间倒序：最新在前
+  assert.ok(all.length >= 2)
 })

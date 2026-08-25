@@ -17,7 +17,7 @@ export type AlertRecord = {
   title: string
   severity: string
   summary: string
-  status: 'received' | 'diagnosed'
+  status: 'received' | 'diagnosed' | 'failed'
   timestamp: string
 }
 

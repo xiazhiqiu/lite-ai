@@ -319,17 +319,20 @@ export async function tryHandleLocalCommand(
   }
 
   if (input === '/alerts') {
-    const records = (await listAlertRecords()).filter(r => r.status === 'diagnosed')
+    const records = await listAlertRecords()
     if (records.length === 0) {
-      return '[webhook] 暂无已诊断的告警会话。'
+      return '[webhook] 暂无告警记录。'
     }
-    const lines = [`[webhook] ${records.length} recent diagnoses:`]
+    const tag = {
+      received: '待诊断',
+      diagnosed: '已诊断',
+      failed: '失败',
+    } as const
+    const lines = [`[webhook] ${records.length} recent alert records:`]
     for (const record of records.slice(0, 10)) {
-      lines.push(`  ${record.severity.padEnd(9)} ${record.title}`)
-      lines.push(`            since ${timeAgo(record.timestamp)}`)
-      if (record.summary) {
-        lines.push(`            summary: ${record.summary}`)
-      }
+      lines.push(`  [${tag[record.status]}] ${record.severity.padEnd(9)} ${record.title}`)
+      lines.push(`            since ${timeAgo(record.timestamp)}   (${record.status})`)
+      if (record.summary) lines.push(`            summary: ${record.summary}`)
       lines.push(`            resume: lite-ai --resume ${record.sessionId}`)
     }
     return lines.join('\n')
