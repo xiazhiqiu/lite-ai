@@ -1,10 +1,12 @@
 /**
  * Webhook 常驻监听进程：POST /webhook → 路由解析 → 兜底去重 → 硬截断 →
- * 串行队列自动诊断 → 存会话 → 通知。单会话串行，满足"无并发写"约束。
+ * 有界并发池自动诊断 → 存会话 → 通知。不同告警并行、同告警冷却去重，
+ * 并发上限由 maxConcurrentDiagnoses 控制（默认 3）。
  */
 import http from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import type { WebhookConfig } from '../config.js'
+import { DEFAULT_MAX_CONCURRENT_DIAGNOSES } from '../config.js'
 import { routeAlertSource } from './sources/index.js'
 import { AlertDedupe, truncateAlerts } from './dedupe.js'
 import { runAlertDiagnosis, type DiagnosisResult } from './diagnose.js'
@@ -85,18 +87,53 @@ export async function runWebhookServer(
   const dedupe = new AlertDedupe()
   const diagnose = opts.diagnose ?? ((alert: Alert) => runAlertDiagnosis({ cwd: opts.cwd, alert }))
 
-  // 串行队列：一次只跑一个诊断。
-  let queue: Promise<void> = Promise.resolve()
-  const enqueue = (task: () => Promise<void>): void => {
-    queue = queue.then(async () => {
-      try {
-        await task()
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        console.error(`[webhook] 诊断失败: ${reason}`)
-      }
-    })
+  // 有界并发诊断池：不同告警并行，避免单条诊断阻塞后续告警；
+  // 上限防告警风暴时无界并发耗尽 API 配额/机器资源。
+  const maxConcurrent = config.maxConcurrentDiagnoses ?? DEFAULT_MAX_CONCURRENT_DIAGNOSES
+  let active = 0
+  const pending: Array<() => Promise<void>> = []
+  let resolveDrained: (() => void) | null = null
+
+  const notifyDrainedIfIdle = (): void => {
+    if (active === 0 && pending.length === 0 && resolveDrained) {
+      const resolve = resolveDrained
+      resolveDrained = null
+      resolve()
+    }
   }
+
+  const drain = (): void => {
+    while (active < maxConcurrent && pending.length > 0) {
+      const task = pending.shift()!
+      active += 1
+      void task()
+        .catch(error => {
+          const reason = error instanceof Error ? error.message : String(error)
+          console.error(`[webhook] 诊断失败: ${reason}`)
+        })
+        .finally(() => {
+          active -= 1
+          drain()
+          notifyDrainedIfIdle()
+        })
+    }
+    notifyDrainedIfIdle()
+  }
+
+  const enqueue = (task: () => Promise<void>): void => {
+    pending.push(task)
+    drain()
+  }
+
+  /** 等待池排空（优雅关停用）。 */
+  const drained = (): Promise<void> =>
+    new Promise<void>(resolve => {
+      if (active === 0 && pending.length === 0) {
+        resolve()
+        return
+      }
+      resolveDrained = resolve
+    })
 
   // 返回 true 表示已入队。
   const handleAlert = (alert: Alert): boolean => {
@@ -207,7 +244,7 @@ export async function runWebhookServer(
       shuttingDown = true
       console.log('[webhook] 收到退出信号，排空队列后关闭 ...')
       server.close()
-      void queue.then(() => {
+      void drained().then(() => {
         server.closeAllConnections?.()
         resolve()
       })

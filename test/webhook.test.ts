@@ -183,6 +183,7 @@ test('runAlertDiagnosis: 诊断后存会话，loadSession 可读回', async () =
         port: 0,
         host: '127.0.0.1',
         autoDiagnose: true,
+        maxConcurrentDiagnoses: 3,
         notifyHeaders: {},
       },
     },
@@ -256,6 +257,7 @@ test('alert-store: 追加记录并按 alertId 去重取最新', async () => {
 async function startServer(opts: {
   secret?: string
   autoDiagnose?: boolean
+  maxConcurrentDiagnoses?: number
 }) {
   const port = await getFreePort()
   const diagnosed: string[] = []
@@ -268,6 +270,7 @@ async function startServer(opts: {
       port,
       host: '127.0.0.1',
       autoDiagnose: opts.autoDiagnose ?? true,
+      maxConcurrentDiagnoses: opts.maxConcurrentDiagnoses ?? 3,
       secret: opts.secret,
       notifyHeaders: {},
     },
@@ -394,6 +397,69 @@ test('HTTP: 硬截断 50 条 → 保留 10 条', async () => {
   await srv.done
 })
 
+test('HTTP: 有界并发池按 maxConcurrentDiagnoses 限流且全部完成', async () => {
+  const port = await getFreePort()
+  const controller = new AbortController()
+  const doneIds: string[] = []
+  let active = 0
+  let maxActive = 0
+
+  const { runWebhookServer } = await import('../src/webhook/index.js')
+  const serverPromise = runWebhookServer({
+    cwd: SRE_CWD,
+    config: {
+      port,
+      host: '127.0.0.1',
+      autoDiagnose: true,
+      maxConcurrentDiagnoses: 2,
+      notifyHeaders: {},
+    },
+    abortSignal: controller.signal,
+    diagnose: async alert => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await sleep(80)
+      active -= 1
+      doneIds.push(alert.id)
+      return { sessionId: alert.id, diagnosisSummary: 'ok' }
+    },
+  })
+  await sleep(150)
+
+  try {
+    const payload = {
+      status: 'firing',
+      alerts: Array.from({ length: 5 }, (_, i) => ({
+        status: 'firing',
+        labels: { alertname: `Alert${i}`, severity: 'warning' },
+        annotations: {},
+        startsAt: new Date(Date.now() + i).toISOString(),
+      })),
+    }
+    const res = await fetch(`http://127.0.0.1:${port}/webhook`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    assert.equal(res.status, 202)
+    const j = (await res.json()) as { accepted: number; deduplicated: number }
+    assert.equal(j.accepted, 5)
+    assert.equal(j.deduplicated, 0)
+
+    // 全部 5 条最终完成（轮询等待池排空）
+    for (let i = 0; i < 50 && doneIds.length < 5; i++) {
+      await sleep(20)
+    }
+    assert.equal(doneIds.length, 5)
+
+    // 有界：峰值并发恰为上限 2（既并行又限流，不会退化为串行 1）
+    assert.equal(maxActive, 2)
+  } finally {
+    controller.abort()
+  }
+  await serverPromise
+})
+
 // ---------- Task 1: alert-store 支持 failed 状态 ----------
 
 test('alert-store: 支持 failed 状态并保留', async () => {
@@ -459,7 +525,7 @@ test('runAlertDiagnosis: 模型抛错时落 failed 记录并可续查会话', as
     runAlertDiagnosis({
       cwd: SRE_CWD,
       alert,
-      deps: { model: failingModel, config: { port: 0, host: '127.0.0.1', autoDiagnose: true, notifyHeaders: {} } },
+      deps: { model: failingModel, config: { port: 0, host: '127.0.0.1', autoDiagnose: true, maxConcurrentDiagnoses: 3, notifyHeaders: {} } },
     }),
     /boom/,
   )

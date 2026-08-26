@@ -177,13 +177,14 @@ Tempo 也支持经 Grafana 数据源代理（推荐）：配置 `grafana_datasou
     "host": "127.0.0.1",
     "secret": "可选校验 token",
     "autoDiagnose": true,
+    "maxConcurrentDiagnoses": 3,
     "notifyUrl": "https://example.com/hook",
     "notifyHeaders": { "Authorization": "Bearer ..." }
   }
 }
 ```
 
-事件源支持按 payload 自动路由（告警去重 → 截断 → 串行队列自动诊断 → 存会话 → 通知），详见 `src/webhook/sources/`。
+事件源支持按 payload 自动路由（告警去重 → 截断 → 有界并发池自动诊断 → 存会话 → 通知），并发上限由 `maxConcurrentDiagnoses` 控制（默认 3），详见 `src/webhook/sources/`。
 
 ## 只读安全边界
 

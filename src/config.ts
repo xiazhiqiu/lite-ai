@@ -71,6 +71,8 @@ export type WebhookConfig = {
   secret?: string
   /** 收到 firing 告警后是否自动诊断，默认 true */
   autoDiagnose: boolean
+  /** 并发诊断上限：不同告警可并行诊断，防止告警风暴时无界并发耗尽 API 配额/资源，默认 3 */
+  maxConcurrentDiagnoses: number
   /** 诊断完成后 POST 摘要到此地址 */
   notifyUrl?: string
   /** 通知请求自定义头 */
@@ -79,6 +81,7 @@ export type WebhookConfig = {
 
 export const DEFAULT_WEBHOOK_PORT = 8787
 export const DEFAULT_WEBHOOK_HOST = '127.0.0.1'
+export const DEFAULT_MAX_CONCURRENT_DIAGNOSES = 3
 
 /** 读取 webhook 配置，与 settings.json 中的 webhook 覆盖项合并默认值。 */
 export async function loadWebhookConfig(): Promise<WebhookConfig> {
@@ -89,6 +92,7 @@ export async function loadWebhookConfig(): Promise<WebhookConfig> {
     host: webhook.host ?? DEFAULT_WEBHOOK_HOST,
     secret: webhook.secret,
     autoDiagnose: webhook.autoDiagnose ?? true,
+    maxConcurrentDiagnoses: webhook.maxConcurrentDiagnoses ?? DEFAULT_MAX_CONCURRENT_DIAGNOSES,
     notifyUrl: webhook.notifyUrl,
     notifyHeaders: webhook.notifyHeaders ?? {},
   }
