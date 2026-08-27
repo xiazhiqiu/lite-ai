@@ -7,6 +7,11 @@ export type ToolObservation = {
   ok: boolean
 }
 
+export type ToolDetector = {
+  id: string
+  observe(call: ToolObservation): string | null
+}
+
 export type MonitorConfig = {
   /** 同一工具+输入连续相邻达到该次数时提示 */
   toolRepeatNoticeMax: number

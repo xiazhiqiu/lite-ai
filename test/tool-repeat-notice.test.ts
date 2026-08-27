@@ -1,86 +1,72 @@
-import { test, afterEach } from 'node:test'
+// test/tool-repeat-notice.test.ts
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { tmpdir } from 'node:os'
-import { mkdtemp } from 'node:fs/promises'
-import { join } from 'node:path'
-import { PermissionManager } from '../src/permissions.js'
+import { createTurnMonitor } from '../src/monitor/turn-monitor.js'
+import type { AssistantContext } from '../src/monitor/types.js'
 
-const originalLiteAiHome = process.env.LITE_AI_HOME
-let tempRoots: string[] = []
-
-afterEach(async () => {
-  if (originalLiteAiHome === undefined) {
-    delete process.env.LITE_AI_HOME
-  } else {
-    process.env.LITE_AI_HOME = originalLiteAiHome
-  }
-  tempRoots = []
-})
-
-async function createManager(): Promise<PermissionManager> {
-  const root = await mkdtemp(join(tmpdir(), 'liteai-perm-'))
-  tempRoots.push(root)
-  process.env.LITE_AI_HOME = root
-  const manager = new PermissionManager(root)
-  await manager.whenReady()
-  return manager
+// ok 固定 true：不影响重复计数。
+function monitor() {
+  return createTurnMonitor({ toolRepeatNoticeMax: 3, consecutiveFailureMax: 99 })
 }
 
-test('noticeToolRepeat: 相同工具+输入连续达阈值返回提示', async () => {
-  const m = await createManager()
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }), null) // 1
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }), null) // 2
-  assert.match(m.noticeToolRepeat('read_file', { path: '/a' })!, /已连续出现 3 次/) // 3
-  assert.match(m.noticeToolRepeat('read_file', { path: '/a' })!, /已连续出现 4 次/) // 4
+function ctx(partial = {}): AssistantContext {
+  return {
+    content: '',
+    isEmpty: true,
+    sawToolResultThisTurn: false,
+    toolErrorCount: 0,
+    ...partial,
+  }
+}
+
+test('tool-repeat: 相同工具+输入连续达阈值返回提示', () => {
+  const m = monitor()
+  assert.equal(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true }), null)
+  assert.equal(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true }), null)
+  assert.match(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })!, /已连续出现 3 次/)
+  assert.match(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })!, /已连续出现 4 次/)
 })
 
-test('noticeToolRepeat: 到达阈值后仍不拦截（返回提示但调用方能继续）', async () => {
-  const m = await createManager()
-  m.noticeToolRepeat('run_command', { command: 'ls' })
-  m.noticeToolRepeat('run_command', { command: 'ls' })
-  const third = m.noticeToolRepeat('run_command', { command: 'ls' })
-  // 绝不返回拦截信号，只返回提示文案（或 null）
+test('tool-repeat: 到达阈值后不拦截', () => {
+  const m = monitor()
+  m.observeToolCall({ toolName: 'run_command', input: { command: 'ls' }, ok: true })
+  m.observeToolCall({ toolName: 'run_command', input: { command: 'ls' }, ok: true })
+  const third = m.observeToolCall({ toolName: 'run_command', input: { command: 'ls' }, ok: true })
   assert.ok(typeof third === 'string' || third === null)
 })
 
-test('noticeToolRepeat: 中间插入不同调用则清零重计', async () => {
-  const m = await createManager()
-  m.noticeToolRepeat('read_file', { path: '/a' })
-  m.noticeToolRepeat('read_file', { path: '/a' })
-  m.noticeToolRepeat('grep', { path: '/a' }) // 不同调用
-  // 回到 read_file /a 重新从 1 计数，前两次不计入
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }), null) // 1
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }), null) // 2
-  assert.match(m.noticeToolRepeat('read_file', { path: '/a' })!, /已连续出现 3 次/) // 3
+test('tool-repeat: 中间插入不同调用则清零重计', () => {
+  const m = monitor()
+  m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })
+  m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })
+  m.observeToolCall({ toolName: 'grep', input: { path: '/a' }, ok: true })
+  assert.equal(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true }), null)
+  assert.equal(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true }), null)
+  assert.match(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })!, /3 次/)
 })
 
-test('noticeToolRepeat: 相同工具不同输入互不干扰', async () => {
-  const m = await createManager()
-  // /a 提前累积 2 次
-  m.noticeToolRepeat('read_file', { path: '/a' })
-  m.noticeToolRepeat('read_file', { path: '/a' })
-  // 换输入 /b：触发清零，/a 的计数被重置
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/b' }), null)
-  // 回到 /a：从 0 重新连续累积
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }), null) // /a 重新 1
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }), null) // /a 重新 2
-  assert.match(m.noticeToolRepeat('read_file', { path: '/a' })!, /3 次/) // /a 重新到 3
+test('tool-repeat: 相同工具不同输入互不干扰', () => {
+  const m = monitor()
+  m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })
+  m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })
+  assert.equal(m.observeToolCall({ toolName: 'read_file', input: { path: '/b' }, ok: true }), null)
+  assert.equal(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true }), null)
+  assert.equal(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true }), null)
+  assert.match(m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })!, /3 次/)
 })
 
-test('noticeToolRepeat: beginTurn 清空回合内计数', async () => {
-  const m = await createManager()
-  m.noticeToolRepeat('read_file', { path: '/a' })
-  m.noticeToolRepeat('read_file', { path: '/a' })
-  m.beginTurn()
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }), null) // 重新 1
+test('tool-repeat: 新回合（新实例）清空计数', () => {
+  const m = createTurnMonitor({ toolRepeatNoticeMax: 3, consecutiveFailureMax: 99 })
+  m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })
+  m.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true })
+  const again = createTurnMonitor({ toolRepeatNoticeMax: 3, consecutiveFailureMax: 99 })
+  assert.equal(again.observeToolCall({ toolName: 'read_file', input: { path: '/a' }, ok: true }), null)
 })
 
-test('noticeToolRepeat: 自定义阈值生效', async () => {
-  const m = await createManager()
-  const threshold = 5
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }, threshold), null)
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }, threshold), null)
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }, threshold), null)
-  assert.equal(m.noticeToolRepeat('read_file', { path: '/a' }, threshold), null)
-  assert.match(m.noticeToolRepeat('read_file', { path: '/a' }, threshold)!, /5 次/)
+test('detectAssistant: finish 直通', () => {
+  const m = createTurnMonitor({ toolRepeatNoticeMax: 3, consecutiveFailureMax: 99 })
+  assert.deepEqual(
+    m.detectAssistant(ctx({ content: '结果', isEmpty: false, kind: 'final' })),
+    { kind: 'finish' },
+  )
 })
