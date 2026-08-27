@@ -11,6 +11,25 @@ const EMPTY_RETRY_MAX = 2
 const THINKING_RETRY_MAX = 3
 const MIDTASK_CONTINUATION_MAX = 3
 
+/** 复刻 agent-loop 原 formatDiagnostics：拼接诊断信息后缀，空则空串。 */
+function formatDiagnostics(ctx: AssistantContext): string {
+  const parts: string[] = []
+
+  if (ctx.diagnostics?.stopReason) {
+    parts.push(`stop_reason=${ctx.diagnostics.stopReason}`)
+  }
+
+  if ((ctx.diagnostics?.blockTypes?.length ?? 0) > 0) {
+    parts.push(`blocks=${ctx.diagnostics!.blockTypes!.join(',')}`)
+  }
+
+  if ((ctx.diagnostics?.ignoredBlockTypes?.length ?? 0) > 0) {
+    parts.push(`ignored=${ctx.diagnostics!.ignoredBlockTypes!.join(',')}`)
+  }
+
+  return parts.length > 0 ? ` 诊断信息: ${parts.join('; ')}。` : ''
+}
+
 function isRecoverableThinkingStop(ctx: AssistantContext): boolean {
   if (!ctx.isEmpty) return false
   const stop = ctx.diagnostics?.stopReason
@@ -65,11 +84,12 @@ export function detectAssistant(
   }
 
   if (ctx.isEmpty) {
+    const diagnosticsSuffix = formatDiagnostics(ctx)
     const fallback = ctx.sawToolResultThisTurn
       ? ctx.toolErrorCount > 0
-        ? `工具执行后模型返回空响应，已停止当前回合。最近有 ${ctx.toolErrorCount} 个工具报错；请重试、调整命令，或让模型改用其他方案。`
-        : '工具执行后模型返回空响应，已停止当前回合。请重试，或要求模型继续完成剩余步骤。'
-      : '模型返回空响应，已停止当前回合。请重试，或要求模型继续。'
+        ? `工具执行后模型返回空响应，已停止当前回合。最近有 ${ctx.toolErrorCount} 个工具报错；请重试、调整命令，或让模型改用其他方案。${diagnosticsSuffix}`
+        : `工具执行后模型返回空响应，已停止当前回合。请重试，或要求模型继续完成剩余步骤。${diagnosticsSuffix}`
+      : `模型返回空响应，已停止当前回合。请重试，或要求模型继续。${diagnosticsSuffix}`
     return { kind: 'empty_stop', fallback }
   }
 

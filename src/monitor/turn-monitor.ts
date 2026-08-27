@@ -45,6 +45,15 @@ export class TurnMonitor {
     recoverableThinkingRetry: 0,
     midTaskTextContinuation: 0,
   }
+
+  /** 读取回合内控制流计数快照，供 agent-loop 填充 TurnStats 对应字段。 */
+  stats(): {
+    emptyResponseRetry: number
+    recoverableThinkingRetry: number
+    midTaskTextContinuation: number
+  } {
+    return { ...this.counters }
+  }
 }
 
 /** 默认装配：精确重复 + 连续失败。 */

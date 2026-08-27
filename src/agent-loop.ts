@@ -7,6 +7,9 @@ import type {
   ProviderUsage,
 } from './types.js'
 import type { PermissionManager } from './permissions.js'
+import { createTurnMonitor, type TurnMonitor } from './monitor/turn-monitor.js'
+import { readMonitorConfig } from './monitor/config.js'
+import type { AssistantAction, AssistantContext } from './monitor/types.js'
 import { microcompact } from './compact/microcompact.js'
 import { autoCompact } from './compact/auto-compact.js'
 import {
@@ -43,14 +46,6 @@ function isEmptyAssistantResponse(content: string): boolean {
   return content.trim().length === 0
 }
 
-/** 读取连续重复软提示阈值，缺省 3。非法值回退默认。 */
-function readToolRepeatNoticeMax(): number {
-  const raw = process.env.LITE_AI_TOOL_REPEAT_NOTICE_MAX
-  if (raw == null || raw.trim() === '') return 3
-  const parsed = Number.parseInt(raw, 10)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : 3
-}
-
 function withProviderUsage<T extends ChatMessage>(
   message: T,
   usage: ProviderUsage | undefined,
@@ -64,68 +59,6 @@ function withProviderUsage<T extends ChatMessage>(
     return { ...message, providerUsage: usage } as T
   }
   return message
-}
-
-function shouldTreatAssistantAsProgress(args: {
-  kind?: 'final' | 'progress'
-  content: string
-  sawToolResultThisTurn: boolean
-}): boolean {
-  if (args.kind === 'progress') {
-    return true
-  }
-
-  if (args.kind === 'final') {
-    return false
-  }
-
-  if (!args.sawToolResultThisTurn) {
-    return false
-  }
-
-  return false
-}
-
-function formatDiagnostics(args: {
-  stopReason?: string
-  blockTypes?: string[]
-  ignoredBlockTypes?: string[]
-}): string {
-  const parts: string[] = []
-
-  if (args.stopReason) {
-    parts.push(`stop_reason=${args.stopReason}`)
-  }
-
-  if ((args.blockTypes?.length ?? 0) > 0) {
-    parts.push(`blocks=${args.blockTypes!.join(',')}`)
-  }
-
-  if ((args.ignoredBlockTypes?.length ?? 0) > 0) {
-    parts.push(`ignored=${args.ignoredBlockTypes!.join(',')}`)
-  }
-
-  return parts.length > 0 ? ` 诊断信息: ${parts.join('; ')}。` : ''
-}
-
-function isRecoverableThinkingStop(args: {
-  isEmpty: boolean
-  stopReason?: string
-  blockTypes?: string[]
-  ignoredBlockTypes?: string[]
-}): boolean {
-  if (!args.isEmpty) {
-    return false
-  }
-
-  if (args.stopReason !== 'pause_turn' && args.stopReason !== 'max_tokens') {
-    return false
-  }
-
-  return (
-    (args.blockTypes ?? []).includes('thinking') ||
-    (args.ignoredBlockTypes ?? []).includes('thinking')
-  )
 }
 
 type TurnStats = {
@@ -164,8 +97,9 @@ export async function runAgentTurn(args: {
 }): Promise<ChatMessage[]> {
   const startedAt = Date.now()
   const scope = createTurnScope()
+  const turnMonitor = createTurnMonitor(readMonitorConfig())
   try {
-    const { messages, stats } = await runAgentTurnCore(args, scope)
+    const { messages, stats } = await runAgentTurnCore(args, scope, turnMonitor)
     scope.flush({ ...stats, durationMs: Date.now() - startedAt })
     return messages
   } catch (error) {
@@ -214,23 +148,17 @@ async function runAgentTurnCore(
     signal?: AbortSignal
   },
   scope: TurnScope,
+  turnMonitor: TurnMonitor,
 ): Promise<{ messages: ChatMessage[]; stats: TurnStats }> {
   const maxSteps = args.maxSteps
   const modelName = args.modelName ?? ''
   const startTime = args.startTime ?? Date.now()
-  const noteRepeatMax = readToolRepeatNoticeMax()
   const statusBarToolCount = new Map<string, number>()
   let turnSteps = 0
   let toolCallsTotal = 0
   let maxStepsHit = false
   let contextUtilization = 0
   let messages = args.messages
-  let emptyResponseRetryCount = 0
-  let recoverableThinkingRetryCount = 0
-  // 本回合跑过工具后，若模型返回"纯文本且未标 <final>"，先当中间进度续跑；
-  // 上限防止模型长期不标 <final> 导致无限续跑。
-  let midTaskTextContinuationCount = 0
-  const midTaskTextContinuationMax = 3
   let toolErrorCount = 0
   let sawToolResultThisTurn = false
   let snippedThisTurn = false
@@ -247,17 +175,20 @@ async function runAgentTurnCore(
   let contextCollapseState =
     args.contextCollapseState ?? createContextCollapseState()
 
-  const buildStats = (): TurnStats => ({
-    model: modelName || undefined,
-    steps: turnSteps,
-    toolCalls: toolCallsTotal,
-    toolErrors: toolErrorCount,
-    emptyResponses: emptyResponseRetryCount,
-    thinkingRetries: recoverableThinkingRetryCount,
-    midtaskContinuations: midTaskTextContinuationCount,
-    contextUtilization: contextUtilization,
-    maxStepsHit,
-  })
+  const buildStats = (): TurnStats => {
+    const monitorStats = turnMonitor.stats()
+    return {
+      model: modelName || undefined,
+      steps: turnSteps,
+      toolCalls: toolCallsTotal,
+      toolErrors: toolErrorCount,
+      emptyResponses: monitorStats.emptyResponseRetry,
+      thinkingRetries: monitorStats.recoverableThinkingRetry,
+      midtaskContinuations: monitorStats.midTaskTextContinuation,
+      contextUtilization: contextUtilization,
+      maxStepsHit,
+    }
+  }
 
   const replaceContextCollapseState = (nextState: ContextCollapseState) => {
     contextCollapseState = nextState
@@ -400,129 +331,67 @@ async function runAgentTurnCore(
     })
 
     if (next.type === 'assistant') {
-      const isEmpty = isEmptyAssistantResponse(next.content)
-      if (
-        !isEmpty &&
-        shouldTreatAssistantAsProgress({
-          kind: next.kind,
-          content: next.content,
-          sawToolResultThisTurn,
-        })
-      ) {
-        args.onProgressMessage?.(next.content)
-        appendThinkingBlocks(next.thinkingBlocks)
-        messages = [
-          ...messages,
-          { role: 'assistant_progress', content: next.content },
-        ]
-        pushContinuationPrompt(
-          sawToolResultThisTurn && next.kind !== 'progress'
-            ? 'Continue from your progress update. You have already used tools in this turn, so treat plain status text as progress, not a final answer. Respond with the next concrete tool call, code change, or an explicit <final> answer only if the task is truly complete.'
-            : 'Continue immediately from your <progress> update with concrete tool calls, code changes, or an explicit <final> answer only if the task is complete.',
-        )
-        continue
+      const assistantCtx: AssistantContext = {
+        content: next.content,
+        kind: next.kind,
+        isEmpty: isEmptyAssistantResponse(next.content),
+        sawToolResultThisTurn,
+        toolErrorCount,
+        diagnostics: next.diagnostics,
+        thinkingBlocks: next.thinkingBlocks,
       }
+      const action: AssistantAction = turnMonitor.detectAssistant(assistantCtx)
 
-      if (
-        isRecoverableThinkingStop({
-          isEmpty,
-          stopReason: next.diagnostics?.stopReason,
-          blockTypes: next.diagnostics?.blockTypes,
-          ignoredBlockTypes: next.diagnostics?.ignoredBlockTypes,
-        }) &&
-        recoverableThinkingRetryCount < 3
-      ) {
-        recoverableThinkingRetryCount += 1
-        const stopReason = next.diagnostics?.stopReason
-        const progressContent =
-          stopReason === 'max_tokens'
-            ? '模型在 thinking 阶段触发 max_tokens，正在继续请求后续步骤...'
-            : '模型返回 pause_turn，正在继续请求后续步骤...'
-        args.onProgressMessage?.(progressContent)
-        messages = [
-          ...messages,
-          { role: 'assistant_progress', content: progressContent },
-        ]
-        pushContinuationPrompt(
-          stopReason === 'max_tokens'
-            ? 'Your previous response hit max_tokens during thinking before producing the next actionable step. Resume immediately and continue with the next concrete tool call, code change, or an explicit <final> answer only if the task is complete. Do not repeat the earlier plan.'
-            : 'Resume from the previous pause_turn and continue the task immediately. Produce the next concrete tool call, code change, or an explicit <final> answer only if the task is complete.',
-        )
-        continue
-      }
-
-      if (isEmpty && emptyResponseRetryCount < 2) {
-        emptyResponseRetryCount += 1
-        pushContinuationPrompt(
-          sawToolResultThisTurn
-            ? 'Your last response was empty after recent tool results. Continue immediately by trying the next concrete step, adapting to any tool errors, or giving an explicit <final> answer only if the task is complete.'
-            : 'Your last response was empty. Continue immediately with concrete tool calls, code changes, or an explicit <final> answer only if the task is complete.',
-        )
-        continue
-      }
-
-      if (isEmpty) {
-        const diagnosticsSuffix = formatDiagnostics({
-          stopReason: next.diagnostics?.stopReason,
-          blockTypes: next.diagnostics?.blockTypes,
-          ignoredBlockTypes: next.diagnostics?.ignoredBlockTypes,
-        })
-        const fallbackContent =
-          sawToolResultThisTurn
-            ? toolErrorCount > 0
-              ? `工具执行后模型返回空响应，已停止当前回合。最近有 ${toolErrorCount} 个工具报错；请重试、调整命令，或让模型改用其他方案。${diagnosticsSuffix}`
-              : `工具执行后模型返回空响应，已停止当前回合。请重试，或要求模型继续完成剩余步骤。${diagnosticsSuffix}`
-            : `模型返回空响应，已停止当前回合。请重试，或要求模型继续。${diagnosticsSuffix}`
-
-        args.onAssistantMessage?.(fallbackContent, { final: true })
-        appendThinkingBlocks(next.thinkingBlocks)
-        return {
-          messages: [
-            ...messages,
-            {
-              role: 'assistant',
-              content: fallbackContent,
-            },
-          ],
-          stats: buildStats(),
-        }
-      }
-
-      // 本回合已跑过工具，但模型返回的纯文本既未带后续工具调用、也未标 <progress>/<final>。
-      // 长任务（如 RCA）中模型常这样"喘口气"，误判为最终答案会导致回合提前结束、退回 Ready。
-      // 这里改成当作中间进度续跑一次；若模型其实已完成，下一条应以 <final> 应答即止。
-      if (sawToolResultThisTurn && next.kind !== 'final' && next.kind !== 'progress') {
-        if (midTaskTextContinuationCount < midTaskTextContinuationMax) {
-          midTaskTextContinuationCount += 1
-          args.onProgressMessage?.(next.content)
-          appendThinkingBlocks(next.thinkingBlocks)
+      switch (action.kind) {
+        case 'progress_continue':
+        case 'midtask_continue':
+          args.onProgressMessage?.(action.progress)
+          appendThinkingBlocks(assistantCtx.thinkingBlocks)
           messages = [
             ...messages,
-            { role: 'assistant_progress', content: next.content },
+            { role: 'assistant_progress', content: action.progress },
           ]
-          pushContinuationPrompt(
-            '你上一条是纯文本但未标记 <final>，而本回合已经执行过工具，说明任务可能尚未完成。若任务确实已完成，请以 <final> 开头给出最终答案；否则继续下一步的具体工具调用。',
-          )
+          pushContinuationPrompt(action.continuation)
           continue
+        case 'thinking_retry':
+          // 与旧代码一致：thinking 重试不触发 appendThinkingBlocks。
+          args.onProgressMessage?.(action.progress)
+          messages = [
+            ...messages,
+            { role: 'assistant_progress', content: action.progress },
+          ]
+          pushContinuationPrompt(action.continuation)
+          continue
+        case 'empty_continue':
+          pushContinuationPrompt(action.continuation)
+          continue
+        case 'empty_stop': {
+          args.onAssistantMessage?.(action.fallback, { final: true })
+          appendThinkingBlocks(assistantCtx.thinkingBlocks)
+          return {
+            messages: [
+              ...messages,
+              { role: 'assistant', content: action.fallback },
+            ],
+            stats: buildStats(),
+          }
         }
-        // 达到续跑上限：放弃自动续跑，把最后这段文本当作本回合输出返回。
+        case 'finish': {
+          const assistantMessage: ChatMessage = {
+            role: 'assistant',
+            content: next.content,
+          }
+          appendThinkingBlocks(assistantCtx.thinkingBlocks)
+          const withAssistant: ChatMessage[] = [
+            ...messages,
+            withProviderUsage(assistantMessage, next.usage),
+          ]
+          if (!assistantCtx.isEmpty) {
+            args.onAssistantMessage?.(next.content, { final: true })
+          }
+          return { messages: withAssistant, stats: buildStats() }
+        }
       }
-
-      const assistantMessage: ChatMessage = {
-        role: 'assistant',
-        content: next.content,
-      }
-      appendThinkingBlocks(next.thinkingBlocks)
-      const withAssistant: ChatMessage[] = [
-        ...messages,
-        withProviderUsage(assistantMessage, next.usage),
-      ]
-
-      if (!isEmpty) {
-        args.onAssistantMessage?.(next.content, { final: true })
-      }
-
-      return { messages: withAssistant, stats: buildStats() }
     }
 
     appendThinkingBlocks(next.thinkingBlocks)
@@ -578,11 +447,6 @@ async function runAgentTurnCore(
         for (const call of group.calls) {
           args.onToolStart?.(call.id, call.toolName, call.input)
         }
-        const notices = group.calls.map(call => {
-          const text = args.permissions
-            ?.noticeToolRepeat(call.toolName, call.input, noteRepeatMax)
-          return text ?? ''
-        })
         const results = await Promise.all(
           group.calls.map(call =>
             args.tools.execute(call.toolName, call.input, {
@@ -594,7 +458,11 @@ async function runAgentTurnCore(
         )
         group.calls.forEach((call, i) => {
           const result = results[i]!
-          const notice = notices[i]
+          const notice = turnMonitor.observeToolCall({
+            toolName: call.toolName,
+            input: call.input,
+            ok: result.ok,
+          })
           if (notice) {
             result.output = `${notice}\n${result.output}`
           }
@@ -612,12 +480,15 @@ async function runAgentTurnCore(
         for (const call of group.calls) {
           throwIfAborted(args.signal)
           args.onToolStart?.(call.id, call.toolName, call.input)
-          const notice = args.permissions
-            ?.noticeToolRepeat(call.toolName, call.input, noteRepeatMax)
           const result = await args.tools.execute(call.toolName, call.input, {
             cwd: args.cwd,
             permissions: args.permissions,
             scope,
+          })
+          const notice = turnMonitor.observeToolCall({
+            toolName: call.toolName,
+            input: call.input,
+            ok: result.ok,
           })
           if (notice) {
             result.output = `${notice}\n${result.output}`
