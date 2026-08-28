@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { ToolDefinition } from '../../tool.js'
-import { clampToolOutput, type ToolsetStatus } from './base.js'
+import type { ToolsetStatus } from './base.js'
 import type { ResolvedToolsetConfig } from '../../config.js'
 
 /**
@@ -8,7 +8,6 @@ import type { ResolvedToolsetConfig } from '../../config.js'
  * 通过 connection_url 解析驱动（sqlite / mysql / postgres），仅允许只读 SQL。
  */
 
-const OUTPUT_CHARS = 30_000
 const MAX_ROWS_CAP = 500
 const MAX_ROWS_DEFAULT = 100
 
@@ -67,7 +66,7 @@ function resolveDialect(url: string): Dialect {
 }
 
 function stringifyRows(rows: unknown[]): string {
-  return clampToolOutput(JSON.stringify(rows, null, 2), OUTPUT_CHARS)
+  return JSON.stringify(rows, null, 2)
 }
 
 /** 统一查询执行：按驱动执行带 LIMIT 的只读 SQL，返回行数组/错误。 */

@@ -91,7 +91,7 @@ export function resultFromJson(
     const parsed = JSON.parse(http.text) as unknown
     return {
       ok: true,
-      output: clampToolOutput(JSON.stringify(parsed, null, 2), maxChars),
+      output: JSON.stringify(parsed, null, 2),
     }
   } catch {
     return {

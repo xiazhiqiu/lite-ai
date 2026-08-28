@@ -189,7 +189,7 @@ function formatResponse(
           ? `${values.length} total: [${values.join(', ')}]`
           : `${values.length} total: [${values.slice(0, max).join(', ')}] ...(${values.length - max} more omitted)`
     }
-    return { ok: true, output: clampToolOutput(JSON.stringify(parsed, null, 2), DEFAULT_OUTPUT_CHARS) }
+    return { ok: true, output: JSON.stringify(parsed, null, 2) }
   } catch {
     return { ok: false, output: clampToolOutput(`Invalid JSON (HTTP ${http.status}): ${http.text}`, DEFAULT_OUTPUT_CHARS) }
   }
@@ -471,13 +471,10 @@ export function buildTempoTools(
 
         return {
           ok: true,
-          output: clampToolOutput(
-            JSON.stringify(
-              { statistics: stats, fastest_traces: fastest, median_trace: median, slowest_traces: slowest },
-              null,
-              2,
-            ),
-            60_000,
+          output: JSON.stringify(
+            { statistics: stats, fastest_traces: fastest, median_trace: median, slowest_traces: slowest },
+            null,
+            2,
           ),
         }
       },

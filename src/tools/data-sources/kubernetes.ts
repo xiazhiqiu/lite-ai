@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { ToolDefinition } from '../../tool.js'
-import { clampToolOutput, type ToolsetStatus } from './base.js'
+import type { ToolsetStatus } from './base.js'
 import type { ResolvedToolsetConfig } from '../../config.js'
 
 /**
@@ -116,7 +116,7 @@ export function buildKubernetesTools(
         const output = await runKubectl(args)
         return {
           ok: true,
-          output: clampToolOutput(output, 30_000),
+          output,
         }
       },
     ),
@@ -142,7 +142,7 @@ export function buildKubernetesTools(
         const output = await runKubectl(args)
         return {
           ok: true,
-          output: clampToolOutput(output, 30_000),
+          output,
         }
       },
     ),

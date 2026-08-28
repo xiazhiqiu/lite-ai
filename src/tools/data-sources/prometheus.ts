@@ -50,7 +50,7 @@ async function apiQuery(
     if (listData && Array.isArray(parsed.data)) {
       parsed.data = summarizeStringList(parsed.data as string[])
     }
-    return { ok: true, output: clampToolOutput(JSON.stringify(parsed, null, 2), DEFAULT_OUTPUT_CHARS) }
+    return { ok: true, output: JSON.stringify(parsed, null, 2) }
   } catch {
     return { ok: false, output: clampToolOutput(`Invalid JSON (HTTP ${http.status}): ${http.text}`, DEFAULT_OUTPUT_CHARS) }
   }

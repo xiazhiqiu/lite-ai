@@ -142,7 +142,7 @@ function formatResponse(
     const parsed = JSON.parse(http.text) as unknown
     return {
       ok: true,
-      output: clampToolOutput(JSON.stringify(parsed, null, 2), maxChars),
+      output: JSON.stringify(parsed, null, 2),
     }
   } catch {
     return {
@@ -249,13 +249,10 @@ export function buildLokiTools(
             )
             return {
               ok: true,
-              output: clampToolOutput(
-                `${JSON.stringify(parsed, null, 2)}\n\n[log streams: ${result.length}, entries: ${total}]`,
-                60_000,
-              ),
+              output: `${JSON.stringify(parsed, null, 2)}\n\n[log streams: ${result.length}, entries: ${total}]`,
             }
           }
-          return { ok: true, output: clampToolOutput(JSON.stringify(parsed, null, 2), 60_000) }
+          return { ok: true, output: JSON.stringify(parsed, null, 2) }
         } catch {
           return formatResponse(http, 60_000)
         }
