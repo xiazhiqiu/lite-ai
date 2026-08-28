@@ -23,9 +23,9 @@ const MAX_UTIL = 0.95
 // 否则 snip 会把这些 tool_result 判成"孤立/重要"而保护起来、永远无安全区间可删。
 function roundPayload(round: number): ChatMessage[] {
   const assistantThought = `已检测到 payment 服务 p95 异常（round ${round}）。下一步并行拉取指标与实例清单，
-对比近 5 分钟各命名空间调用量与错误率，缩小根因范围。${'t'.repeat(400)}`
-  const spec = `http_requests_total{namespace=\"default\"} p95 检测, rate5m 聚合结果, ${'x'.repeat(3600)}`
-  const pod = `default/compute and default/storage pods list, ${'y'.repeat(3600)}`
+对比近 5 分钟各命名空间调用量与错误率，缩小根因范围。${'t'.repeat(600)}`
+  const spec = `http_requests_total{namespace=\"default\"} p95 检测, rate5m 聚合结果, ${'x'.repeat(7600)}`
+  const pod = `default/compute and default/storage pods list, ${'y'.repeat(7600)}`
   return [
     { role: 'user', content: `检测到 payment 服务 p95 升高，请定位根因（第 ${round} 轮）。` },
     { role: 'assistant', content: assistantThought },
@@ -46,6 +46,11 @@ async function simulate(model: string): Promise<void> {
   let microHits = 0
   let lastUtil = 0
 
+  // 记录占用率首次站稳在关键阈值(50/60/70/80/85/95%)的轮次
+  const crosses: Record<string, number> = {}
+  const thresholds = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95]
+  let consecutive = new Map<number, number>()
+
   for (let round = 1; round <= ROUNDS_CAP; round++) {
     messages = [...messages, ...roundPayload(round)]
     const stats = computeContextStats(messages, model)
@@ -65,6 +70,18 @@ async function simulate(model: string): Promise<void> {
     if (messages !== before) microHits++
 
     lastUtil = computeContextStats(messages, model).utilization
+    for (const t of thresholds) {
+      if (crosses[String(t)] !== undefined) continue // 已记录
+      if (lastUtil >= t) {
+        const bump = (consecutive.get(t) ?? 0) + 1
+        consecutive.set(t, bump)
+        // 需连续 3 轮站稳才算"越过"，避免单轮尖峰
+        if (bump >= 3) crosses[String(t)] = round
+      } else {
+        consecutive.set(t, 0)
+      }
+    }
+
     if (lastUtil >= MAX_UTIL) {
       console.log(
         `[${model.padEnd(16)}] blocked @ round ${String(round).padStart(3)}, ` +
@@ -77,6 +94,10 @@ async function simulate(model: string): Promise<void> {
     `[${model.padEnd(16)}] ${ROUNDS_CAP} 轮内未达 blocked, ` +
       `plateau util=${lastUtil.toFixed(3)} | snip=${snipHits} micro=${microHits} | effective=${effective}`,
   )
+  for (const t of thresholds) {
+    const r = crosses[String(t)]
+    if (r !== undefined) console.log(`    ├─ util 首站${String(Math.round(t * 100)).padStart(2)}% @ round ${r}`)
+  }
 }
 
 for (const m of ['gpt-4o', 'claude-3-5-sonnet', 'gemini-2.5-flash', 'deepseek-chat', 'unknown-model']) {
