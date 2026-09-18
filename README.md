@@ -24,7 +24,7 @@ LiteAI 是一个开源的 AI agent，用于调查生产事故、定位根因并�
 - **复盘与知识库** — `generate_postmortem` 模板化生成复盘并归档入库；`search_incident_kb` 用 sqlite-vec 本地语义检索相似历史事故
 - **流式日志** — `tail_logs` / `follow_logs` / `stop_follow` 按级别着色，支持超大文件与滚动读取
 - **可观测性** — 每回合自动落盘 LLM 调用 / 工具调用 / 回合统计（`LITE_AI_HOME/metrics.db`），`/metrics` 聚合展示，`/metrics --turn <id>` 按回合回溯调用链
-- **告警 webhook** — `lite-ai --webhook [port]` 独立监听进程，接收 Alertmanager 等事件源告警，自动去重、排队诊断并回推通知
+- **多源告警接入** — `lite-ai --webhook [port]` 独立监听进程：推送型源（Alertmanager / Grafana / PagerDuty / Opsgenie / 自定义）按 payload 自动路由，拉取型源（Zabbix / 日志告警 / K8s Events 等）定时轮询，两路共用同一条「去重 → 跨批次关联成事件 → 事件级 RCA」链路
 - **MCP 与本地技能** — 支持 MCP 工具 / 资源 / prompt（stdio 或远程 HTTP），通过 `SKILL.md` 发现本地技能
 
 ## 工作原理
@@ -186,7 +186,79 @@ Tempo 也支持经 Grafana 数据源代理（推荐）：配置 `grafana_datasou
 }
 ```
 
-事件源支持按 payload 自动路由（告警去重 → 批处理护栏 → 有界并发池自动诊断 → 存会话 → 通知），全部护栏均可配置：`dedupeSilenceMs`（去重静默期，默认 5 分钟，对齐 OpenObserve silence）、`maxBatchPerRequest`（批处理护栏上限，默认 200）、`maxConcurrentDiagnoses`（并发上限，默认 5，按所用 LLM provider 的 RPM 调优），详见 `src/webhook/`。
+事件源按 payload 自动路由，全部护栏均可配置：`dedupeSilenceMs`（去重静默期，默认 5 分钟，对齐 OpenObserve silence）、`maxBatchPerRequest`（批处理护栏上限，默认 200）、`maxConcurrentDiagnoses`（并发上限，默认 5，按所用 LLM provider 的 RPM 调优）。
+
+摄入链路（推送与拉取共用同一条）：
+
+```
+push: POST /webhook → 鉴权 → 归一化 ┐
+                                  ├→ 批处理护栏 → 跨批次事件关联 → 事件/单条分级 → 有界并发池 → RCA
+pull: provider.poll() → Alert[]   ┘
+```
+
+**关联判定全程零 LLM**（纯规则、可复现、可审计），AI 只出现在最末端的 RCA 节点。
+
+### 支持的告警源
+
+**推送型**（源主动 POST 给我们）——按注册顺序自动识别，`source` 字段即命中项：
+
+| 源 | `source` | 识别依据 |
+|---|---|---|
+| Prometheus / Alertmanager | `alertmanager` | 顶层含 `alerts` 数组 |
+| Grafana Unified Alerting | `grafana` | 含 `orgId` + `alerts` |
+| PagerDuty | `pagerduty` | v2 `messages[]` / v3 单事件两种形态 |
+| Opsgenie | `opsgenie` | 含 `alert` 对象 |
+| 业务自定义 / CI-CD / 脚本 | `generic` | 含 `alertname` / `title` / `name` / `alert`（**兜底，注册在最后**） |
+
+**拉取型**（我们定时调它的 API）——**默认全部关闭**，必须显式 `enabled: true`：
+
+| 源 | `type` | 说明 |
+|---|---|---|
+| Zabbix / ELK / Loki / Splunk / 云监控 OpenAPI / 自建查询 | `httpPoll` | 配置驱动：请求 URL + 可选 headers/body + `itemsPath` 定位告警数组 + 字段映射 |
+| Kubernetes Events | `k8sEvents` | `fieldSelector`（缺省 `type!=Normal`）/ `namespace` / `continue` 游标分页 / SA token 惰性读取 |
+
+```json
+{
+  "webhook": {
+    "sources": {
+      "pull": [
+        {
+          "type": "httpPoll", "name": "zabbix", "enabled": true, "intervalMs": 60000,
+          "url": "http://zabbix/api_jsonrpc.php", "method": "POST",
+          "body": { "jsonrpc": "2.0", "method": "alert.get", "params": { "output": "extend" }, "id": 1 },
+          "itemsPath": "result",
+          "map": { "title": "name", "severity": "priority", "startsAt": "clock", "labelsFrom": ["host"] }
+        },
+        {
+          "type": "k8sEvents", "name": "k8s", "enabled": true, "intervalMs": 30000,
+          "apiServer": "https://kubernetes.default.svc",
+          "tokenFile": "/var/run/secrets/kubernetes.io/serviceaccount/token",
+          "namespace": "prod"
+        }
+      ]
+    }
+  }
+}
+```
+
+> 云厂商私有签名（AWS SigV4 / 华为云 HMAC）不在内置范围内：退路是用 sidecar/脚本拉取后 POST 到 `/webhook`（走推送适配器，链路完全一致）。
+
+### 如何新增一个源
+
+**推送型**：在 `src/webhook/sources/` 新建一个实现 `AlertSourceAdapter`（`matches` + `parse`）的文件，在 `sources/index.ts` 的 `alertSourceAdapters` 里注册一行。
+→ **注册顺序即优先级匹配顺序**，兜底的 `generic` 必须放在最后（它会被任何含 `alertname` 的 payload 命中）。
+
+**拉取型**：在 `src/ingest/providers/` 新建一个实现 `SourceProvider`（`name` + `poll(signal)`）的文件，在 `provider.ts` 的 `PROVIDER_FACTORIES` 里注册一行。
+
+两种方式都**不需要改动** `correlate.ts` / `incident-registry.ts` / `dedupe.ts` / `pipeline.ts` —— 它们只吃统一 `Alert[]`，对来源完全无感知。
+
+### 关联与生命周期
+
+- **事件是诊断单元**：同 `app`/`service`/`job`/`namespace`/`cluster` 标签、5 分钟窗口内 ≥2 条告警聚成一个事件；一个事件 = 一个 sessionId = **一次** RCA（而非每条告警各烧一次 token）。
+- **跨批次**：迟到的成员会并入已有事件并触发一次增量重分析；同一告警重复到达只记时间线、不重复诊断。
+- **拓扑关联**（规则④）默认关闭，需在 `webhook.topology` 配可信图来源（SkyWalking / k8s）。无可信图即不启用；拉取失败自动退化为纯规则关联，不影响诊断。
+- **恢复（`resolved`）只做收敛、不触发 RCA**：某个事件的全部成员都收到源侧恢复才关闭；否则最多等 30 分钟 TTL 收敛。恢复通知不消耗 token。
+- **已知取舍**：`Alert.id`（去重 fingerprint）只由 `alertname + labels` 派生、**不含 `source`** —— 因此不同源上报的同名同标签信号会被视为同一条告警而合并。这是有意为之（同一故障从多个监控系统进来时正该收敛），但需要按源区分时应在上游标签里带上来源维度。
 
 ## 只读安全边界
 
