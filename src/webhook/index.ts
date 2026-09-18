@@ -1,24 +1,30 @@
 /**
- * Webhook 常驻监听进程：POST /webhook → 路由解析 → 兜底去重 → 硬截断 →
- * 有界并发池自动诊断 → 存会话 → 通知。不同告警并行、同告警冷却去重，
- * 并发上限由 maxConcurrentDiagnoses 控制（默认 3）。
+ * Webhook 常驻监听进程（**只负责传输层**）：
+ * POST /webhook → 鉴权 → 读 body → 路由解析（适配器归一化）→ 交给 IngestPipeline
+ * → 存会话 → 通知。
+ *
+ * 边界：本文件不再包含去重 / 关联 / 并发池 / 拓扑刷新等后处理逻辑 —— 它们已抽到
+ * `src/ingest/pipeline.ts`，与传输方式无关，供将来的**拉取型 provider** 复用同一条
+ * 链路（否则 push 与 pull 会 divergent 成两套口径）。
  */
 import http from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import type { WebhookConfig } from '../config.js'
-import { DEFAULT_MAX_CONCURRENT_DIAGNOSES } from '../config.js'
 import { routeAlertSource } from './sources/index.js'
-import { AlertDedupe, truncateAlerts } from './dedupe.js'
+import { IngestPipeline } from '../ingest/pipeline.js'
 import { runAlertDiagnosis, type DiagnosisResult } from './diagnose.js'
-import type { Alert } from './types.js'
+import type { Alert, Incident } from './types.js'
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024
 
 export type WebhookServerOptions = {
   cwd: string
   config: WebhookConfig
-  /** 诊断执行器，默认 runAlertDiagnosis（测试可注入） */
-  diagnose?: (alert: Alert) => Promise<DiagnosisResult>
+  /**
+   * 诊断执行器，默认 runAlertDiagnosis（测试可注入）。
+   * 事件级诊断时第二个参数为 Incident（sessionId 取 incidentId）；单条诊断时不传。
+   */
+  diagnose?: (alert: Alert, incident?: Incident) => Promise<DiagnosisResult>
   /** 外部触发优雅关闭（测试可注入）；与 SIGINT/SIGTERM 等效 */
   abortSignal?: AbortSignal
 }
@@ -84,76 +90,14 @@ export async function runWebhookServer(
     )
   }
 
-  const dedupe = new AlertDedupe()
-  const diagnose = opts.diagnose ?? ((alert: Alert) => runAlertDiagnosis({ cwd: opts.cwd, alert }))
-
-  // 有界并发诊断池：不同告警并行，避免单条诊断阻塞后续告警；
-  // 上限防告警风暴时无界并发耗尽 API 配额/机器资源。
-  const maxConcurrent = config.maxConcurrentDiagnoses ?? DEFAULT_MAX_CONCURRENT_DIAGNOSES
-  let active = 0
-  const pending: Array<() => Promise<void>> = []
-  let resolveDrained: (() => void) | null = null
-
-  const notifyDrainedIfIdle = (): void => {
-    if (active === 0 && pending.length === 0 && resolveDrained) {
-      const resolve = resolveDrained
-      resolveDrained = null
-      resolve()
-    }
-  }
-
-  const drain = (): void => {
-    while (active < maxConcurrent && pending.length > 0) {
-      const task = pending.shift()!
-      active += 1
-      void task()
-        .catch(error => {
-          const reason = error instanceof Error ? error.message : String(error)
-          console.error(`[webhook] 诊断失败: ${reason}`)
-        })
-        .finally(() => {
-          active -= 1
-          drain()
-          notifyDrainedIfIdle()
-        })
-    }
-    notifyDrainedIfIdle()
-  }
-
-  const enqueue = (task: () => Promise<void>): void => {
-    pending.push(task)
-    drain()
-  }
-
-  /** 等待池排空（优雅关停用）。 */
-  const drained = (): Promise<void> =>
-    new Promise<void>(resolve => {
-      if (active === 0 && pending.length === 0) {
-        resolve()
-        return
-      }
-      resolveDrained = resolve
-    })
-
-  // 返回 true 表示已入队。
-  const handleAlert = (alert: Alert): boolean => {
-    if (!dedupe.shouldDiagnose(alert.id)) {
-      console.log(`[webhook] 去重跳过 ${alert.title} (${alert.id})，冷却窗口内`)
-      return false
-    }
-    enqueue(async () => {
-      try {
-        const result = await diagnose(alert)
-        console.log(
-          `[webhook] 诊断完成 ${alert.title} (${alert.severity}) → session ${result.sessionId}`,
-        )
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        console.error(`[webhook] 诊断异常 ${alert.title}: ${reason}`)
-      }
-    })
-    return true
-  }
+  // 后处理链路（去重 / 关联 / 分级 / 有界并发池 / 拓扑刷新）全部由管道持有。
+  const pipeline = new IngestPipeline(opts.cwd, config, {
+    diagnose:
+      opts.diagnose ??
+      ((alert: Alert, incident?: Incident) =>
+        runAlertDiagnosis({ cwd: opts.cwd, alert, incident })),
+  })
+  pipeline.start()
 
   const server = http.createServer(async (req, res) => {
     if (req.method !== 'POST') {
@@ -202,25 +146,8 @@ export async function runWebhookServer(
       return
     }
 
-    const { alerts: kept, truncated } = truncateAlerts(alerts)
-    if (truncated > 0) {
-      console.warn(
-        `[webhook] 告警被截断: 原始 ${alerts.length} 条 → 保留 ${kept.length} 条（critical 优先）。请检查 Alertmanager group_by/repeat_interval 配置。`,
-      )
-    }
-
-    let accepted = 0
-    let deduplicated = 0
-    for (const alert of kept) {
-      if (config.autoDiagnose === false) continue
-      if (!handleAlert(alert)) {
-        deduplicated += 1
-      } else {
-        accepted += 1
-      }
-    }
-
-    reply(res, 202, { accepted, deduplicated, truncated })
+    // 归一化之后的一切与"这条告警是怎么来的"无关 —— 推送与拉取共用同一条管道。
+    reply(res, 202, pipeline.ingest(alerts))
   })
 
   await new Promise<void>((resolve, reject) => {
@@ -243,8 +170,9 @@ export async function runWebhookServer(
       if (shuttingDown) return
       shuttingDown = true
       console.log('[webhook] 收到退出信号，排空队列后关闭 ...')
+      pipeline.close()
       server.close()
-      void drained().then(() => {
+      void pipeline.drained().then(() => {
         server.closeAllConnections?.()
         resolve()
       })

@@ -13,6 +13,8 @@ export const WEBHOOK_ALERTS_PATH = path.join(LITE_AI_DIR, 'webhook', 'alerts.jso
 
 export type AlertRecord = {
   alertId: string
+  /** 归属的事件 id（事件级诊断时写入；单条诊断时缺省） */
+  incidentId?: string
   sessionId: string
   title: string
   severity: string

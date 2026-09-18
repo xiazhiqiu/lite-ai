@@ -177,14 +177,16 @@ Tempo 也支持经 Grafana 数据源代理（推荐）：配置 `grafana_datasou
     "host": "127.0.0.1",
     "secret": "可选校验 token",
     "autoDiagnose": true,
-    "maxConcurrentDiagnoses": 3,
+    "maxConcurrentDiagnoses": 5,
+    "dedupeSilenceMs": 300000,
+    "maxBatchPerRequest": 200,
     "notifyUrl": "https://example.com/hook",
     "notifyHeaders": { "Authorization": "Bearer ..." }
   }
 }
 ```
 
-事件源支持按 payload 自动路由（告警去重 → 截断 → 有界并发池自动诊断 → 存会话 → 通知），并发上限由 `maxConcurrentDiagnoses` 控制（默认 3），详见 `src/webhook/sources/`。
+事件源支持按 payload 自动路由（告警去重 → 批处理护栏 → 有界并发池自动诊断 → 存会话 → 通知），全部护栏均可配置：`dedupeSilenceMs`（去重静默期，默认 5 分钟，对齐 OpenObserve silence）、`maxBatchPerRequest`（批处理护栏上限，默认 200）、`maxConcurrentDiagnoses`（并发上限，默认 5，按所用 LLM provider 的 RPM 调优），详见 `src/webhook/`。
 
 ## 只读安全边界
 

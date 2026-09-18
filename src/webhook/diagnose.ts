@@ -18,15 +18,15 @@ import { createContentReplacementState } from '../utils/tool-result-storage.js'
 import { createContextCollapseState } from '../compact/context-collapse.js'
 import type { ChatMessage, ModelAdapter } from '../types.js'
 import type { ToolRegistry } from '../tool.js'
-import type { Alert } from './types.js'
-import { alertSessionId, normalizeToUserMessage } from './types.js'
+import type { Alert, Incident } from './types.js'
+import { alertSessionId, normalizeIncidentMessage, normalizeToUserMessage } from './types.js'
 import { notifyIfConfigured } from './notify.js'
 import { appendAlertRecord } from './alert-store.js'
 
 export type DiagnoseDeps = {
   /** 注入自定义模型（测试用），缺省按运行时配置创建 */
   model?: ModelAdapter
-  /** 最大工具步数，默认 40 */
+  /** 最大工具步数，默认 200 */
   maxSteps?: number
   /** 覆盖 webhook 配置（测试注入 notifyUrl 等） */
   config?: WebhookConfig
@@ -65,15 +65,21 @@ function extractFinalSummary(messages: ChatMessage[]): string {
 export async function runAlertDiagnosis(args: {
   cwd: string
   alert: Alert
+  /**
+   * 事件级诊断：提供时以 Incident 为诊断单元 —— sessionId 取 incidentId、
+   * 消息注入完整事件包（主告警 + 全部成员 + 多重根因协议）。缺省时退化为单条诊断。
+   */
+  incident?: Incident
   deps?: DiagnoseDeps
 }): Promise<DiagnosisResult> {
-  const { cwd, alert } = args
+  const { cwd, alert, incident } = args
   const deps = args.deps ?? {}
-  const sessionId = alertSessionId(alert)
+  const sessionId = incident ? incident.incidentId : alertSessionId(alert)
   const config = deps.config ?? (await loadWebhookConfig())
 
   await appendAlertRecord({
     alertId: alert.id,
+    incidentId: incident?.incidentId,
     sessionId,
     title: alert.title,
     severity: alert.severity,
@@ -101,7 +107,10 @@ export async function runAlertDiagnosis(args: {
 
   let messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
-    { role: 'user', content: normalizeToUserMessage(alert) },
+    {
+      role: 'user',
+      content: incident ? normalizeIncidentMessage(incident) : normalizeToUserMessage(alert),
+    },
   ]
 
   const contentReplacementState = createContentReplacementState()
@@ -114,7 +123,7 @@ export async function runAlertDiagnosis(args: {
       messages,
       cwd,
       permissions,
-      maxSteps: deps.maxSteps ?? 40,
+      maxSteps: deps.maxSteps ?? 200,
       modelName: runtime.model || '',
       contentReplacementState,
       contextCollapseState,
@@ -127,7 +136,7 @@ export async function runAlertDiagnosis(args: {
     persistable.push({ role: 'assistant' as const, content: failureNote })
     await saveSession(cwd, sessionId, persistable).catch(() => {})
     await appendAlertRecord({
-      alertId: alert.id, sessionId, title: alert.title,
+      alertId: alert.id, incidentId: incident?.incidentId, sessionId, title: alert.title,
       severity: alert.severity, summary: reason, status: 'failed' as const,
     })
     await notifyIfConfigured(config, alert, sessionId, failureNote, 'failed')

@@ -2,6 +2,9 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { isEnoentError } from './utils/errors.js'
+import type { CorrelationConfig } from './webhook/correlate.js'
+import type { TopologyConfig } from './webhook/topology.js'
+import type { PullSourcesConfig } from './ingest/provider.js'
 
 export const DEFAULT_EMBEDDING_DIMENSION = 384
 
@@ -71,17 +74,60 @@ export type WebhookConfig = {
   secret?: string
   /** 收到 firing 告警后是否自动诊断，默认 true */
   autoDiagnose: boolean
-  /** 并发诊断上限：不同告警可并行诊断，防止告警风暴时无界并发耗尽 API 配额/资源，默认 3 */
+  /**
+   * 并发诊断上限：不同告警可并行诊断，防止告警风暴时无界并发耗尽 API 配额/资源。
+   * 默认 5。注意：此池门控的是「昂贵的 LLM RCA 调用」（受 provider RPM 限制），
+   * 与 Keep/OpenObserve 门控廉价 webhook/工单不同，故不宜照搬其 20 档默认值，
+   * 应按所用 LLM provider 的每分钟请求数（RPM）调优。
+   */
   maxConcurrentDiagnoses: number
+  /**
+   * 单条告警去重静默期（毫秒），默认 300000（5 分钟）。对齐 OpenObserve 的 silence 配置：
+   * 窗口内完整重复（HA 双发/网络重试）→ 抑制；内容变化 → 重诊断。
+   */
+  dedupeSilenceMs?: number
+  /**
+   * 单次请求批处理护栏上限，默认 200。超限按 severity 截断并告警（提示检查上游 group_by 配置），
+   * 而非静默丢弃；Alertmanager group_by 已限制微批大小，200 仅作内存安全护栏。
+   */
+  maxBatchPerRequest?: number
   /** 诊断完成后 POST 摘要到此地址 */
   notifyUrl?: string
   /** 通知请求自定义头 */
   notifyHeaders: Record<string, string>
+  /**
+   * 跨源告警关联（L2）配置覆盖项。可选，缺省时用 correlate.ts 的默认值
+   * （enabled / 5min 窗口 / minAlerts=2）。仅覆盖传入字段。
+   */
+  correlation?: Partial<CorrelationConfig>
+  /**
+   * 拓扑关联（L2 规则④）配置。**默认关闭**（enabled 缺省 false）：
+   * 无可信依赖图时不启用，避免"过期/错误拓扑"造成误并（比漏关联更危险）。
+   * source 可插拔：k8s 给"业务归属"、skywalking 给"运行时调用边"，两者互补。
+   */
+  topology?: Partial<TopologyConfig>
+  /**
+   * 拉取型告警源（pull provider）：那些**不会推送、只能由我们主动调 API** 的源 ——
+   * 云监控（CloudWatch / 阿里云 / 华为云 CES）、Zabbix、ELK/Loki/Splunk 日志告警、
+   * K8s Events、业务自建查询接口等。
+   *
+   * 与拓扑层同一保守默认：**每个源必须显式 `enabled: true` 才拉取**，
+   * 无配置 / 配置不全即静默不启用，且任何单源失败都不影响 webhook 主链路。
+   */
+  sources?: PullSourcesConfig
 }
 
 export const DEFAULT_WEBHOOK_PORT = 8787
 export const DEFAULT_WEBHOOK_HOST = '127.0.0.1'
-export const DEFAULT_MAX_CONCURRENT_DIAGNOSES = 3
+/**
+ * 并发诊断上限默认值。门控的是昂贵的 LLM RCA 调用（受 provider RPM 限制），
+ * 不宜照搬 Keep/OpenObserve 门控廉价 webhook 的 20 档，按 RPM 调优即可。
+ */
+export const DEFAULT_MAX_CONCURRENT_DIAGNOSES = 5
+/** 单条告警去重静默期默认值（5 分钟），对齐 OpenObserve silence 配置。 */
+export const DEFAULT_DEDUPE_SILENCE_MS = 300_000
+/** 单次请求批处理护栏默认值（内存安全护栏，非丢弃语义）。 */
+export const DEFAULT_MAX_BATCH_PER_REQUEST = 200
 
 /** 读取 webhook 配置，与 settings.json 中的 webhook 覆盖项合并默认值。 */
 export async function loadWebhookConfig(): Promise<WebhookConfig> {
@@ -95,6 +141,11 @@ export async function loadWebhookConfig(): Promise<WebhookConfig> {
     maxConcurrentDiagnoses: webhook.maxConcurrentDiagnoses ?? DEFAULT_MAX_CONCURRENT_DIAGNOSES,
     notifyUrl: webhook.notifyUrl,
     notifyHeaders: webhook.notifyHeaders ?? {},
+    correlation: webhook.correlation,
+    topology: webhook.topology,
+    sources: webhook.sources,
+    dedupeSilenceMs: webhook.dedupeSilenceMs,
+    maxBatchPerRequest: webhook.maxBatchPerRequest,
   }
 }
 

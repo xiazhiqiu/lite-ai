@@ -127,19 +127,34 @@ test('alertSessionId: 同 alertId 派生同 sessionId', async () => {
 
 // ---------- 去重 + 截断 ----------
 
-test('AlertDedupe: 冷却窗内跳过，窗口后重新诊断', async () => {
+test('AlertDedupe: 双层去重 new/updated/suppressed + 静默期窗口', async () => {
   const { AlertDedupe } = await import('../src/webhook/dedupe.js')
-  const dedupe = new AlertDedupe(100)
-  assert.equal(dedupe.shouldDiagnose('a'), true)
-  assert.equal(dedupe.shouldDiagnose('a'), false) // 冷却中
+  const dedupe = new AlertDedupe(100) // 静默期 100ms
+  const base = (over: Record<string, unknown> = {}) => ({
+    id: 'fp-1',
+    title: 'HighCPU',
+    severity: 'critical',
+    summary: 'cpu 90',
+    description: '',
+    labels: { host: 'h1' },
+    startsAt: new Date().toISOString(),
+    status: 'firing',
+    ...over,
+  })
+  assert.equal(dedupe.shouldDiagnose(base()), 'new')
+  // 静默期内、内容未变 → 抑制（HA 双发 / 网络重试）
+  assert.equal(dedupe.shouldDiagnose(base()), 'suppressed')
+  // 内容变化（指标值跳变）→ updated，重诊断（根因上下文可能变化）
+  assert.equal(dedupe.shouldDiagnose(base({ summary: 'cpu 99' })), 'updated')
   await sleep(160)
-  assert.equal(dedupe.shouldDiagnose('a'), true) // 窗口后恢复
+  // 静默期过后 → 重新视为 new
+  assert.equal(dedupe.shouldDiagnose(base()), 'new')
   await sleep(40) // 等待原 key 自动清理
 })
 
-test('truncateAlerts: 超限按 severity 截断，critical 优先', async () => {
-  const { truncateAlerts, MAX_ALERTS_PER_BATCH } = await import('../src/webhook/dedupe.js')
-  const alerts = Array.from({ length: 50 }, (_, i) => ({
+test('truncateAlerts: 超限按 severity 截断 critical 优先，limit 可配置', async () => {
+  const { truncateAlerts } = await import('../src/webhook/dedupe.js')
+  const make = (i: number) => ({
     id: `id-${i}`,
     title: `alert-${i}`,
     severity: i % 5 === 0 ? 'critical' : 'warning',
@@ -148,11 +163,18 @@ test('truncateAlerts: 超限按 severity 截断，critical 优先', async () => 
     labels: {},
     startsAt: new Date().toISOString(),
     status: 'firing' as const,
-  }))
-  const { alerts: kept, truncated } = truncateAlerts(alerts)
-  assert.equal(kept.length, MAX_ALERTS_PER_BATCH)
-  assert.equal(truncated, 50 - MAX_ALERTS_PER_BATCH)
-  assert.ok(kept.slice(0, 5).every(a => a.severity === 'critical'))
+  })
+  // 默认上限 200：50 条不触发截断
+  const def = truncateAlerts(Array.from({ length: 50 }, (_, i) => make(i)))
+  assert.equal(def.truncated, 0)
+  // 显式 limit=10：超 50 条按 critical 优先截断
+  const capped = truncateAlerts(
+    Array.from({ length: 50 }, (_, i) => make(i)),
+    10,
+  )
+  assert.equal(capped.alerts.length, 10)
+  assert.equal(capped.truncated, 40)
+  assert.ok(capped.alerts.slice(0, 5).every(a => a.severity === 'critical'))
 })
 
 // ---------- 诊断 + 会话存储 ----------
@@ -258,6 +280,8 @@ async function startServer(opts: {
   secret?: string
   autoDiagnose?: boolean
   maxConcurrentDiagnoses?: number
+  maxBatchPerRequest?: number
+  dedupeSilenceMs?: number
 }) {
   const port = await getFreePort()
   const diagnosed: string[] = []
@@ -271,6 +295,8 @@ async function startServer(opts: {
       host: '127.0.0.1',
       autoDiagnose: opts.autoDiagnose ?? true,
       maxConcurrentDiagnoses: opts.maxConcurrentDiagnoses ?? 3,
+      maxBatchPerRequest: opts.maxBatchPerRequest,
+      dedupeSilenceMs: opts.dedupeSilenceMs,
       secret: opts.secret,
       notifyHeaders: {},
     },
@@ -372,7 +398,7 @@ test('HTTP: resolved 告警不诊断；非法 payload → 400', async () => {
   await srv.done
 })
 
-test('HTTP: 硬截断 50 条 → 保留 10 条', async () => {
+test('HTTP: 批处理护栏截断 50 条 → 保留 maxBatchPerRequest 条', async () => {
   const alerts = Array.from({ length: 50 }, (_, i) => ({
     status: 'firing',
     labels: { alertname: `Alert${i}`, severity: i % 5 === 0 ? 'critical' : 'warning' },
@@ -380,7 +406,7 @@ test('HTTP: 硬截断 50 条 → 保留 10 条', async () => {
   }))
   const payload = { status: 'firing', alerts }
 
-  const srv = await startServer({})
+  const srv = await startServer({ maxBatchPerRequest: 10 })
   try {
     const res = await fetch(`${srv.url}/webhook`, {
       method: 'POST',
