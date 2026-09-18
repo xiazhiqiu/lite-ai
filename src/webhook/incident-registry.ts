@@ -194,6 +194,15 @@ export type OpenIncident = {
   status: 'open' | 'resolved'
   /** 是否已被诊断过（true 时后续新成员触发的诊断标记为"增量重分析"） */
   diagnosed: boolean
+  /**
+   * 已收到 resolved 的成员 alertId 集合（源侧恢复通知）。
+   * **只有全部成员都在此集合里**才关闭事件 —— 单个成员恢复不代表整件事恢复
+   * （多成员/多根因是常态）。误关会让后续成员只能新建事件、丢掉跨批次连续性；
+   * 晚关的代价只是一段 TTL。
+   */
+  resolvedIds: Set<string>
+  /** 事件被源侧恢复关闭的时间（null = 仍 open 或仅被 TTL 收敛） */
+  resolvedAt: number | null
   reasons: Set<CorrelationReason>
 }
 
@@ -230,6 +239,16 @@ export type ResolveResult = {
   created: number
   /** 本次需要（重新）诊断的事件数（含严重度升级触发的新分析） */
   reanalyzed: number
+}
+
+/** `markResolved` 的产出（可审计）。 */
+export type MarkResolvedResult = {
+  /** 因源侧恢复而被关闭的事件 id（全部成员均已收到 resolved） */
+  closed: string[]
+  /** 被记录为"已恢复"的成员数（含未导致关闭的部分恢复） */
+  resolvedMembers: number
+  /** 未匹配到任何 open 事件的 resolved 告警数（可能事件早已被 TTL 收敛） */
+  unmatched: number
 }
 
 /** 内部：把一组告警纳入某个事件的产出。 */
@@ -391,6 +410,70 @@ export class IncidentRegistry {
   markDiagnosed(incidentId: string): void {
     const incident = this.byId.get(incidentId)
     if (incident) incident.diagnosed = true
+  }
+
+  /**
+   * 收敛路径：把源侧已恢复（`status: 'resolved'`）的告警记入对应 open 事件，
+   * 全部成员都恢复时关闭该事件。
+   *
+   * **绝不触发 RCA** —— 恢复通知不该烧 token，这是与 `resolve()` 的分工边界：
+   * `resolve()` 只吃 firing（诊断单元），`markResolved()` 只做收敛（不产生诊断单元）。
+   *
+   * 保守规则（对齐"错并代价 >> 漏并"的一贯取舍）：
+   * - 只有**全部成员**都已 resolved 才关闭。单成员恢复可能是多根因里的一个先好了。
+   * - 匹配不到 open 事件的 resolved 告警只计数上报，**不新建任何东西**
+   *   （恢复通知不构成新事件；事件可能早已被 TTL 收敛）。
+   * - 不修改 `lastAlertAt`：恢复不应当延长事件寿命。
+   */
+  markResolved(
+    alerts: Alert[],
+    correlationConfig: Partial<CorrelationConfig> = {},
+    now: number = Date.now(),
+  ): MarkResolvedResult {
+    this.sweep(now)
+    const cfg: CorrelationConfig = { ...DEFAULT_CORRELATION_CONFIG, ...correlationConfig }
+    const closed: string[] = []
+    const closedIds = new Set<string>()
+    let resolvedMembers = 0
+    let unmatched = 0
+
+    for (const alert of alerts) {
+      // 定位该告警所属的 open 事件：
+      // ① 已是事件成员（按 alertId）—— 最精确；
+      // ② 否则退回规则键（跨批次下"恢复通知"可能先于成员再次上报到达）。
+      const candidates = new Set<OpenIncident>()
+      for (const incident of this.byId.values()) {
+        if (incident.status !== 'open') continue
+        if (incident.seen.has(alert.id)) candidates.add(incident)
+      }
+      if (candidates.size === 0) {
+        const hit = matchFirstKey(alert, cfg.groupByKeys)
+        const found = hit === null ? null : this.findOpenByKey(hit.keyName, hit.groupKey)
+        if (found !== null && found.status === 'open') candidates.add(found)
+      }
+
+      if (candidates.size === 0) {
+        unmatched += 1
+        continue
+      }
+
+      for (const incident of candidates) {
+        incident.resolvedIds.add(alert.id)
+        resolvedMembers += 1
+        // 全部成员都已恢复 → 关闭。`alerts` 为空的事件（理论不可达）不据此关闭。
+        const allResolved =
+          incident.alerts.length > 0 &&
+          incident.alerts.every(member => incident.resolvedIds.has(member.id))
+        if (allResolved && !closedIds.has(incident.incidentId)) {
+          incident.status = 'resolved'
+          incident.resolvedAt = now
+          closedIds.add(incident.incidentId)
+          closed.push(incident.incidentId)
+        }
+      }
+    }
+
+    return { closed, resolvedMembers, unmatched }
   }
 
   /** 查询事件（测试 / 运维观测用）。 */
@@ -599,6 +682,8 @@ export class IncidentRegistry {
       createdAt: now,
       status: 'open',
       diagnosed: false,
+      resolvedIds: new Set(),
+      resolvedAt: null,
       reasons: new Set(),
     }
   }

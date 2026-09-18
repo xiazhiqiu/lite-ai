@@ -36,8 +36,10 @@ export const alertmanagerAdapter: AlertSourceAdapter = {
     for (const item of raws) {
       const raw = asRecord(item)
       if (Object.keys(raw).length === 0) continue
-      // 只处理 firing；resolved 直接过滤
-      if (asString(raw.status) === 'resolved') continue
+      // resolved（恢复通知）**不再丢弃**：交由 `IngestPipeline` 走事件收敛路径
+      // （关闭事件、不触发 RCA）。适配器只负责如实标注状态。
+      const status: Alert['status'] =
+        asString(raw.status).trim().toLowerCase() === 'resolved' ? 'resolved' : 'firing'
 
       const labels = asStringRecord(raw.labels)
       const annotations = asStringRecord(raw.annotations)
@@ -56,7 +58,7 @@ export const alertmanagerAdapter: AlertSourceAdapter = {
         description,
         labels: { ...labels },
         startsAt,
-        status: 'firing',
+        status,
       })
     }
 

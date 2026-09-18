@@ -53,9 +53,8 @@ export const grafanaAdapter: AlertSourceAdapter = {
         'normal',
         'resolved',
       ])
-      // T6 之前统一过滤 resolved（避免"恢复通知"触发一次 RCA）。
-      if (status === 'resolved') continue
-
+      // resolved（Grafana 的 `ok`）不再丢弃：交由 `IngestPipeline` 走事件收敛路径，
+      // 关闭事件且不触发 RCA（对齐 alertmanager 适配器）。
       const title =
         labels.alertname || firstString(raw, ['title', 'name']) || 'untitled-alert'
       const severity =
@@ -78,7 +77,7 @@ export const grafanaAdapter: AlertSourceAdapter = {
         description,
         labels: { ...labels },
         startsAt,
-        status: 'firing',
+        status,
       })
     }
 

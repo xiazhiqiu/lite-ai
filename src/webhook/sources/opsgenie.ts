@@ -60,12 +60,11 @@ export const opsgenieAdapter: AlertSourceAdapter = {
     if (Object.keys(alert).length === 0) return []
 
     const action = firstString(payload, ['action'])
-    const status =
+    // resolved（`Close` 动作）不再丢弃：交由 `IngestPipeline` 走事件收敛路径。
+    const status: Alert['status'] =
       action.trim().toLowerCase() === 'close'
         ? 'resolved'
         : toAlertStatus(firstString(alert, ['status']), ['closed', 'resolved'])
-    // T6 之前统一过滤 resolved。
-    if (status === 'resolved') return []
 
     const title =
       firstString(alert, ['message', 'name', 'alias']) || 'untitled-alert'
@@ -112,7 +111,7 @@ export const opsgenieAdapter: AlertSourceAdapter = {
         description,
         labels,
         startsAt,
-        status: 'firing',
+        status,
       },
     ]
   },

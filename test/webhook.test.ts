@@ -83,7 +83,7 @@ test('routeAlertSource: 路由到 alertmanager；未知格式抛错', async () =
   assert.throws(() => routeAlertSource({ random: true }), /无法识别/)
 })
 
-test('alertmanagerAdapter.parse: firing 解析；resolved 被过滤；缺字段走默认', async () => {
+test('alertmanagerAdapter.parse: firing 解析；resolved 如实标注；缺字段走默认', async () => {
   const { alertmanagerAdapter } = await import('../src/webhook/sources/alertmanager.js')
   const alerts = alertmanagerAdapter.parse(FIRING_PAYLOAD)
   assert.equal(alerts.length, 2)
@@ -95,16 +95,20 @@ test('alertmanagerAdapter.parse: firing 解析；resolved 被过滤；缺字段�
   assert.equal(first.labels.service, 'payment')
   assert.ok(first.startsAt.length > 0)
 
-  // resolved 被过滤；缺 severity 走默认
-  const kept = alertmanagerAdapter.parse({
+  // T6：resolved 不再丢弃，而是如实标注状态（交由 IngestPipeline 收敛，不触发 RCA）；
+  // 缺 severity 走默认。
+  const parsed = alertmanagerAdapter.parse({
     alerts: [
       { status: 'resolved', labels: { alertname: 'A', severity: 'warning' } },
       { status: 'firing', labels: { alertname: 'B' } },
     ],
   })
-  assert.equal(kept.length, 1)
-  assert.equal(kept[0]!.title, 'B')
-  assert.equal(kept[0]!.severity, 'SEV3')
+  assert.equal(parsed.length, 2)
+  assert.equal(parsed[0]!.title, 'A')
+  assert.equal(parsed[0]!.status, 'resolved')
+  assert.equal(parsed[1]!.title, 'B')
+  assert.equal(parsed[1]!.status, 'firing')
+  assert.equal(parsed[1]!.severity, 'SEV3')
 })
 
 test('normalizeToUserMessage: 含服务/严重级别/时间', async () => {
@@ -365,7 +369,7 @@ test('HTTP: firing → 202 入队诊断；重复同窗口去重', async () => {
   await srv.done
 })
 
-test('HTTP: resolved 告警不诊断；非法 payload → 400', async () => {
+test('HTTP: resolved 告警只走收敛不诊断；非法 payload → 400', async () => {
   const srv = await startServer({})
   try {
     const resolved = await fetch(`${srv.url}/webhook`, {
@@ -376,8 +380,14 @@ test('HTTP: resolved 告警不诊断；非法 payload → 400', async () => {
       }),
     })
     assert.equal(resolved.status, 202)
-    const j = (await resolved.json()) as { accepted: number }
-    assert.equal(j.accepted, 0)
+    const j = (await resolved.json()) as {
+      accepted: number
+      resolved: number
+      closedIncidents: number
+    }
+    assert.equal(j.accepted, 0, '恢复通知不该触发 RCA')
+    assert.equal(j.resolved, 1)
+    assert.equal(j.closedIncidents, 0, '此前没有同名 open 事件可关闭')
 
     const bad = await fetch(`${srv.url}/webhook`, {
       method: 'POST',

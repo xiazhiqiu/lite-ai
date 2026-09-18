@@ -153,9 +153,9 @@ test('routeAlertSource: 无法识别的 payload 抛错', () => {
 
 // ---------------------------------------------------------------- T2: 字段映射
 
-test('alertmanager: 保持既有行为（resolved 过滤 + startsAt 原样透传）', () => {
+test('alertmanager: firing 原样透传 + startsAt 不归一化；resolved 如实标注', () => {
   const alerts = alertmanagerAdapter.parse(alertmanagerPayload)
-  assert.equal(alerts.length, 1)
+  assert.equal(alerts.length, 2)
   const a = alerts[0]!
   assert.equal(a.title, 'DiskFull')
   assert.equal(a.severity, 'critical')
@@ -165,11 +165,16 @@ test('alertmanager: 保持既有行为（resolved 过滤 + startsAt 原样透传
   assert.equal(a.status, 'firing')
   assert.equal(a.startsAt, '2026-09-17T10:00:00Z') // 既有行为：原样透传不归一化
   assert.deepEqual(a.labels, { alertname: 'DiskFull', severity: 'critical', instance: 'a:9100' })
+
+  // T6：resolved 不再在适配器层丢弃，而是如实标注状态，交由管道收敛（不触发 RCA）。
+  const recovered = alerts[1]!
+  assert.equal(recovered.title, 'AlreadyGone')
+  assert.equal(recovered.status, 'resolved')
 })
 
 test('grafana: alerting/ok 状态映射 + valueString 兜底为描述', () => {
   const alerts = grafanaAdapter.parse(grafanaPayload)
-  assert.equal(alerts.length, 1) // ok 那条被过滤
+  assert.equal(alerts.length, 2)
   const a = alerts[0]!
   assert.equal(a.title, 'PodCrashLoop')
   assert.equal(a.severity, 'critical')
@@ -177,6 +182,9 @@ test('grafana: alerting/ok 状态映射 + valueString 兜底为描述', () => {
   assert.equal(a.status, 'firing')
   assert.match(a.description, /metric=restarts/)
   assert.ok(a.startsAt.startsWith('2026-09-17T10:05'))
+  // Grafana 的恢复态是 ok → resolved（T6：不再丢弃）
+  assert.equal(alerts[1]!.title, 'RecoveredOne')
+  assert.equal(alerts[1]!.status, 'resolved')
 })
 
 test('pagerduty v2: urgency 映射 severity + 数字 incident_number 保留', () => {
@@ -200,13 +208,15 @@ test('pagerduty v3: 单事件形态 + severity 字段优先于 urgency', () => {
   assert.equal(alerts[0]!.labels.service, 'api-gateway')
 })
 
-test('pagerduty: resolved 事件被过滤', () => {
+test('pagerduty: resolved 事件如实标注（T6：不再丢弃）', () => {
   const body = {
     messages: [
       { id: 'm', event: 'incident.resolve', incident: { id: 'P1', title: 'done', status: 'resolved', service: { name: 's' } } },
     ],
   }
-  assert.deepEqual(pagerdutyAdapter.parse(body), [])
+  const alerts = pagerdutyAdapter.parse(body)
+  assert.equal(alerts.length, 1)
+  assert.equal(alerts[0]!.status, 'resolved')
 })
 
 test('opsgenie: P1→critical + tags 转 labels + Close 动作视为恢复', () => {
@@ -222,8 +232,11 @@ test('opsgenie: P1→critical + tags 转 labels + Close 动作视为恢复', () 
   assert.match(a.description, /current size=90000/)
   assert.match(a.description, /app\.opsgenie\.com/)
 
+  // T6：Close 动作 → resolved，如实标注后交由管道收敛（不再丢弃）
   const closing = { ...opsgeniePayload, action: 'Close' }
-  assert.deepEqual(opsgenieAdapter.parse(closing), [])
+  const closed = opsgenieAdapter.parse(closing)
+  assert.equal(closed.length, 1)
+  assert.equal(closed[0]!.status, 'resolved')
 })
 
 test('opsgenie: P3/P5 优先级映射正确', () => {
@@ -251,8 +264,10 @@ test('generic: 单对象解析 + source 可覆盖 + tags 数组支持', () => {
   assert.equal(tagged[0]!.labels.redis, 'true')
 })
 
-test('generic: resolved 单条返回空数组', () => {
-  assert.deepEqual(genericAdapter.parse({ alertname: 'X', status: 'resolved' }), [])
+test('generic: resolved 单条如实标注（T6：不再丢弃）', () => {
+  const alerts = genericAdapter.parse({ alertname: 'X', status: 'resolved' })
+  assert.equal(alerts.length, 1)
+  assert.equal(alerts[0]!.status, 'resolved')
 })
 
 // ---------------------------------------------------------------- T1: severity 归一化
@@ -286,17 +301,24 @@ test('不同源吐出的 Alert 形状一致，可直接进关联管线', () => {
     ...opsgenieAdapter.parse(opsgeniePayload),
     ...genericAdapter.parse(businessAlert),
   ]
-  assert.equal(all.length, 5) // 每个源各贡献 1 条 firing 告警
+  // alertmanager / grafana 各多带 1 条 resolved（T6 起不再在适配器层丢弃）
+  assert.equal(all.length, 7)
   for (const a of all) {
     assert.ok(a.id.length > 0, 'id 不能为空')
     assert.ok(a.title.length > 0)
     assert.ok(typeof a.startsAt === 'string' && a.startsAt.length > 0)
-    assert.equal(a.status, 'firing')
+    assert.ok(
+      a.status === 'firing' || a.status === 'resolved',
+      `status 必须是 firing/resolved 二态之一: ${a.status}`,
+    )
     assert.equal(typeof a.labels, 'object')
     assert.ok(a.source && a.source.length > 0, `source 必须标记: ${a.title}`)
   }
+  const firing = all.filter(a => a.status === 'firing')
+  assert.equal(firing.length, 5) // 每个源各贡献 1 条 firing 告警
   assert.deepEqual(
-    all.map(a => a.source),
+    firing.map(a => a.source),
     ['alertmanager', 'grafana', 'pagerduty', 'opsgenie', 'business-monitor'],
   )
+  assert.equal(all.filter(a => a.status === 'resolved').length, 2)
 })

@@ -138,9 +138,8 @@ export function parseHttpPollItems(payload: unknown, cfg: HttpPollConfig): Alert
     const status =
       cfg.map.status !== undefined ? toAlertStatus(getByPath(record, cfg.map.status)) : 'firing'
 
-    // 恢复通知不触发 RCA（对齐 push 适配器的既有行为）。真正的 resolved 生命周期
-    // 闭环（关闭事件、不烧 token 地收敛）见实施计划 T6，本 Task 不做。
-    if (status === 'resolved') continue
+    // resolved 不再丢弃：交由 `IngestPipeline` 走事件收敛路径（关闭事件、不触发 RCA），
+    // 与 push 适配器保持一致（T6 落地）。
 
     const summary =
       cfg.map.summary !== undefined ? scalarToString(getByPath(record, cfg.map.summary)) : ''

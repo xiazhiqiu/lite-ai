@@ -54,9 +54,8 @@ export const pagerdutyAdapter: AlertSourceAdapter = {
       const incident = asRecord(entry.incident)
       if (Object.keys(incident).length === 0) continue
 
+      // resolved 不再丢弃：交由 `IngestPipeline` 走事件收敛路径（不触发 RCA）。
       const status = toAlertStatus(firstString(incident, ['status']), ['resolved'])
-      // T6 之前统一过滤 resolved。
-      if (status === 'resolved') continue
 
       const service = asRecord(incident.service)
       const priority = asRecord(incident.priority)
@@ -104,7 +103,7 @@ export const pagerdutyAdapter: AlertSourceAdapter = {
         description,
         labels,
         startsAt: asIso(created, nowIso),
-        status: 'firing',
+        status,
       })
     }
 

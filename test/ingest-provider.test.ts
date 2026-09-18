@@ -182,7 +182,7 @@ test('parseHttpPollItems: itemsPath + severity 归一化 + labelsFrom + staticLa
   assert.equal(new Date(first.startsAt).toISOString(), '2026-09-18T01:00:00.000Z')
 })
 
-test('parseHttpPollItems: 顶层数组、跳过无标题条目、过滤已恢复', () => {
+test('parseHttpPollItems: 顶层数组、跳过无标题条目、resolved 如实标注', () => {
   const cfg: HttpPollConfig = {
     name: 'custom',
     url: 'http://x/',
@@ -193,13 +193,16 @@ test('parseHttpPollItems: 顶层数组、跳过无标题条目、过滤已恢复
       { alertname: 'HighCPU' },
       { alertname: '' }, // 无标题 → 跳过（不是告警，可能是分页元数据）
       { notAnAlert: true },
-      { alertname: 'RecoveredAlready', state: 'resolved' }, // 恢复通知不触发 RCA
+      { alertname: 'RecoveredAlready', state: 'resolved' }, // T6：如实标注，交由管道收敛
     ],
     cfg,
   )
-  assert.equal(alerts.length, 1)
+  assert.equal(alerts.length, 2)
   assert.equal(alerts[0]!.title, 'HighCPU')
   assert.equal(alerts[0]!.severity, 'SEV3', '缺 severity 走默认词')
+  assert.equal(alerts[0]!.status, 'firing')
+  assert.equal(alerts[1]!.title, 'RecoveredAlready')
+  assert.equal(alerts[1]!.status, 'resolved')
 })
 
 test('parseHttpPollItems: itemsPath 取不到数组 → 抛错（配置错误立刻暴露，不静默 0 条）', () => {

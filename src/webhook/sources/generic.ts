@@ -66,8 +66,8 @@ export const genericAdapter: AlertSourceAdapter = {
       normalizeSeverity(
         firstString(raw, ['severity', 'priority', 'level', 'level_name']),
       ) || DEFAULT_SEVERITY
+    // resolved 不再丢弃：交由 `IngestPipeline` 走事件收敛路径（不触发 RCA）。
     const status = toAlertStatus(firstString(raw, ['status', 'state', 'eventType']))
-    if (status === 'resolved') return []
 
     const labels = {
       ...normalizeTags(raw.tags),
@@ -92,7 +92,7 @@ export const genericAdapter: AlertSourceAdapter = {
         description,
         labels,
         startsAt,
-        status: 'firing',
+        status,
       },
     ]
   },

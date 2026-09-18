@@ -58,6 +58,10 @@ export type IngestResult = {
   deduplicated: number
   /** 被批处理护栏截断的条数 */
   truncated: number
+  /** 源侧已恢复（`resolved`）的条数：只做事件收敛，**不计入 accepted**（恢复不烧 token） */
+  resolved: number
+  /** 因源侧恢复而被关闭的事件数（全部成员均已 resolved） */
+  closedIncidents: number
 }
 
 export type IngestPipelineOptions = {
@@ -296,6 +300,27 @@ export class IngestPipeline {
       )
     }
 
+    // 分流：`resolved`（源侧恢复通知）只做事件收敛，**绝不进 RCA 路径**。
+    // 恢复不该烧 token —— 这是本层与 `registry.resolve()` 的分工边界。
+    // 放在 autoDiagnose 判断之外：收敛不是诊断，关了自动诊断也应照常收敛。
+    const firing = kept.filter(alert => alert.status !== 'resolved')
+    const recovered = kept.filter(alert => alert.status === 'resolved')
+
+    let closedIncidents = 0
+    if (recovered.length > 0) {
+      const { closed, resolvedMembers, unmatched } = this.registry.markResolved(
+        recovered,
+        this.config.correlation ?? {},
+        this.now(),
+      )
+      closedIncidents = closed.length
+      this.log(
+        'log',
+        `[webhook] 源侧恢复 ${recovered.length} 条 → 关闭 ${closed.length} 个事件` +
+          `（记录 ${resolvedMembers} 个已恢复成员，未匹配 ${unmatched} 条）`,
+      )
+    }
+
     let accepted = 0
     let deduplicated = 0
 
@@ -305,7 +330,7 @@ export class IngestPipeline {
       //   ② 跨批次 —— 新告警与注册表中的 open 事件匹配，能并入则并入（照 OpenObserve）。
       // 同一告警重复到达只记时间线、不重复烧 token；已有事件的新成员触发一次"增量重分析"。
       const { units, repeated } = this.registry.resolve(
-        kept,
+        firing,
         this.config.correlation ?? {},
         this.now(),
         this.topologyGraph,
@@ -322,7 +347,13 @@ export class IngestPipeline {
       }
     }
 
-    return { accepted, deduplicated, truncated }
+    return {
+      accepted,
+      deduplicated,
+      truncated,
+      resolved: recovered.length,
+      closedIncidents,
+    }
   }
 
   /** 单条告警诊断：双层去重后入队。返回 true 表示已入队。 */
