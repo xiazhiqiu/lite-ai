@@ -31,3 +31,7 @@ eval/results/
 
 # ONNX embedding models (downloaded at runtime by scripts/download-embedding-model.mjs)
 models/
+
+# Scratch output dumped by tooling sessions (tsc/test/stdout redirects)
+/*.txt
+/*.out
