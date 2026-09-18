@@ -20,6 +20,7 @@
  */
 import type { Alert } from '../webhook/types.js'
 import { createHttpPollProvider, type HttpPollConfig } from './providers/http-poll.js'
+import { createK8sEventsProvider, type K8sEventsConfig } from './providers/k8s-events.js'
 
 /** 拉取型告警源：一次 poll 返回统一 Alert[]；调度与容错由调用方（scheduler）负责。 */
 export interface SourceProvider {
@@ -64,6 +65,7 @@ type ProviderFactory = (cfg: PullProviderConfig) => SourceProvider | null
 /** provider 类型注册表：**新增一个 pull 源 = 加一个工厂 + 注册一行**。 */
 const PROVIDER_FACTORIES: Record<string, ProviderFactory> = {
   httpPoll: cfg => createHttpPollProvider(cfg as unknown as HttpPollConfig),
+  k8sEvents: cfg => createK8sEventsProvider(cfg as unknown as K8sEventsConfig),
 }
 
 /** 被跳过的源（供调用方记录日志，避免"配了没生效"却无人知晓）。 */

@@ -29,6 +29,8 @@ import {
   toAlertStatus,
 } from '../../webhook/sources/util.js'
 import type { FetchLike } from '../../webhook/topology.js'
+// 请求逻辑与 k8s-events 共用（第二份拷贝即抽取阈值，见 http-util.ts 的说明）。
+import { DEFAULT_REQUEST_TIMEOUT_MS, requestJson } from './http-util.js'
 
 /** 字段映射：把源里的字段名/路径映射到统一 Alert 字段。 */
 export type HttpPollMap = {
@@ -183,7 +185,7 @@ export class HttpPollProvider {
     this.name = cfg.name
     this.intervalMs = cfg.intervalMs
     this.method = cfg.method ?? 'GET'
-    this.timeoutMs = cfg.timeoutMs ?? 10_000
+    this.timeoutMs = cfg.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS
     this.fetchImpl = cfg.fetchImpl ?? ((input, init) => fetch(input, init))
     this.headers = {
       accept: 'application/json',
@@ -193,50 +195,25 @@ export class HttpPollProvider {
   }
 
   async poll(signal?: AbortSignal): Promise<Alert[]> {
-    const payload = await this.requestJson(signal)
+    const payload = await this.loadPayload(signal)
     return parseHttpPollItems(payload, this.cfg)
   }
 
   /**
-   * 发请求并取 JSON。超时用独立 controller 实现（与外部 signal 联动），
-   * 便于把"超时"与"进程关停取消"区分成不同的错误信息 —— 运维排查时这点很关键。
+   * 发请求并取 JSON。超时 / 进程关停取消 / 非 2xx / 非 JSON 的可区分错误
+   * 统一由 `http-util.ts` 的 `requestJson` 负责（与 k8s-events 共用同一实现）。
    */
-  private async requestJson(signal?: AbortSignal): Promise<unknown> {
-    const controller = new AbortController()
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-    }, this.timeoutMs)
-    const relayAbort = (): void => controller.abort()
-    signal?.addEventListener('abort', relayAbort, { once: true })
-
-    try {
-      const response = await this.fetchImpl(this.cfg.url, {
-        method: this.method,
-        headers: this.headers,
-        body:
-          this.method === 'POST' && this.cfg.body !== undefined
-            ? JSON.stringify(this.cfg.body)
-            : undefined,
-        signal: controller.signal,
-      })
-      if (!response.ok) {
-        throw new Error(`${this.name} 拉取失败: HTTP ${response.status} ${response.statusText}`)
-      }
-      try {
-        return (await response.json()) as unknown
-      } catch {
-        throw new Error(`${this.name} 拉取失败: 响应不是合法 JSON`)
-      }
-    } catch (error) {
-      if (timedOut) throw new Error(`${this.name} 拉取超时（>${this.timeoutMs}ms）`)
-      if (signal?.aborted === true) throw new Error(`${this.name} 拉取被取消（进程关停）`)
-      throw error
-    } finally {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', relayAbort)
-    }
+  private async loadPayload(signal?: AbortSignal): Promise<unknown> {
+    return requestJson({
+      owner: this.name,
+      url: this.cfg.url,
+      method: this.method,
+      headers: this.headers,
+      body: this.cfg.body,
+      timeoutMs: this.timeoutMs,
+      fetchImpl: this.fetchImpl,
+      signal,
+    })
   }
 }
 
