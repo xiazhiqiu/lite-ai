@@ -163,6 +163,21 @@ function parseSeq(raw: string | null | undefined): number {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
 }
 
+/** 列表分页默认值与上限 —— 见 `handleListJobs` 的约束 2。 */
+const LIST_LIMIT_DEFAULT = 50
+const LIST_LIMIT_MAX = 200
+
+/**
+ * 解析列表 `limit`：非法 / 缺省 → 默认值；超上限 → 夹到上限。
+ * **绝不把用户传的值直接下传**（`?limit=100000` 会拉垮服务端）。
+ */
+function parseLimit(raw: string | null | undefined): number {
+  if (raw === null || raw === undefined || raw === '') return LIST_LIMIT_DEFAULT
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return LIST_LIMIT_DEFAULT
+  return Math.min(Math.floor(n), LIST_LIMIT_MAX)
+}
+
 export function createServerApp(opts: ServerAppOptions): ServerApp {
   const { store } = opts
   const ready = opts.ready ?? (async () => true)
@@ -220,6 +235,16 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
     if (path === '/chat') {
       if (req.method !== 'POST') return reply(res, 405, { error: 'method not allowed' })
       return handleChat(req, res, userId)
+    }
+
+    // GET /jobs —— 列表（T10）。前端值班台的会话列表 / 告警列表 / 用量页都靠它。
+    //
+    // **per-user 隔离在本层强制**：userId 一律取自鉴权身份，**忽略**查询串里的
+    // userId（否则任何人加个 `?userId=别人` 就能读别人的任务列表）。
+    // 其余过滤条件（status / incidentId / sessionId / limit）透传给 store。
+    if (path === '/jobs') {
+      if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
+      return handleListJobs(req, res, url, userId)
     }
 
     // /jobs/:id 与 /jobs/:id/stream
@@ -319,6 +344,38 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
       job: toWireJob(job),
       events: events.map(toWireEvent),
     })
+  }
+
+  /**
+   * GET /jobs[?status=&incidentId=&sessionId=&limit=] —— 当前用户的 job 列表（T10）。
+   *
+   * 两条硬约束：
+   * 1. **`userId` 只能来自鉴权身份**，查询串里的 `userId` 被忽略——否则等于
+   *    把 per-user 隔离交给客户端自觉。这是 T6 隔离在列表接口上的延续。
+   * 2. **limit 必须有上限**，且默认值要小。列表接口是"值班台轮询"用的（SessionList
+   *    每 3s 一次），放任 `?limit=100000` 会把整表拉出来打垮服务端。
+   */
+  async function handleListJobs(
+    _req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+    userId: string,
+  ): Promise<void> {
+    const statusParam = url.searchParams.get('status')
+    const status =
+      statusParam === null || statusParam === ''
+        ? undefined
+        : (statusParam as Job['status'])
+
+    const jobs = await store.list({
+      userId, // ← 强制取自身份，不读查询串
+      status,
+      incidentId: url.searchParams.get('incidentId') ?? undefined,
+      sessionId: url.searchParams.get('sessionId') ?? undefined,
+      limit: parseLimit(url.searchParams.get('limit')),
+    })
+
+    return reply(res, 200, { jobs: jobs.map(toWireJob) })
   }
 
   /**

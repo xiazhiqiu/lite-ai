@@ -234,3 +234,146 @@ describe('T6 关闭鉴权（key 表为空）时的回环开发形态', () => {
     }
   })
 })
+
+/**
+ * `GET /jobs` 列表接口（T10 补）。
+ *
+ * **为什么单独写一组**：这个路由是 T10 前端接线时才发现的缺口——`SessionList` /
+ * `AlertView` / `UsageView` 全都调 `GET /jobs`，但 T3 只实现了 `/jobs/:id`，
+ * 于是三个页面在真实环境里会齐刷刷 404。**单测测不出"前端调了个不存在的路由"**，
+ * 是端到端冒烟把它逼出来的。这里把该契约固化下来。
+ */
+describe('T10 GET /jobs：列表接口的隔离与分页', () => {
+  /** 造 N 个 alice 的 job（直接写 store，绕过 /chat 的异步语义）。 */
+  async function seed(store: JobStore, userId: string, count: number): Promise<void> {
+    for (let i = 0; i < count; i++) {
+      await store.create({ kind: 'chat', userId, payload: { message: `msg-${i}` } })
+    }
+  }
+
+  it('无凭证 → 401；未被静态托管吞掉', async () => {
+    const ctx = await startApp()
+    try {
+      const res = await fetch(`${ctx.baseUrl}/jobs`)
+      assert.equal(res.status, 401)
+      // 关键：不能返回 SPA 的 index.html（那会让前端把 HTML 当 JSON 解析）
+      assert.match(res.headers.get('content-type') ?? '', /json/)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('只返回本人的 job（per-user 隔离）', async () => {
+    const ctx = await startApp()
+    try {
+      await seed(ctx.store, 'alice', 3)
+      await seed(ctx.store, 'bob', 2)
+
+      const alice = await fetch(`${ctx.baseUrl}/jobs`, { headers: AUTH_ALICE })
+      assert.equal(alice.status, 200)
+      const aliceBody = (await alice.json()) as { jobs: Array<{ userId: string }> }
+      assert.equal(aliceBody.jobs.length, 3)
+      assert.ok(aliceBody.jobs.every(j => j.userId === 'alice'))
+
+      const bob = await fetch(`${ctx.baseUrl}/jobs`, { headers: AUTH_BOB })
+      const bobBody = (await bob.json()) as { jobs: Array<{ userId: string }> }
+      assert.equal(bobBody.jobs.length, 2)
+      assert.ok(bobBody.jobs.every(j => j.userId === 'bob'))
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('【关键】查询串里的 userId 被忽略（不能靠它越权读别人列表）', async () => {
+    const ctx = await startApp()
+    try {
+      await seed(ctx.store, 'alice', 2)
+      await seed(ctx.store, 'bob', 5)
+
+      // 拿着 alice 的合法凭据，试图用 ?userId=bob 读 bob 的列表
+      const res = await fetch(`${ctx.baseUrl}/jobs?userId=bob`, { headers: AUTH_ALICE })
+      assert.equal(res.status, 200)
+      const body = (await res.json()) as { jobs: Array<{ userId: string }> }
+      assert.equal(body.jobs.length, 2, '必须仍是 alice 的 2 条，而不是 bob 的 5 条')
+      assert.ok(body.jobs.every(j => j.userId === 'alice'))
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('status 过滤生效', async () => {
+    const ctx = await startApp()
+    try {
+      await seed(ctx.store, 'alice', 2)
+      const res = await fetch(`${ctx.baseUrl}/jobs?status=pending`, { headers: AUTH_ALICE })
+      const body = (await res.json()) as { jobs: Array<{ status: string }> }
+      assert.ok(body.jobs.every(j => j.status === 'pending'))
+
+      const none = await fetch(`${ctx.baseUrl}/jobs?status=completed`, { headers: AUTH_ALICE })
+      const noneBody = (await none.json()) as { jobs: unknown[] }
+      assert.equal(noneBody.jobs.length, 0)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('【关键】limit 被夹到上限（防 ?limit=100000 拉垮服务端）', async () => {
+    const ctx = await startApp()
+    try {
+      await seed(ctx.store, 'alice', 1)
+
+      // 超大 limit 不应被原样下传：请求本身要成功，且不返回超过上限的条数。
+      // 这里只有 1 条数据，所以断言"请求成功 + 不超过 200"即可证明参数被夹住而非裸传。
+      const res = await fetch(`${ctx.baseUrl}/jobs?limit=100000`, { headers: AUTH_ALICE })
+      assert.equal(res.status, 200)
+      const body = (await res.json()) as { jobs: unknown[] }
+      assert.ok(body.jobs.length <= 200)
+
+      // 非法 limit 走默认值，不报错
+      for (const bad of ['abc', '-1', '0', '']) {
+        const r = await fetch(`${ctx.baseUrl}/jobs?limit=${bad}`, { headers: AUTH_ALICE })
+        assert.equal(r.status, 200, `limit=${bad} 应回退默认而非报错`)
+      }
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('列表项含 summary 投影，且不下发原始 payload', async () => {
+    const ctx = await startApp()
+    try {
+      await ctx.store.create({
+        kind: 'chat',
+        userId: 'alice',
+        payload: { message: '订单延迟', secret: '不应下发' },
+      })
+      const res = await fetch(`${ctx.baseUrl}/jobs`, { headers: AUTH_ALICE })
+      const body = (await res.json()) as {
+        jobs: Array<Record<string, unknown>>
+      }
+      const job = body.jobs[0]!
+      assert.equal(job.summary, '订单延迟')
+      assert.ok(!('payload' in job), '原始 payload 不得下发（可能含敏感字段）')
+      assert.ok(!JSON.stringify(job).includes('不应下发'))
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('POST /chat 的 body.userId 被忽略（防冒充）', async () => {
+    const ctx = await startApp()
+    try {
+      const res = await fetch(`${ctx.baseUrl}/chat`, {
+        method: 'POST',
+        headers: { ...AUTH_ALICE, 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'hi', userId: 'bob' }),
+      })
+      assert.equal(res.status, 202)
+      const { jobId } = (await res.json()) as { jobId: string }
+      const job = await ctx.store.get(jobId)
+      assert.equal(job?.userId, 'alice', '身份只能来自凭据，不能来自请求体')
+    } finally {
+      await ctx.close()
+    }
+  })
+})
