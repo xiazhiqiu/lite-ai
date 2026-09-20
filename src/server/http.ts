@@ -18,6 +18,7 @@ import { randomUUID } from 'node:crypto'
 import type { JobStore } from '../jobs/store.js'
 import type { Job } from '../jobs/types.js'
 import { authenticate, isExemptPath, type AuthConfig } from './auth.js'
+import { tryServeStatic } from './static.js'
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024
 /** SSE 心跳间隔：防反向代理/负载均衡把空闲连接掐掉。 */
@@ -43,6 +44,13 @@ export type ServerAppOptions = {
    * 非回环绑定的 fail-fast 在 `server/index.ts` 装配层拦截）。
    */
   auth?: AuthConfig
+  /**
+   * 前端静态资源目录（T10，`dist/web`）。
+   *
+   * **不传 = 不托管前端** —— 保持 T3 纯 API 形态（也便于单测只测路由）。
+   * 传了则先尝试静态命中，未命中再进 API 路由。
+   */
+  webRoot?: string
   /**
    * 外部触发关闭（测试注入）；与 SIGINT/SIGTERM 等效。
    */
@@ -89,7 +97,13 @@ function reply(
   res.end(JSON.stringify(data))
 }
 
-/** job → 对外的 JSON 形态（snake_case 出入参对齐 HolmesGPT 的 API 风格）。 */
+/**
+ * job → 对外的 JSON 形态（snake_case 出入参对齐 HolmesGPT 的 API 风格）。
+ *
+ * **`summary` 是刻意裁剪的投影，不下发整个 `payload`**：告警 payload 可能很大
+ * （原始告警体、labels、annotations），也可能含敏感字段。列表页/详情页只需要
+ * 一行"这是在查什么"，所以这里只提取一个字符串摘要。
+ */
 function toWireJob(job: Job): Record<string, unknown> {
   return {
     id: job.id,
@@ -100,10 +114,29 @@ function toWireJob(job: Job): Record<string, unknown> {
     incidentId: job.incidentId,
     assignee: job.assignee,
     error: job.error,
+    summary: summarizeJobPayload(job.payload),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     finishedAt: job.finishedAt,
   }
+}
+
+/**
+ * 从 payload 里提取一行摘要（**只取字符串，不序列化整个对象**）。
+ *
+ * 键序即优先级：人工问询的 `message` 最有用；告警类退化到 `alertName`/`title`。
+ * 全部缺失时返回 null（前端自己给占位文案），**不猜**。
+ */
+function summarizeJobPayload(payload: Record<string, unknown>): string | null {
+  for (const key of ['message', 'alertName', 'title', 'summary']) {
+    const v = payload[key]
+    if (typeof v === 'string' && v.trim().length > 0) {
+      const oneLine = v.replace(/\s+/g, ' ').trim()
+      // 截断，避免一条超长 message 撑爆前端列表
+      return oneLine.length <= 200 ? oneLine : `${oneLine.slice(0, 199)}…`
+    }
+  }
+  return null
 }
 
 function toWireEvent(event: {
@@ -134,6 +167,7 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
   const { store } = opts
   const ready = opts.ready ?? (async () => true)
   const auth: AuthConfig = opts.auth ?? { keys: [] }
+  const webRoot = opts.webRoot
 
   const server = http.createServer((req, res) => {
     void handle(req, res)
@@ -163,6 +197,15 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
         ok = false
       }
       return reply(res, ok ? 200 : 503, { status: ok ? 'ready' : 'not ready' })
+    }
+
+    // ---- T10 静态资源：**在鉴权之前** ----
+    // 理由：HTML/JS/CSS 本身不含任何数据，登录页必须能匿名拿到，否则用户
+    // 连"输入 key 的界面"都看不到。真正的数据面（/chat、/jobs、SSE）仍在
+    // 下面严格鉴权 —— 静态资源免鉴权不等于数据免鉴权。
+    if (webRoot !== undefined && path !== '/chat' && !path.startsWith('/jobs')) {
+      const result = await tryServeStatic(req, res, { root: webRoot })
+      if (result.served) return
     }
 
     // ---- T6 鉴权：非豁免路径一律先验身份，拿到 userId 再进业务 ----

@@ -9,8 +9,11 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "check": "tsc --noEmit",
+    "check:web": "tsc --noEmit -p web/tsconfig.json",
     "lint": "eslint src test",
     "test": "node test/run-tests.mjs",
+    "build:web": "vite build --config web/vite.config.ts",
+    "dev:web": "vite --config web/vite.config.ts",
     "eval:itbench": "tsx src/eval/itbench/index.ts",
     "install-local": "tsx src/install.ts"
   },
@@ -28,9 +31,15 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.6.0",
     "@types/pg": "^8.23.1",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
     "eslint": "9.39.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.2",
-    "typescript-eslint": "8.46.4"
+    "typescript-eslint": "8.46.4",
+    "vite": "^7.2.0"
   }
 }

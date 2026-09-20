@@ -13,6 +13,9 @@ import { createPgJobStore } from '../jobs/pg-store.js'
 import type { JobStore } from '../jobs/store.js'
 import type { Job } from '../jobs/types.js'
 import { createWorker, type Worker } from '../jobs/worker.js'
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   assertAuthConfigForBinding,
   resolveApiKeysFromEnv,
@@ -47,6 +50,14 @@ export type ServeOptions = {
   execute?: (job: Job) => Promise<void>
   /** Worker claim 轮询间隔（测试可调）。 */
   workerPollMs?: number
+  /**
+   * 前端静态资源目录（T10）。缺省 `dist/web`（相对仓库根）。
+   *
+   * **不传 = 自动探测**：目录存在就托管，不存在就跳过（不是错误）——
+   * 这样"没跑过 build:web"的纯 API 部署不会因为缺目录而启动失败，
+   * 只会在访问 `/` 时 404（并打一条提示）。
+   */
+  webRoot?: string
   /** 外部触发关闭。 */
   abortSignal?: AbortSignal
 }
@@ -145,6 +156,21 @@ async function defaultExecute(
   })
 }
 
+/**
+ * 解析前端静态资源目录（T10）。
+ *
+ * 缺省推导：`dist/web` 相对**本文件编译产物**的位置往上找。但本仓库以 tsx
+ * 直接跑 TS（无编译产物），所以更稳的是相对**仓库根**——由
+ * `import.meta.url` 回溯：`src/server/index.ts` → `../../dist/web`。
+ *
+ * @returns 目录存在则返回绝对路径；不存在返回 `undefined`（调用方跳过托管）。
+ */
+function resolveWebRoot(explicit?: string): string | undefined {
+  const candidate =
+    explicit ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'dist', 'web')
+  return existsSync(candidate) ? candidate : undefined
+}
+
 export async function runServe(opts: ServeOptions): Promise<void> {
   const host = opts.host
 
@@ -171,11 +197,15 @@ export async function runServe(opts: ServeOptions): Promise<void> {
 
   const { store, ready, dispose } = await selectStore(opts)
 
+  // T10：托管前端（若已构建）。缺失不是错误 —— 纯 API 部署照常工作。
+  const webRoot = resolveWebRoot(opts.webRoot)
+
   const app = createServerApp({
     store,
     cwd: opts.cwd,
     ready,
     auth: { keys: apiKeys },
+    webRoot,
     abortSignal: opts.abortSignal,
   })
 
@@ -203,6 +233,13 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       console.log('[serve]   GET  /jobs/:id/stream  SSE 事件流')
       console.log('[serve]   GET  /healthz /readyz  健康/就绪（免鉴权）')
       console.log(`[serve]   worker ${os.hostname()}-${process.pid} 已启动（消费 jobs 队列）`)
+      if (webRoot !== undefined) {
+        console.log(`[serve]   GET  /                前端值班台（${webRoot}）`)
+      } else {
+        console.log(
+          '[serve]   GET  /                未托管前端（dist/web 不存在；跑 `npm run build:web` 后重启）',
+        )
+      }
       resolve()
     })
   })
