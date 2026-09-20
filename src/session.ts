@@ -6,11 +6,20 @@
  * （`tty-app.ts` / `agent-loop.ts` / `diagnose.ts` / `cli-commands.ts` …）**零改动**，
  * 是"CLI 行为零变化"的硬保证。
  *
- * 服务化时（T8）只需把 `getSessionStore()` 换成 PG 实现即可，本文件签名依旧不变。
+ * T8 起后端可切换：`LITE_AI_SESSION_BACKEND=pg|file`（未指定则按是否有 PG 配置推导，
+ * 见 `config.ts:resolveSessionBackend`）。**本文件签名依旧不变** —— 换的只是
+ * `getSessionStore()` 返回的实现。
  */
 import type { ChatMessage } from './types.js'
 import type { CollapseSpan, ContextCollapseState } from './compact/context-collapse.js'
+import { resolveSessionBackend } from './config.js'
+// `requirePgPool` 静态 import：本仓库是 ESM（`"type": "module"`），
+// 不能在这里用 `require()` —— 运行期它会直接是 undefined。
+// 静态 import 的代价是 pg 驱动总被加载，但 `pg` 已是 dependencies 的硬依赖
+// （jobs/usage 的 PG 后端都要它），所以没有额外负担。
+import { requirePgPool } from './db/pool.js'
 import { createFileSessionStore } from './session/file-store.js'
+import { createPgSessionStore } from './session/pg-store.js'
 import type { SessionStore } from './session/store.js'
 import type {
   PersistedTranscriptEntry,
@@ -20,13 +29,37 @@ import type {
 
 export type { PersistedTranscriptEntry, ProjectMeta, SessionMeta }
 
-/** 当前存储后端。默认文件实现；服务化时（T8）按配置切换为 PG。 */
+/** 当前存储后端。默认文件实现；T8 起按配置切换（见下方 `getSessionStore`）。 */
 let activeStore: SessionStore | null = null
+
+/**
+ * 按配置创建存储后端。
+ *
+ * ## 为什么是 `async` 而 `getSessionStore()` 是同步的
+ *
+ * PG 路径需要动态 `import('pg')`（本仓库是 ESM，`package.json` 的 `"type": "module"`
+ * 让 `require()` 在运行期直接不存在）。而 `getSessionStore()` 有大量同步调用方
+ * （`agent-loop.ts` / `tty-app.ts` / `diagnose.ts`），改签名就等于破坏 T1 定下的
+ * "对外签名不变"红线 —— 那正是"CLI 行为零变化"的保证。
+ *
+ * 折中：**同步只负责建对象**。`pg` 驱动在**模块顶层静态 import**（见文件头部），
+ * 于是这里同步调用即可；建池本身也是同步的（`pg.Pool` 构造函数不连库，
+ * 首次 `query()` 才连）。所以整条路径不需要 await。
+ */
+function createStoreForBackend(): SessionStore {
+  const backend = resolveSessionBackend()
+  if (backend === 'file') return createFileSessionStore()
+
+  // 显式要求 pg 就真的用 pg，连不上就报错。**不 catch 回退** ——
+  // 静默降级到文件后端会让部署方看到"服务起来了"却以为会话在库里，
+  // 多实例下表现成"聊完刷新就丢"，比启动失败难查得多。
+  return createPgSessionStore(requirePgPool())
+}
 
 /** 取当前存储后端（惰性单例）。测试可通过 `setSessionStore` 注入。 */
 export function getSessionStore(): SessionStore {
   if (activeStore === null) {
-    activeStore = createFileSessionStore()
+    activeStore = createStoreForBackend()
   }
   return activeStore
 }

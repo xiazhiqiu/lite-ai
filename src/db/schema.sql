@@ -123,7 +123,19 @@ CREATE TABLE IF NOT EXISTS jobs (
   -- 人工对话 / 告警诊断 / 恢复收敛。resolve 类**不走 RCA**（恢复不烧 token）
   kind          TEXT NOT NULL CHECK (kind IN ('chat', 'alert', 'resolve')),
   -- 告警类 job 关联的事件；人工对话为 NULL
-  incident_id   TEXT REFERENCES incidents(incident_id) ON DELETE SET NULL,
+  --
+  -- ⚠️ **刻意不用外键** —— 只是松引用 + 索引。理由（被真库跑出来后才看清）：
+  --   1. incidents 是**可淘汰的聚合态** —— T12 的容量 `sweep()` 会删掉超限的旧
+  --      open 事件（`incident/pg-store.ts` 的 `diff.deleted` → DELETE）。外键会把
+  --      这次淘汰变成 `SET NULL`（审计线索被静默抹掉）或 `CASCADE`（连带删掉
+  --      job 与其事件流），两种都不可接受；
+  --   2. 多实例下写入顺序无法保证：实例 A 落 incident、实例 B 入队 job，
+  --      硬外键会让"job 先落"直接失败（实测 SQLSTATE 23503）；
+  --   3. 内存实现（跑同一份契约的另一个后端）没有引用完整性，留外键会让
+  --      **两个后端语义不等价** —— 同一份契约一边绿一边红，这正是今天搭真库
+  --      才暴露出来的。
+  -- 所以这里只留索引，引用完整性由上层保证（写进去的都是 ingest 自己产生的 id）。
+  incident_id   TEXT,
   -- 续聊目标会话（G2 多轮续接）；NULL = 新建会话
   session_id    TEXT,
   payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -151,6 +163,10 @@ CREATE INDEX IF NOT EXISTS jobs_incident_idx ON jobs (incident_id);
 -- 续聊：按 session 回查 job
 CREATE INDEX IF NOT EXISTS jobs_session_idx ON jobs (session_id);
 
+-- 前向迁移：早期版本的 jobs.incident_id 带外键。上面的 CREATE 对已存在的表
+-- 是 no-op，老库若不显式 DROP 就会继续拦住"job 先于 incident 落库"的写入。
+ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_incident_id_fkey;
+
 -- job 事件流（SSE / 轮询的**唯一**数据源，G5：不能是内存总线）
 CREATE TABLE IF NOT EXISTS job_events (
   job_id     TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -165,6 +181,26 @@ CREATE TABLE IF NOT EXISTS job_events (
 CREATE INDEX IF NOT EXISTS job_events_job_seq_idx ON job_events (job_id, seq);
 
 -- 会话（T8：从本地 JSONL 迁来；append-only 语义保留）
+--
+-- ## 为什么列这么多——不是"顺手把 JSONL 塞进表"
+--
+-- 文件实现的**每行是一个事件信封**（`SessionEvent`），不是裸消息。`load()`
+-- 的重建逻辑（`file-store.ts:266-297`）依赖信封里的这些字段：
+--   - `parentUuid`        → 链式结构（fork / compact 后的续接关系）
+--   - `type`              → 事件类型（rename / compact_boundary / snip_boundary /
+--                           context_collapse 都不是消息，却必须在 `load` 里被**跳过**或被
+--                           `loadContextCollapseState` **读到**）
+--   - `snipMetadata`      → `reconstructSnippedEvents` 靠它把被删消息位置还原成 snip 标记
+--   - `contextCollapseSpan` → `loadContextCollapseState` 的**唯一**数据源
+--   - `compactMetadata`   → 找「最后一个 compact_boundary」并截断历史
+--   - `title`             → rename 事件
+--
+-- 所以只留 `(role, content)` 两列是**不够的**：那样 PG 后端会静默丢掉 snip 重建与
+-- collapse 状态，表现为"迁移到 PG 之后会话历史看起来缺了几段、上下文压缩失忆"——
+-- 一个只在 PG 形态下复现、极难定位的 bug。
+--
+-- 因此表设计为：**信封字段显式成列**（可索引、可查询），再加一个 `event` JSONB
+-- 保存原始信封全文（保证与文件实现**逐字节等价**，避免"加字段就要改两处"的漂移）。
 CREATE TABLE IF NOT EXISTS sessions (
   session_id TEXT NOT NULL,
   -- 会话作用域（对齐 SessionStore 的 cwd 参数）
@@ -173,14 +209,43 @@ CREATE TABLE IF NOT EXISTS sessions (
   title      TEXT,
   -- append-only 消息行，seq 递增；与 JSONL 逐行对应
   seq        INTEGER NOT NULL,
+  -- 事件类型（对齐 SessionEvent.type）：user/assistant/tool_call/rename/
+  -- compact_boundary/snip_boundary/context_collapse/...
+  type       TEXT NOT NULL,
   role       TEXT NOT NULL,
   content    JSONB NOT NULL,
+  -- 事件信封全文（与 JSONL 那行的 JSON 逐字段等价）——
+  -- 读路径直接反序列化它，写路径从它派生上面的列。
+  -- 这样"两种实现语义等价"由**同一个来源**保证，而不是靠两处手工 mapping 对齐。
+  event      JSONB,
   created_at BIGINT NOT NULL,
   PRIMARY KEY (cwd, session_id, seq)
 );
 
 CREATE INDEX IF NOT EXISTS sessions_scope_idx ON sessions (cwd, session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id, created_at DESC);
+-- 按 cwd 列会话（list）时只关心每会话的最新一行
+CREATE INDEX IF NOT EXISTS sessions_list_idx ON sessions (cwd, session_id, seq DESC);
+
+-- ## ⚠️ 前向迁移：**`CREATE TABLE IF NOT EXISTS` 对已存在的表什么都不做**
+--
+-- T2 就已经建过 `sessions`（当时只有 role/content，没有 type/event）。对这种
+-- **已投产的旧表**，上面的 CREATE 是一句 no-op —— 新列不会自动长出来，
+-- 结果 PG 后端在写入时报 `column "type" of relation "sessions" does not exist`。
+--
+-- 这类坑的特点是：**全新库跑 migrate 一切正常**（CREATE 走得通），只有**升级
+-- 场景**才炸 —— 而我们的 migrate 测试历来都用空库，永远测不到它。
+-- 所以这里显式补 ALTER，并配一条真删列再 migrate 的升级用例（见
+-- `test/session-store-pg.test.ts` 的「前向迁移」用例）。
+--
+-- 三条语句都幂等，重复跑无害。
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS type TEXT;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS event JSONB;
+
+-- 补齐存量行：旧行没有 type，用同义的 role 回填（role 在旧表里 NOT NULL，必有值）。
+UPDATE sessions SET type = COALESCE(type, role) WHERE type IS NULL;
+-- 回填完成后才收紧约束。**顺序不能反** —— 先 SET NOT NULL 会因存量 NULL 直接失败。
+ALTER TABLE sessions ALTER COLUMN type SET NOT NULL;
 
 -- 审计用量事件（T7：银行合规"谁在何时跑了什么"）
 CREATE TABLE IF NOT EXISTS usage_events (
@@ -212,9 +277,20 @@ CREATE INDEX IF NOT EXISTS usage_events_job_idx ON usage_events (job_id);
 -- 用 CTE 把选取与更新合成一条原子语句。
 CREATE OR REPLACE FUNCTION claim_jobs(
   p_assignee TEXT,
-  p_limit    INTEGER DEFAULT 1
+  p_limit    INTEGER DEFAULT 1,
+  -- 可注入的逻辑时钟。**不传则用库时钟**（生产默认，保证与 stale 判定同一时钟源）；
+  -- 传入则以入参为准（契约测试用注入时钟做确定性断言，与内存实现同语义）。
+  --
+  -- ⚠️ 这个参数是踩坑后补的：原实现硬编码 `clock_timestamp()`、**忽略调用方传入
+  -- 的时间**，于是 `reassignStale(lease, 5000)` 这类用注入时钟表达的"租约已过期"
+  -- 判定在 PG 后端下永远不成立（租约刚落，真实时间还没走够 1000ms）→ 返回 0 条，
+  -- 契约用例 `reassignStale returns a dead worker lease to pending` 直接红。
+  -- 教训：**同一份契约要求两个后端对"时间"的理解一致**，注入时钟就必须穿透到 SQL。
+  p_now      BIGINT DEFAULT NULL
 ) RETURNS SETOF jobs AS $$
-  WITH candidates AS (
+  WITH params AS (
+    SELECT COALESCE(p_now, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint) AS ms
+  ), candidates AS (
     SELECT id
       FROM jobs
      WHERE status = 'pending'
@@ -225,10 +301,10 @@ CREATE OR REPLACE FUNCTION claim_jobs(
   UPDATE jobs j
      SET status     = 'running',
          assignee   = p_assignee,
-         claimed_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint,
-         updated_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint,
+         claimed_at = params.ms,
+         updated_at = params.ms,
          request_seq = j.request_seq + 1
-    FROM candidates c
+    FROM candidates c CROSS JOIN params
    WHERE j.id = c.id
   RETURNING j.*;
 $$ LANGUAGE sql;
@@ -239,13 +315,14 @@ $$ LANGUAGE sql;
 -- 保留 assignee 便于排查"是哪个实例挂了"；claimed_at 供下一次 sweep 判断。
 -- 真正重新认领时 claim_jobs 会覆盖 assignee 并刷新 claimed_at。
 CREATE OR REPLACE FUNCTION reassign_stale_jobs(
-  p_lease_ms BIGINT
+  p_lease_ms BIGINT,
+  p_now      BIGINT DEFAULT NULL
 ) RETURNS SETOF jobs AS $$
   UPDATE jobs
      SET status     = 'pending',
-         updated_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint
+         updated_at = COALESCE(p_now, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint)
    WHERE status = 'running'
      AND claimed_at IS NOT NULL
-     AND claimed_at < (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint - p_lease_ms
+     AND claimed_at < COALESCE(p_now, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint) - p_lease_ms
   RETURNING *;
 $$ LANGUAGE sql;

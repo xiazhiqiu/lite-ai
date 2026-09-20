@@ -3,7 +3,26 @@ import assert from 'node:assert/strict'
 import { mkdir, rm, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
-import {
+import type { AgentStep, ChatMessage, ModelAdapter } from '../src/types.js'
+import type { ContextStats } from '../src/utils/token-estimator.js'
+import type { CollapseSpan } from '../src/compact/context-collapse.js'
+
+/**
+ * ⚠️ 隔离（安全红线，勿删）
+ *
+ * 本文件曾经直接用**用户真实**的 `~/.lite-ai/projects/`，并在 `cleanupAll()`
+ * 里 `rm -rf` 它 —— 那等于每次跑测试都删一遍用户本机的真实会话历史，而
+ * `fs.rm` 是 unlink，**不走回收站、不可恢复**。
+ *
+ * 所以这里在加载任何 `src/**` 之前先把 `LITE_AI_HOME` 指到专属临时目录。
+ * 关键：**必须用动态 import** —— ESM 的静态 import 会被提升到模块体之前求值，
+ * 写在文件第几行都救不了，`src/config.js` 会在环境变量生效前就把路径常量定死。
+ */
+const ISOLATED_HOME = path.join(os.tmpdir(), 'lite-ai-session-home')
+process.env.LITE_AI_HOME = ISOLATED_HOME
+await rm(ISOLATED_HOME, { recursive: true, force: true })
+
+const {
   saveSession,
   loadSession,
   clearSession,
@@ -17,17 +36,21 @@ import {
   forkSession,
   cleanupExpiredSessions,
   listAllProjects,
-} from '../src/session.js'
-import { LITE_AI_PROJECTS_DIR } from '../src/config.js'
-import type { AgentStep, ChatMessage, ModelAdapter } from '../src/types.js'
-import type { ContextStats } from '../src/utils/token-estimator.js'
-import {
+} = await import('../src/session.js')
+const { LITE_AI_PROJECTS_DIR } = await import('../src/config.js')
+const {
   estimateMessagesTokens,
   tokenCountWithEstimation,
-} from '../src/utils/token-estimator.js'
-import { snipCompactConversation } from '../src/compact/snipCompact.js'
-import { compactConversation } from '../src/compact/compact.js'
-import type { CollapseSpan } from '../src/compact/context-collapse.js'
+} = await import('../src/utils/token-estimator.js')
+const { snipCompactConversation } = await import('../src/compact/snipCompact.js')
+const { compactConversation } = await import('../src/compact/compact.js')
+
+// 自检：隔离失效立刻失败，而不是等弄脏了用户数据才发现
+if (!LITE_AI_PROJECTS_DIR.startsWith(ISOLATED_HOME)) {
+  throw new Error(
+    `测试隔离失效：LITE_AI_PROJECTS_DIR=${LITE_AI_PROJECTS_DIR} 不在 ${ISOLATED_HOME} 内`,
+  )
+}
 
 const testDir = path.join(os.tmpdir(), 'lite-ai-session-test')
 

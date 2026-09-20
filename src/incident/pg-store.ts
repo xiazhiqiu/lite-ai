@@ -13,9 +13,10 @@
  *    两个实例同时发现"无 open 事件"时会双双尝试插入；索引让后者失败，
  *    实现里捕获 `23505` 后**退回既存行**（返回既存 id），使"并发下仍只有一个事件"成立。
  *
- * 3. **去重的读改写靠单条 `INSERT ... ON CONFLICT DO UPDATE ... RETURNING`**，
- *    一条语句内同时拿到旧值与写入新值——拆成 SELECT + UPDATE 会有窗口期，
- *    两个实例会双双判定 `new` 而重复诊断（去重失效）。
+ * 3. **去重的读改写靠 advisory lock 把同一 alert_id 串行化**，在一个事务里
+ *    "读旧值 → 写新值"。**不能用 CTE 单条语句**：CTE 与主语句共用语句级快照，
+ *    并发时每个调用都看不到对方刚提交的行 → 全部拿到 null → 去重失效
+ *    （真库实测 10 并发全部判 new）。实现里已注明，别"优化"回单条语句。
  */
 import type pg from 'pg'
 import type {
@@ -171,7 +172,7 @@ async function insertIncident(
          updated_at = EXCLUDED.updated_at`
 
   try {
-    await client.query(
+    const result = await client.query(
       `INSERT INTO incidents (incident_id, type, key_strength, key_name, group_key,
                               dimensions, primary_alert_id, severity, started_at,
                               last_alert_at, created_at, status, diagnosed, closed_at, updated_at)
@@ -195,6 +196,14 @@ async function insertIncident(
         record.lastAlertAt,
       ],
     )
+
+    // ⚠️ **`ON CONFLICT DO NOTHING` 不抛错**：与唯一/Pk 冲突时它只是**插入 0 行**
+    // 并安静返回。此时事件行由别的实例（或本批次更早的一条）持有，这里若继续
+    // 插成员明细，就会撞 `incident_members_incident_id_fkey`（SQLSTATE 23503）——
+    // 症状是"多实例并发建同键事件时偶发外键报错"，在本地调试很难复现，
+    // 只有真并发 + 真外键才会暴露。
+    // 所以必须显式看 rowCount：**没写进去就整条放弃**（成员也别插，交给先到者）。
+    if (onCreateOnly && (result.rowCount ?? 0) === 0) return
   } catch (error) {
     if (isUniqueViolation(error)) {
       // 并发下另一实例抢先创建了同键 open 事件：本行放弃（保留先到者），
@@ -316,34 +325,78 @@ export function createPgDedupeStore(pool: pg.Pool): DedupeStore {
       return { hash: row.content_hash, firstSeen: toNumber(row.first_seen_at) ?? 0 }
     },
 
-    async check(
-      alertId: string,
-      next: DedupeRecord,
-    ): Promise<DedupeRecord | null> {
-      // 单条语句内"写新值 + 返回旧值"：
-      //   * INSERT ... ON CONFLICT DO UPDATE 保证并发写不冲突；
-      //   * RETURNING 只能取**新**行 → 旧值必须用 CTE 先读。
-      // 用 CTE 先 SELECT FOR UPDATE 锁住该行（无则无锁），再 upsert，同一语句内完成。
-      const { rows } = await pool.query<{ prev_hash: string | null; prev_first: string | number | null }>(
-        `WITH prev AS (
-           SELECT content_hash AS prev_hash, first_seen_at AS prev_first
-             FROM alert_dedupe
-            WHERE alert_id = $1
-            FOR UPDATE
-         )
-         INSERT INTO alert_dedupe (alert_id, content_hash, first_seen_at)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (alert_id) DO UPDATE SET
-           content_hash = EXCLUDED.content_hash,
-           first_seen_at = EXCLUDED.first_seen_at
-         RETURNING
-           (SELECT prev_hash FROM prev) AS prev_hash,
-           (SELECT prev_first FROM prev) AS prev_first`,
-        [alertId, next.hash, next.firstSeen],
-      )
-      const row = rows[0]
-      if (row === undefined || row.prev_hash === null || row.prev_first === null) return null
-      return { hash: row.prev_hash, firstSeen: toNumber(row.prev_first) ?? 0 }
+    /**
+     * 写新值 + 返回旧值（首次出现则返回 null）。
+     *
+     * ## 为什么不用原来那条"单条语句 CTE"写法
+     *
+     * 原写法是 `WITH prev AS (SELECT ... FOR UPDATE) INSERT ... ON CONFLICT
+     * ... RETURNING (SELECT prev_hash FROM prev)`。它在**串行**下是对的，但并发下
+     * 会彻底失效，根因是 PG 的快照语义：
+     *
+     *   **CTE 与主语句共用同一个快照**（语句开始时取）。10 个并发调用同时取快照时
+     *   表里还没有这一行 → 每个 `prev` 都是空 → **10 个调用全部拿到 null**。
+     *   后果不是"多插几条"，而是**去重直接失效**：同一条告警会被判 10 次 new、
+     *   放大 10 倍诊断请求。真库实测正是 10/10 全 null。
+     *
+     * （注意：`ON CONFLICT` 本来会在冲突分支里重新取快照锁定既有行，但 CTE 的
+     * 旧值读不到那次重取的结果 —— 这是 PG 里有名的坑。）
+     *
+     * ## 正确做法：显式串行化 + 看-后-写
+     *
+     * 用**事务级 advisory lock** 把同一个 alert_id 的判定串成一条线：
+     * 拿到锁之后再做"读旧值 → 写新值"，此刻不可能有别人插进来。
+     * 语义完全等价于内存实现的"单线程同步临界区"，这正是两个后端要对齐的东西。
+     *
+     * - `pg_advisory_xact_lock`：锁随事务自动释放，无需显式 unlock，连接断了也不会漏；
+     * - 用 `hashtext(alert_id)` 把 TEXT 键映射到 64 位锁号。不同 alert 撞到同一把锁
+     *   只会多串行化一点，**不影响正确性**；
+     * - 成功路径一定 COMMIT，异常路径 ROLLBACK，`finally` 里归还连接。
+     */
+    async check(alertId: string, next: DedupeRecord): Promise<DedupeRecord | null> {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        // 同一 alert_id 的 check 串行化（不同 alert 互不阻塞）
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [alertId])
+
+        const { rows } = await client.query<DedupeRow>(
+          'SELECT content_hash, first_seen_at FROM alert_dedupe WHERE alert_id = $1',
+          [alertId],
+        )
+
+        if (rows.length > 0) {
+          const row = rows[0]!
+          const previous: DedupeRecord = {
+            hash: row.content_hash,
+            firstSeen: toNumber(row.first_seen_at) ?? 0,
+          }
+          await client.query(
+            `UPDATE alert_dedupe
+                SET content_hash = $2, first_seen_at = $3
+              WHERE alert_id = $1`,
+            [alertId, next.hash, next.firstSeen],
+          )
+          await client.query('COMMIT')
+          return previous
+        }
+
+        await client.query(
+          `INSERT INTO alert_dedupe (alert_id, content_hash, first_seen_at)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (alert_id) DO UPDATE SET
+             content_hash  = EXCLUDED.content_hash,
+             first_seen_at = EXCLUDED.first_seen_at`,
+          [alertId, next.hash, next.firstSeen],
+        )
+        await client.query('COMMIT')
+        return null
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw error
+      } finally {
+        client.release()
+      }
     },
 
     async purgeExpired(silenceMs: number, now = Date.now()): Promise<number> {

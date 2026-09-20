@@ -107,22 +107,22 @@ export function createPgJobStore(pool: pg.Pool): JobStore {
     },
 
     async claim(opts: ClaimOptions, at?: number): Promise<Job[]> {
-      // 时间戳由 SQL 内 clock_timestamp() 决定（见 schema.sql），保证与
-      // stale 判定同一时钟源，不受应用进程时钟漂移影响。
-      // `at` 参数保留仅为与内存实现签名一致；PG 路径下以库时钟为准。
-      void now(at)
+      // 注入时钟必须**真的传下去**。原实现写在 `void now(at)` 里把入参丢掉、
+      // 让 SQL 用 `clock_timestamp()` 自取 —— 生产看着没事，但一跑共享契约就红：
+      // 内存实现信注入时钟，PG 不信，两个后端对"现在几点"的理解不一致，
+      // `reassignStale(lease, now=5000)` 这种表达在 PG 下永远判不出过期。
+      // 不传时 SQL 落回库时钟，生产语义不变。
       const { rows } = await pool.query<JobRow>(
-        'SELECT * FROM claim_jobs($1, $2)',
-        [opts.assignee, opts.limit ?? 1],
+        'SELECT * FROM claim_jobs($1, $2, $3)',
+        [opts.assignee, opts.limit ?? 1, at ?? null],
       )
       return rows.map(toJob)
     },
 
     async reassignStale(leaseMs: number, at?: number): Promise<Job[]> {
-      void now(at)
       const { rows } = await pool.query<JobRow>(
-        'SELECT * FROM reassign_stale_jobs($1)',
-        [leaseMs],
+        'SELECT * FROM reassign_stale_jobs($1, $2)',
+        [leaseMs, at ?? null],
       )
       return rows.map(toJob)
     },

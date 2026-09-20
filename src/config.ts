@@ -190,6 +190,48 @@ export const LITE_AI_TODOS_DIR = path.join(LITE_AI_DIR, 'todos')
 export const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json')
 export const PROJECT_MCP_PATH = path.join(process.cwd(), '.mcp.json')
 
+/** 会话存储后端（T8）。 */
+export type SessionBackend = 'pg' | 'file'
+
+/**
+ * 解析会话存储后端（T8）。
+ *
+ * 优先级：
+ * 1. 显式 `LITE_AI_SESSION_BACKEND=pg|file` —— 运维明确指定时**完全服从**（含
+ *    强制 file 以做离线回退，即使配了 PG）；
+ * 2. 未指定时**按是否配了 PG 推导**：有 `DATABASE_URL`/`PG*` → pg，否则 file。
+ *
+ * ## 为什么默认值要"推导"而不是写死 `pg`
+ *
+ * 写死 `pg` 会让**所有 CLI 用户**（TTY 形态、离线单机）在没配 PG 时启动即失败 ——
+ * 而 CLI 是既有能力，不能因服务化改造倒退（plan T8 明写"CLI 形态不受影响"）。
+ * 写死 `file` 则反过来：服务端多实例部署时静默各写各的本地文件，会话不共享
+ * ——那是**比启动失败更糟的静默错误**。
+ *
+ * 推导则两边都对：配了库就是 pg（服务端形态），没配就是 file（CLI 形态）。
+ *
+ * 非法值**抛错而非静默回退** —— 打错配置（如 `LITE_AI_SESSION_BACKEND=postgres`）
+ * 却拿到 file 后端，会让人以为在跑 PG 多实例而实际数据全在本机。
+ */
+export function resolveSessionBackend(
+  env: NodeJS.ProcessEnv = process.env,
+): SessionBackend {
+  const raw = env.LITE_AI_SESSION_BACKEND?.trim().toLowerCase()
+  if (raw !== undefined && raw !== '') {
+    if (raw === 'pg' || raw === 'file') return raw
+    throw new Error(
+      `LITE_AI_SESSION_BACKEND 取值非法：${raw}（只接受 'pg' 或 'file'）`,
+    )
+  }
+  const url = env.DATABASE_URL?.trim()
+  if (url !== undefined && url !== '') return 'pg'
+  const hasPgVars =
+    (env.PGHOST?.trim() ?? '') !== '' ||
+    (env.PGDATABASE?.trim() ?? '') !== '' ||
+    (env.PGUSER?.trim() ?? '') !== ''
+  return hasPgVars ? 'pg' : 'file'
+}
+
 export async function readMcpTokensFile(
   filePath = LITE_AI_MCP_TOKENS_PATH,
 ): Promise<Record<string, string>> {
