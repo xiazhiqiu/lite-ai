@@ -72,7 +72,17 @@ async function startStub(respond: (req: StubRequest, index: number) => StubReply
 
 // ---------- 测试数据构造 ----------
 
-const NOW = Date.parse('2026-09-18T10:00:00Z')
+/**
+ * ⚠️ 时间戳必须**相对当前真实时间**生成，不能写死日期。
+ *
+ * 原因：`K8sEventsProvider.poll()` 内部用真实 `Date.now()` 做 lookback 时间窗过滤
+ * （`k8s-events.ts` 的 `lastSeen < nowMs - lookbackMs → continue`，默认窗口仅 15 分钟）。
+ * 早先这里写死 `2026-09-18T09:59:30Z`：当天跑是绿的，**隔天跑就会因超出窗口而全被滤掉**，
+ * 表现为 `alerts.length` 期望 1 得 0 —— 一颗时间炸弹（time-dependent test）。
+ * 改成"相对当前时间偏移"后，无论哪天跑都落在窗口内。
+ */
+const NOW = Date.now()
+const isoAgo = (msAgo: number): string => new Date(NOW - msAgo).toISOString()
 
 /** 构造一条 K8s Event（只填本 provider 用到的字段）。 */
 function k8sEvent(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -81,8 +91,9 @@ function k8sEvent(over: Record<string, unknown> = {}): Record<string, unknown> {
     reason: 'BackOff',
     message: 'Back-off restarting failed container',
     count: 1,
-    firstTimestamp: '2026-09-18T09:59:00Z',
-    lastTimestamp: '2026-09-18T09:59:30Z',
+    // 相对 now 往前 1 分钟 / 30 秒，稳稳落在默认 15 分钟 lookback 窗口内
+    firstTimestamp: isoAgo(60_000),
+    lastTimestamp: isoAgo(30_000),
     metadata: { name: 'pod-a.17f0', namespace: 'prod' },
     involvedObject: { kind: 'Pod', name: 'payments-7d9f-abc', namespace: 'prod' },
     source: { component: 'kubelet', host: 'node-1' },
@@ -153,7 +164,8 @@ test('parseK8sEventList: reason→title、对象/命名空间→labels、Warning
   assert.equal(a.labels.component, 'kubelet')
   assert.equal(a.labels.node, 'node-1')
   assert.equal(a.id, computeAlertId(a.title, a.labels), 'id 必须是统一 fingerprint')
-  assert.equal(new Date(a.startsAt).toISOString(), '2026-09-18T09:59:00.000Z')
+  // 默认构造的 firstTimestamp = NOW - 60s
+  assert.equal(new Date(a.startsAt).toISOString(), isoAgo(60_000))
 })
 
 test('parseK8sEventList: Normal 默认跳过，includeNormal 时按 info 收录', () => {
@@ -182,12 +194,13 @@ test('parseK8sEventList: 无 reason 跳过、ignoreReasons 生效、severityByRe
 })
 
 test('parseK8sEventList: 过期事件被时间窗过滤（Events 保留了约 1 小时历史）', () => {
-  const fresh = k8sEvent({ lastTimestamp: '2026-09-18T09:59:00Z' })
-  const stale = k8sEvent({ lastTimestamp: '2026-09-18T09:40:00Z' })
+  // fresh 落在默认 15 分钟窗内；stale 退到 30 分钟前，必然超窗
+  const fresh = k8sEvent({ lastTimestamp: isoAgo(5 * 60_000) })
+  const stale = k8sEvent({ lastTimestamp: isoAgo(30 * 60_000) })
 
   const kept = parseK8sEventList(eventList([fresh, stale]), cfgOf(), NOW)
   assert.equal(kept.length, 1, '默认 5 分钟窗内只应留下 fresh')
-  assert.equal(new Date(kept[0]!.startsAt).toISOString(), '2026-09-18T09:59:00.000Z')
+  assert.equal(new Date(kept[0]!.startsAt).toISOString(), isoAgo(60_000))
 
   const all = parseK8sEventList(eventList([fresh, stale]), cfgOf({ lookbackMs: 0 }), NOW)
   assert.equal(all.length, 2, 'lookbackMs=0 时不做过期过滤')
@@ -211,8 +224,8 @@ test('parseK8sEventList: 兼容 eventTime / series.count，缺失 firstTimestamp
       k8sEvent({
         firstTimestamp: undefined,
         lastTimestamp: undefined,
-        eventTime: '2026-09-18T09:58:00Z',
-        series: { count: 42, lastObservedTime: '2026-09-18T09:58:30Z' },
+        eventTime: isoAgo(2 * 60_000),
+        series: { count: 42, lastObservedTime: isoAgo(90_000) },
         count: undefined,
       }),
     ]),
@@ -220,7 +233,7 @@ test('parseK8sEventList: 兼容 eventTime / series.count，缺失 firstTimestamp
     NOW,
   )
   assert.equal(alerts.length, 1)
-  assert.equal(new Date(alerts[0]!.startsAt).toISOString(), '2026-09-18T09:58:00.000Z')
+  assert.equal(new Date(alerts[0]!.startsAt).toISOString(), isoAgo(2 * 60_000))
   assert.match(alerts[0]!.description, /累计 21-100 次/, '应从 series.count 回退取值')
 })
 
