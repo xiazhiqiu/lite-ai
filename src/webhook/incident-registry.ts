@@ -56,6 +56,13 @@ import {
   clusterByTopology,
   type DependencyGraph,
 } from './topology.js'
+import type { IncidentStore } from '../incident/store.js'
+import type { IncidentRecord } from '../incident/types.js'
+import {
+  recordFromOpen,
+  openFromRecord,
+  toIncidentDiff,
+} from '../incident/serialize.js'
 
 /** 事件键分层：业务维度（强）与基础设施维度（弱）。 */
 export type IncidentKeyTiers = {
@@ -81,6 +88,18 @@ export type IncidentRegistryConfig = {
   resolveAfterMs: number
   /** 注册表容量上限（防无界增长）；超出时先淘汰最旧的 resolved，再淘汰最旧的 open。 */
   maxIncidents: number
+}
+
+/**
+ * 构造参数（T12 扩展）：除既有 `IncidentRegistryConfig` 外，可注入**状态存储**。
+ *
+ * 不传 `store` 时一切照旧（纯内存、同步）——**既有用法行为零变化**；
+ * 传 `store` 时需配合 `hydrate()` / `flush()`（或直接用 `*Persisted` 便捷方法）
+ * 让状态经由库流转，从而在多实例间共享。
+ */
+export type IncidentRegistryOptions = Partial<IncidentRegistryConfig> & {
+  /** 状态存储（T12）。缺省为纯内存。 */
+  store?: IncidentStore
 }
 
 export const DEFAULT_REGISTRY_CONFIG: IncidentRegistryConfig = {
@@ -274,8 +293,20 @@ type ConsumeOutcome = {
 export class IncidentRegistry {
   private readonly byId = new Map<string, OpenIncident>()
   private readonly cfg: IncidentRegistryConfig
+  /** 状态存储（T12）；null = 纯内存（默认，行为零变化）。 */
+  private readonly store: IncidentStore | null
+  /**
+   * 本实例已提交到 store 的事件 id → 该事件在 `byId` 里的对象引用。
+   *
+   * 用途：`flush()` 要区分"新建"与"更新"。仅凭 `byId` 无法判断——`flush()` 是在
+   * 多次 `resolve()` 之后才调用，那时所有事件都已在 `byId` 里。用这份记账，
+   * 凡是 hydrate 时不在、或本次 `resolve()` 新产生的，即"新建"。
+   */
+  private readonly persisted = new Set<string>()
+  /** 本次 flush 周期内被容量淘汰的事件 id（`sweep()` 记录）。 */
+  private readonly evicted = new Set<string>()
 
-  constructor(config: Partial<IncidentRegistryConfig> = {}) {
+  constructor(config: IncidentRegistryOptions = {}) {
     this.cfg = {
       minAlerts: config.minAlerts ?? DEFAULT_REGISTRY_CONFIG.minAlerts,
       resolveAfterMs: config.resolveAfterMs ?? DEFAULT_REGISTRY_CONFIG.resolveAfterMs,
@@ -285,6 +316,74 @@ export class IncidentRegistry {
         secondary: config.keyTiers?.secondary ?? DEFAULT_INCIDENT_KEY_TIERS.secondary,
       },
     }
+    this.store = config.store ?? null
+  }
+
+  /**
+   * 从 store 加载全部状态进内存（T12）。
+   *
+   * **必须在首次 `resolve()` 之前调用**（配了 store 时）。之后 `resolve()` 仍是
+   * 同步的——它只在这份内存快照上做规则计算，不回写；回写由 `flush()` 统一完成。
+   * 这一形态让"关联纯规则、零 LLM"的同步原子性得以保留（见 `incident/store.ts` 顶注）。
+   *
+   * 未配 store 时是空操作（便于调用方无条件 `await hydrate()`）。
+   */
+  async hydrate(): Promise<void> {
+    if (this.store === null) return
+    const snapshot = await this.store.loadAll()
+    this.byId.clear()
+    this.persisted.clear()
+    for (const [id, record] of snapshot.byId) {
+      this.byId.set(id, openFromRecord(record))
+      this.persisted.add(id)
+    }
+  }
+
+  /**
+   * 把当前内存状态回写 store（T12）。
+   *
+   * 只回写**差异**：`created`（本次新产生）/ `updated`（其余）/ `deleted`（容量淘汰）。
+   * 未配 store 时是空操作。
+   */
+  async flush(): Promise<void> {
+    if (this.store === null) return
+    const diff = toIncidentDiff(this.byId, this.persisted, this.evicted)
+    await this.store.commit(diff)
+    // 提交成功后重置记账：此刻内存里的全部事件都已成为"库中已有"。
+    this.persisted.clear()
+    for (const id of this.byId.keys()) this.persisted.add(id)
+    this.evicted.clear()
+  }
+
+  /**
+   * 便捷方法：`resolve()` 的持久化版本 = hydrate → resolve → flush（T12）。
+   *
+   * 每次调用都重新 hydrate，因此**多实例并发时能立刻看见对方刚提交的事件**。
+   * 代价是每批一次全量读——告警摄入是低频操作（分钟级），这个代价可以接受；
+   * 若将来量级上升，可改为"仅加载 open + 增量"（属 P4 优化）。
+   */
+  async resolvePersisted(
+    alerts: Alert[],
+    correlationConfig: Partial<CorrelationConfig> = {},
+    now: number = Date.now(),
+    graph: DependencyGraph | null = null,
+  ): Promise<ResolveResult> {
+    await this.hydrate()
+    const result = this.resolve(alerts, correlationConfig, now, graph)
+    await this.flush()
+    return result
+  }
+
+  /** 便捷方法：`markResolved()` 的持久化版本（T12）。 */
+  async markResolvedPersisted(
+    alerts: Alert[],
+    correlationConfig: Partial<CorrelationConfig> = {},
+    now: number = Date.now(),
+  ): Promise<MarkResolvedResult> {
+    await this.hydrate()
+    const result = this.markResolved(alerts, correlationConfig, now)
+    await this.flush()
+    return result
   }
 
   /**
@@ -493,6 +592,8 @@ export class IncidentRegistry {
 
   clear(): void {
     this.byId.clear()
+    this.persisted.clear()
+    this.evicted.clear()
   }
 
   /** 键强度：命中业务维度为 primary，仅命中基础设施维度为 secondary，无稳定维度为 alertId。 */
@@ -749,7 +850,10 @@ export class IncidentRegistry {
     })
     const excess = this.byId.size - this.cfg.maxIncidents
     for (let i = 0; i < excess && i < ordered.length; i++) {
-      this.byId.delete(ordered[i]!.incidentId)
+      const victim = ordered[i]!
+      this.byId.delete(victim.incidentId)
+      // 记录淘汰，供 flush() 回写删除（否则库里的行会"复活"）。
+      this.evicted.add(victim.incidentId)
     }
   }
 }

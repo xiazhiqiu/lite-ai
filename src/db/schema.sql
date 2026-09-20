@@ -57,6 +57,18 @@ CREATE INDEX IF NOT EXISTS incidents_open_idx ON incidents (status, updated_at D
 -- 按键名 + 分组键精确探测（incident-registry.ts:620-628, 635-654）
 CREATE INDEX IF NOT EXISTS incidents_open_key_idx ON incidents (key_name, group_key) WHERE status = 'open';
 
+-- T12 并发守卫：同一 (key_name, group_key) 在 open 状态下**只允许一个事件**。
+--
+-- 为什么必须有：多实例同时 resolve 时，两个实例可能各拿同一份快照、各自发现
+-- "无 open 事件" → 双双创建 → 同一事故被拆成两个 incident（G9 的核心故障）。
+-- 内存实现靠"单线程同步临界区"天然避免；PG 必须靠部分唯一索引强制。
+--
+-- 注意 key_name 可为 NULL（alertId 档 / 拓扑簇），而 SQL 唯一索引把 NULL 视为互不相等
+-- → 该档位不受此约束保护（其 group_key 含 alert.id / 簇身份，本身已足够唯一）。
+CREATE UNIQUE INDEX IF NOT EXISTS incidents_open_unique_idx
+  ON incidents (key_name, group_key)
+  WHERE status = 'open' AND key_name IS NOT NULL;
+
 -- 事件成员告警
 CREATE TABLE IF NOT EXISTS incident_members (
   incident_id   TEXT NOT NULL REFERENCES incidents(incident_id) ON DELETE CASCADE,
