@@ -13,7 +13,7 @@
  *    job"这类正常业务分支，调用方 catch 后按需处理。不做"404 返回 null"的
  *    隐式宽恕——那会把越权 404 和真的不存在混为一谈（服务端刻意让二者同形）。
  */
-import type { ChatAccepted, JobSnapshot, WireJob } from './types.js'
+import type { ChatAccepted, JobSnapshot, UsageSnapshot, WireJob } from './types.js'
 
 /** 服务端返回的业务错误（非 2xx）。 */
 export class ApiError extends Error {
@@ -126,4 +126,24 @@ export async function listJobs(filter?: {
   const qs = params.toString()
   const body = await request<{ jobs: WireJob[] }>(`/jobs${qs.length > 0 ? `?${qs}` : ''}`)
   return body.jobs
+}
+
+/**
+ * 取用量 / 审计账本（T7）。
+ *
+ * 返回值同时含**明细**与**服务端全量聚合** —— 前者用于表格，后者用于顶部统计卡。
+ * 前端**不要**自己从 `events` 累加统计数字：`events` 受 `limit` 截断，
+ * 自行累加会得到一个"随分页变化的假总数"。见 `types.ts` 的 `WireUsageSummary`。
+ *
+ * `userId` 同 `/jobs`：由服务端从鉴权头注入，前端不传、也传不了。
+ */
+export async function getUsage(filter?: {
+  jobId?: string
+  limit?: number
+}): Promise<UsageSnapshot> {
+  const params = new URLSearchParams()
+  if (filter?.jobId !== undefined) params.set('jobId', filter.jobId)
+  if (filter?.limit !== undefined) params.set('limit', String(filter.limit))
+  const qs = params.toString()
+  return request<UsageSnapshot>(`/usage${qs.length > 0 ? `?${qs}` : ''}`)
 }

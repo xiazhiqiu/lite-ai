@@ -14,9 +14,7 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import { parseSseChunk } from '../../web/src/api/sse.js'
-import {
-  computeStats,
-} from '../../web/src/components/UsageView.js'
+import { formatTokens, shortId } from '../../web/src/components/UsageView.js'
 import {
   eventSummary,
   formatDuration,
@@ -200,61 +198,62 @@ describe('truncate / formatPayload / eventSummary', () => {
 })
 
 // ────────────────────────────────────────────────
-// 用量统计
+// 用量账本展示（T7）
 // ────────────────────────────────────────────────
+//
+// 注意：T10 初版这里测的是 `computeStats`（从 job 列表**前端累加**统计）。
+// T7 起统计改由服务端全量聚合（`/usage` 的 `summary`），前端不再自己算 ——
+// 因为前端累加必然受分页边界影响，会让"总数"随 `?limit=` 变化。
+// 所以这里改成测两个**真正还在前端**的纯函数：id 截短与 token 千分位。
 
-describe('computeStats：用量统计口径', () => {
-  it('按状态计数 + 平均耗时（只算有 finishedAt 的）', () => {
-    const stats = computeStats([
-      job('a', 'completed', 0, 1000),
-      job('b', 'completed', 0, 3000),
-      job('c', 'failed', 0, 2000),
-      job('d', 'running', null),
-      job('e', 'pending', null),
-    ])
-    assert.equal(stats.total, 5)
-    assert.equal(stats.completed, 2)
-    assert.equal(stats.failed, 1)
-    assert.equal(stats.active, 2)
-    // (1000 + 3000 + 2000) / 3 = 2000
-    assert.equal(stats.avgDuration, 2000)
+describe('T7 用量展示：shortId 长 id 截短', () => {
+  it('短 id 原样返回', () => {
+    assert.equal(shortId('job-1'), 'job-1')
   })
 
-  it('无已完成任务时 avgDuration 为 null（不除零）', () => {
-    const stats = computeStats([job('a', 'running', null)])
-    assert.equal(stats.avgDuration, null)
+  it('null / 空串 → 占位符 "—"（不显示 "null"）', () => {
+    assert.equal(shortId(null), '—')
+    assert.equal(shortId(''), '—')
   })
 
-  it('空列表', () => {
-    const stats = computeStats([])
-    assert.deepEqual(stats, {
-      total: 0,
-      active: 0,
-      completed: 0,
-      failed: 0,
-      avgDuration: null,
-    })
+  it('长 id 保留头尾（足以肉眼比对两条记录是否同一任务）', () => {
+    const id = 'job-0f9c1e2d-3a4b-5c6d-7e8f-9a0b1c2d3e4f'
+    const short = shortId(id)
+    assert.ok(short.length < id.length)
+    assert.ok(id.startsWith(short.slice(0, 9)), '保留前 9 位')
+    assert.ok(id.endsWith(short.slice(-5)), '保留后 5 位')
+    assert.ok(short.includes('…'))
+  })
+
+  it('恰好 18 字符时不截短（边界）', () => {
+    const id = 'a'.repeat(18)
+    assert.equal(shortId(id), id)
+  })
+
+  it('19 字符开始截短（边界）', () => {
+    const id = 'a'.repeat(19)
+    assert.notEqual(shortId(id), id)
   })
 })
 
-function job(
-  id: string,
-  status: 'pending' | 'running' | 'completed' | 'failed',
-  createdAt: number,
-  finishedAt: number | null = null,
-): Parameters<typeof computeStats>[0][number] {
-  return {
-    id,
-    userId: 'u1',
-    kind: 'chat',
-    status,
-    sessionId: null,
-    incidentId: null,
-    assignee: null,
-    error: null,
-    summary: null,
-    createdAt,
-    updatedAt: createdAt,
-    finishedAt,
-  }
-}
+describe('T7 用量展示：formatTokens 千分位', () => {
+  it('大数字带千分位（肉眼可读）', () => {
+    assert.equal(formatTokens(1234567), '1,234,567')
+  })
+
+  it('小数字不变', () => {
+    assert.equal(formatTokens(0), '0')
+    assert.equal(formatTokens(999), '999')
+  })
+
+  it('null / undefined 视为 0（账本列 NOT NULL DEFAULT 0）', () => {
+    assert.equal(formatTokens(null), '0')
+    assert.equal(formatTokens(undefined), '0')
+  })
+
+  it('NaN / Infinity 不显示成 "NaN"（降级为 0）', () => {
+    assert.equal(formatTokens(Number.NaN), '0')
+    assert.equal(formatTokens(Number.POSITIVE_INFINITY), '0')
+  })
+})
+

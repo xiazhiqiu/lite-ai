@@ -1,26 +1,33 @@
 import { useEffect, useState } from 'react'
-import { listJobs, UnauthorizedError } from '../api/client.js'
-import type { WireJob } from '../api/types.js'
-import { formatDuration, formatTime, KIND_LABELS, summarizeJob } from '../format.js'
-import { StatusBadge } from './StatusBadge.js'
+import { ApiError, getUsage, UnauthorizedError } from '../api/client.js'
+import type { UsageSnapshot, WireUsageEvent } from '../api/types.js'
+import { formatDuration, formatTime } from '../format.js'
 
 /**
- * 审计用量页（T10）。
+ * 审计用量页（T10 建页 → T7 接真实数据源）。
  *
- * ## ⚠️ 诚实边界：这是**job 派生的近似视图**，不是真正的用量账本
+ * ## 数据来源：`GET /usage`（`usage_events` 账本）
  *
- * plan 里的 `usage_events` 表（T2 已建，见 `schema.sql`）由 **T7** 落库，
- * 目前**还没有** `/usage` 读接口。所以当前页面从 job 列表**推导**：
- * - 谁（`userId`）、何时（`createdAt`）、什么类型（`kind`）、多久（`finishedAt - createdAt`）、
- *   什么结果（`status`）—— 这些 job 上都真实存在；
- * - **模型 / token 数** —— job 上**没有**，必须等 T7 的 `usage_events`。
+ * T10 初版是"从 job 列表派生的近似视图"（模型/token 列标"待 T7"）。
+ * T7 落地后换成真正的审计账本 —— 每一行是执行期**实测**的一条用量事实，
+ * 不是从 job 时间戳推出来的近似值。
  *
- * 所以这里**不编造** token 数字：相关列直接标注"待 T7"，而不是显示 0
- * （显示 0 会让值班员以为"这次没消耗 token"，是错误信息）。等 T7 落地后
- * 把数据源换成 `/usage` 即可，列结构不用改。
+ * ## 两条口径必须说清
  *
- * 这是"宁可留空也不造假"的具体应用：审计页的价值全在数字可信，
- * 一个假数字比没有数字更糟。
+ * 1. **顶部统计卡来自 `summary`（服务端全量聚合），不是本页明细的累加**。
+ *    明细受 `limit` 截断，若前端自行累加，则"总调查数"会随分页变化 ——
+ *    审计数字就有了两个口径。服务端 `summarize()` 与 `list()` 是分开的两次查询，
+ *    正是为了让汇总永远是全量。见 `src/usage/store.ts` 的模块注释。
+ *
+ * 2. **token 列显示 0 是"真实的 0"，不是"未采集"**。当前执行链**尚未**把
+ *    provider 返回的 usage 透传到记账层（`exec.ts:recordUsage` 里显式写了 0
+ *    并注明原因）。所以页面上有一句显式说明 —— 不能让值班员把"采集缺口"
+ *    误读成"这次调查确实没消耗 token"。
+ *
+ * ## 404 的处理
+ *
+ * 服务端未接线 `usage` 时返回 404（而不是 200 空数组 —— 见 `ServerAppOptions.usage`）。
+ * 这里把它渲染成一条明确的提示，而不是静默显示空表。
  */
 export function UsageView({
   onOpenJob,
@@ -29,21 +36,30 @@ export function UsageView({
   onOpenJob: (jobId: string) => void
   onUnauthorized?: () => void
 }): React.ReactElement {
-  const [jobs, setJobs] = useState<WireJob[]>([])
+  const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [missing, setMissing] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     const load = async (): Promise<void> => {
       try {
-        const list = await listJobs({ limit: 200 })
+        const data = await getUsage({ limit: 200 })
         if (cancelled) return
-        setJobs(list)
+        setSnapshot(data)
+        setMissing(false)
         setError(null)
       } catch (err) {
         if (cancelled) return
         if (err instanceof UnauthorizedError) {
           onUnauthorized?.()
+          return
+        }
+        // 404 = 服务端没挂用量账本。与"加载失败"区分开：这不是故障，
+        // 是部署形态问题，提示应指向"要怎么开"而不是"重试"。
+        if (err instanceof ApiError && err.status === 404) {
+          setMissing(true)
+          setError(null)
           return
         }
         setError(err instanceof Error ? err.message : '加载失败')
@@ -57,7 +73,8 @@ export function UsageView({
     }
   }, [onUnauthorized])
 
-  const stats = computeStats(jobs)
+  const summary = snapshot?.summary ?? null
+  const events = snapshot?.events ?? []
 
   return (
     <div className="page">
@@ -69,51 +86,80 @@ export function UsageView({
 
       {error !== null ? <div className="callout error">{error}</div> : null}
 
+      {missing ? (
+        <div className="callout info">
+          服务端<strong>未接线用量账本</strong>（<code>GET /usage</code> 返回 404）。
+          装配层需传入 <code style={{ fontFamily: 'var(--mono)' }}>usage</code>
+          （有 Postgres 时自动用 <code>usage_events</code> 表）。
+        </div>
+      ) : null}
+
       <div className="callout info">
-        当前为 <strong>job 派生视图</strong>：模型与 token 用量需等 T7 的
-        <code style={{ fontFamily: 'var(--mono)' }}> usage_events </code>
-        落库后才可读，此处不编造数字。
+        token 列当前显示 <strong>0</strong>：执行链尚未把模型返回的 usage 透传到记账层
+        （字段已就位，采集待补）。<strong>这是采集缺口，不是"没有消耗"</strong>。
       </div>
 
       <div className="filters" style={{ marginTop: 14 }}>
-        <StatCard label="总调查数" value={String(stats.total)} />
-        <StatCard label="进行中" value={String(stats.active)} />
-        <StatCard label="已完成" value={String(stats.completed)} />
-        <StatCard label="失败" value={String(stats.failed)} />
-        <StatCard label="平均耗时" value={formatDuration(stats.avgDuration)} />
+        <StatCard label="总记录数" value={summary === null ? '—' : String(summary.total)} />
+        <StatCard
+          label="已完成"
+          value={summary === null ? '—' : String(summary.completed)}
+        />
+        <StatCard label="失败" value={summary === null ? '—' : String(summary.failed)} />
+        <StatCard
+          label="输入 token"
+          value={summary === null ? '—' : formatTokens(summary.inputTokens)}
+        />
+        <StatCard
+          label="输出 token"
+          value={summary === null ? '—' : formatTokens(summary.outputTokens)}
+        />
+        <StatCard
+          label="平均耗时"
+          value={
+            summary === null || summary.avgDurationMs === null
+              ? '—'
+              : formatDuration(summary.avgDurationMs)
+          }
+        />
+      </div>
+      <div className="faint" style={{ marginTop: 6, fontSize: 11 }}>
+        统计为<strong>全量口径</strong>（服务端聚合，不受下方条数上限影响）。
       </div>
 
-      {jobs.length === 0 ? (
+      {events.length === 0 ? (
         <div className="empty">暂无记录</div>
       ) : (
         <table className="data">
           <thead>
             <tr>
               <th>时间</th>
-              <th>账户</th>
-              <th>类型</th>
-              <th>摘要</th>
+              <th>任务</th>
+              <th>追踪</th>
+              <th>模型</th>
               <th>耗时</th>
-              <th>模型 / token</th>
+              <th>token（入/出）</th>
               <th>状态</th>
             </tr>
           </thead>
           <tbody>
-            {jobs.map(job => (
-              <tr key={job.id} className="clickable" onClick={() => onOpenJob(job.id)}>
-                <td className="num faint">{formatTime(job.createdAt)}</td>
-                <td className="num muted">{job.userId}</td>
-                <td>{KIND_LABELS[job.kind] ?? job.kind}</td>
-                <td>{summarizeJob(job)}</td>
+            {events.map(row => (
+              <tr
+                key={row.id}
+                className={row.jobId !== null ? 'clickable' : undefined}
+                onClick={row.jobId !== null ? () => onOpenJob(row.jobId!) : undefined}
+              >
+                <td className="num faint">{formatTime(row.createdAt)}</td>
+                <td className="mono faint">{shortId(row.jobId)}</td>
+                <td className="mono faint">{shortId(row.traceId)}</td>
+                <td>{row.model ?? <span className="faint">未记录</span>}</td>
                 <td className="num">
-                  {job.finishedAt !== null
-                    ? formatDuration(job.finishedAt - job.createdAt)
-                    : '—'}
+                  {row.durationMs === null ? '—' : formatDuration(row.durationMs)}
                 </td>
-                <td className="faint">待 T7</td>
-                <td>
-                  <StatusBadge status={job.status} />
+                <td className="num">
+                  {formatTokens(row.inputTokens)} / {formatTokens(row.outputTokens)}
                 </td>
+                <td>{row.status === null ? <span className="faint">—</span> : row.status}</td>
               </tr>
             ))}
           </tbody>
@@ -122,6 +168,27 @@ export function UsageView({
     </div>
   )
 }
+
+/**
+ * 长 id 截短显示（保留头尾，中间省略）。
+ *
+ * 为什么不全显示：`job-<uuid>` 有 40 字符，三列 id 会把表撑到横向滚动，
+ * 反而看不见关键列。头尾保留足以让人肉眼比对两条记录是否同一任务。
+ */
+export function shortId(id: string | null): string {
+  if (id === null || id.length === 0) return '—'
+  if (id.length <= 18) return id
+  return `${id.slice(0, 9)}…${id.slice(-5)}`
+}
+
+/** token 数用千分位（大数字肉眼可读）。null/undefined 视为 0（账本列 NOT NULL DEFAULT 0）。 */
+export function formatTokens(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return '0'
+  return n.toLocaleString('en-US')
+}
+
+/** 类型别名，便于测试引用事件行形状。 */
+export type { WireUsageEvent }
 
 function StatCard({ label, value }: { label: string; value: string }): React.ReactElement {
   return (
@@ -137,33 +204,4 @@ function StatCard({ label, value }: { label: string; value: string }): React.Rea
       </span>
     </div>
   )
-}
-
-/** 统计口径：只统计**本次返回的这批 job**（分页边界内），不做全量聚合。 */
-export function computeStats(jobs: WireJob[]): {
-  total: number
-  active: number
-  completed: number
-  failed: number
-  avgDuration: number | null
-} {
-  let active = 0
-  let completed = 0
-  let failed = 0
-  const durations: number[] = []
-
-  for (const job of jobs) {
-    if (job.status === 'pending' || job.status === 'running') active += 1
-    else if (job.status === 'completed') completed += 1
-    else if (job.status === 'failed') failed += 1
-
-    if (job.finishedAt !== null) durations.push(job.finishedAt - job.createdAt)
-  }
-
-  const avgDuration =
-    durations.length === 0
-      ? null
-      : Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
-
-  return { total: jobs.length, active, completed, failed, avgDuration }
 }

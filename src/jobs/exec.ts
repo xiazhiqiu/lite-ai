@@ -26,6 +26,8 @@ import type { JobStore } from './store.js'
 import type { Job } from './types.js'
 import type { SessionStore } from '../session/store.js'
 import type { PermissionManager } from '../permissions.js'
+import type { UsageStore } from '../usage/index.js'
+import { traceIdForJob } from '../server/trace.js'
 
 /**
  * 事件批量落库的窗口（毫秒）。窗口内累积的事件一次写库。
@@ -82,6 +84,13 @@ export type JobExecutorDeps = {
   flushSize?: number
   /** cwd 注入（覆盖 deps.cwd，用于 job 自带 cwd 的场景）。 */
   cwdForJob?: (job: Job) => string
+  /**
+   * 用量 / 审计账本（T7）。**不传 = 不记账**（单测与 CLI 场景不需要）。
+   *
+   * 记账点刻意放在执行器而**不是** Worker：只有执行器知道这一轮的 token 与耗时，
+   * Worker 只看见"成功/失败"。而 Worker 负责的是终态落库 —— 两者职责不重叠。
+   */
+  usage?: UsageStore
   /** 结构化日志。 */
   log?: (level: 'info' | 'warn' | 'error', message: string) => void
 }
@@ -145,6 +154,49 @@ function jobMessage(job: Job): string {
 }
 
 /**
+ * 记账：往审计账本追加一条本轮的用量事实（T7）。
+ *
+ * **两条硬约束**：
+ * 1. **本函数永不抛错**。审计写失败不能把"已经跑成功的 job"变成 failed ——
+ *    审计库抖动导致全站调查挂掉是可用性灾难（见 `usage/store.ts` 的模块注释）。
+ *    所以这里 catch 并降级为错误日志，把"账本缺一条"这件事实**显式喊出来**，
+ *    而不是静默吞掉（静默吞掉就违背了可追溯的初衷）。
+ * 2. **模型名从实际使用的 adapter 取，取不到就落 null**。不猜、不用占位串 ——
+ *    `null` 诚实地表示"这一轮的模型未知"，而 `'unknown'` 会被下游当成一个真实模型名统计。
+ */
+async function recordUsage(
+  deps: JobExecutorDeps,
+  job: Job,
+  log: (level: 'info' | 'warn' | 'error', message: string) => void,
+  args: { modelName: string | null; durationMs: number; status: 'completed' | 'failed' },
+): Promise<void> {
+  if (deps.usage === undefined) return
+  try {
+    await deps.usage.record({
+      userId: job.userId,
+      jobId: job.id,
+      sessionId: job.sessionId,
+      // traceId 由 jobId 派生（T7-a）：一次调查一条 trace，任何拿到 jobId
+      // 的地方都能重算，不需要在 jobs 表加列、也不需要在这里生成再存。
+      traceId: traceIdForJob(job.id),
+      model: args.modelName,
+      // token 数暂记 0：本项目的 agent 栈当前未把 provider 的 usage 回传到
+      // 这一层（事件里也没有 token 字段）。**不编造数字** —— 字段留着，
+      // 等 T5 的 runner 把 usage 透传上来再填。
+      inputTokens: 0,
+      outputTokens: 0,
+      durationMs: args.durationMs,
+      status: args.status,
+    })
+  } catch (error) {
+    log(
+      'error',
+      `[exec] ${job.id} 用量记账失败（审计账本缺一条，job 本身不受影响）: ${String(error)}`,
+    )
+  }
+}
+
+/**
  * 创建执行器。
  *
  * 返回的函数即 Worker 的 `execute`：**它自己不管终态** —— 落 `completed` / `failed`
@@ -158,6 +210,9 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
 
   return async function executeJob(job: Job): Promise<void> {
     const cwd = deps.cwdForJob ? deps.cwdForJob(job) : deps.cwd
+    // 记账用起点。放在最前（含读历史/建工具集的耗时）—— 审计关心的是
+    // "这次调查占用了多久"，而不是"纯推理花了多久"。
+    const startedAt = Date.now()
 
     // ── G2：取历史（带 sessionId 才取；刻意不校验会话是否已存在，
     //         以便对 diagnose 落下的告警会话直接续接） ──
@@ -221,6 +276,13 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
     const model =
       typeof deps.model === 'function' ? await deps.model({ tools }) : deps.model
 
+    // 实际生效的模型名：显式 `modelName` 优先，否则从 adapter 上探测
+    // （`adapter.model` 是可选约定）；都没有就是 null，不猜。
+    const effectiveModel =
+      deps.modelName !== undefined && deps.modelName !== ''
+        ? deps.modelName
+        : ((model as { model?: unknown }).model as string | undefined) ?? null
+
     let finalMessages: ChatMessage[] = business
     try {
       finalMessages = await runner({
@@ -253,6 +315,13 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       closed = true
       clearInterval(timer)
       await flush().catch(() => {})
+      // 失败同样是"发生过的调查"，也进账本（否则审计只记成功，
+      // 而运维最想查的恰恰是失败那些）。
+      await recordUsage(deps, job, log, {
+        modelName: effectiveModel,
+        durationMs: Date.now() - startedAt,
+        status: 'failed',
+      })
       throw error
     }
 
@@ -262,6 +331,14 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
 
     // ── G2：回写同一 session（保留 append-only 语义） ──
     await persistSession(deps, cwd, job, finalMessages, log)
+
+    // 记账放在会话回写之后：若回写抛错，会走上面的 catch 路径记 failed，
+    // 不会出现"同一轮记两条"（成功一条 + 失败一条）。
+    await recordUsage(deps, job, log, {
+      modelName: effectiveModel,
+      durationMs: Date.now() - startedAt,
+      status: 'completed',
+    })
   }
 }
 

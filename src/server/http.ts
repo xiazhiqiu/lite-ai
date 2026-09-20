@@ -17,6 +17,7 @@ import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import type { JobStore } from '../jobs/store.js'
 import type { Job } from '../jobs/types.js'
+import type { UsageRecord, UsageStore } from '../usage/index.js'
 import { authenticate, isExemptPath, type AuthConfig } from './auth.js'
 import { tryServeStatic } from './static.js'
 
@@ -28,6 +29,14 @@ const SSE_POLL_MS = 250
 
 export type ServerAppOptions = {
   store: JobStore
+  /**
+   * 用量 / 审计账本（T7）。**不传 = 不挂 `/usage` 路由**（404）。
+   *
+   * 为什么不给个默认的内存实现：审计数据的"看起来能用"是**危险的假象**——
+   * 部署方会以为合规检查有据可查，实际重启即空。宁可在未接线时明确 404，
+   * 让缺口暴露在集成测试里，也不要静默提供一个会骗人的默认。
+   */
+  usage?: UsageStore
   /**
    * 服务端工作区路径（plan G4）——**不是**用户本地目录。
    * 文件类工具只能在此路径下取证。
@@ -178,8 +187,42 @@ function parseLimit(raw: string | null | undefined): number {
   return Math.min(Math.floor(n), LIST_LIMIT_MAX)
 }
 
+/**
+ * 用量明细的 limit。
+ *
+ * 值与 `usage/memory-store.ts` 的 `USAGE_LIMIT_*` **必须一致** —— 这里刻意重复
+ * 常量而不是 import，是为了让 HTTP 层对"用户能一次拉多少"有独立的、显式的上限
+ * （存储层的 clamp 是纵深防御的第二道，不是第一道）。
+ */
+const USAGE_LIMIT_DEFAULT = 100
+const USAGE_LIMIT_MAX = 500
+
+function parseUsageLimit(raw: string | null | undefined): number {
+  if (raw === null || raw === undefined || raw === '') return USAGE_LIMIT_DEFAULT
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return USAGE_LIMIT_DEFAULT
+  return Math.min(Math.floor(n), USAGE_LIMIT_MAX)
+}
+
+/** 用量行 → 对外 JSON。字段名与 `usage_events` 列名对齐（snake_case 归前端管）。 */
+function toWireUsage(row: UsageRecord): Record<string, unknown> {
+  return {
+    id: row.id,
+    jobId: row.jobId,
+    sessionId: row.sessionId,
+    traceId: row.traceId,
+    model: row.model,
+    inputTokens: row.inputTokens,
+    outputTokens: row.outputTokens,
+    durationMs: row.durationMs,
+    status: row.status,
+    createdAt: row.createdAt,
+  }
+}
+
 export function createServerApp(opts: ServerAppOptions): ServerApp {
   const { store } = opts
+  const usage = opts.usage
   const ready = opts.ready ?? (async () => true)
   const auth: AuthConfig = opts.auth ?? { keys: [] }
   const webRoot = opts.webRoot
@@ -218,7 +261,7 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
     // 理由：HTML/JS/CSS 本身不含任何数据，登录页必须能匿名拿到，否则用户
     // 连"输入 key 的界面"都看不到。真正的数据面（/chat、/jobs、SSE）仍在
     // 下面严格鉴权 —— 静态资源免鉴权不等于数据免鉴权。
-    if (webRoot !== undefined && path !== '/chat' && !path.startsWith('/jobs')) {
+    if (webRoot !== undefined && path !== '/chat' && !path.startsWith('/jobs') && path !== '/usage') {
       const result = await tryServeStatic(req, res, { root: webRoot })
       if (result.served) return
     }
@@ -245,6 +288,16 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
     if (path === '/jobs') {
       if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
       return handleListJobs(req, res, url, userId)
+    }
+
+    // GET /usage —— 用量 / 审计账本（T7）。
+    //
+    // 与 /jobs 同一套隔离口径：`userId` 只取自身份，查询串里的 `userId` 被忽略。
+    // 未接线 `usage` 时**明确 404**（不是 200 空数组）—— 见 ServerAppOptions.usage。
+    if (path === '/usage') {
+      if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
+      if (usage === undefined) return reply(res, 404, { error: 'not found' })
+      return handleListUsage(res, url, userId)
     }
 
     // /jobs/:id 与 /jobs/:id/stream
@@ -318,6 +371,41 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
 
     // 202 Accepted：已受理、尚未完成。这是异步队列 HTTP 语义的关键一笔。
     return reply(res, 202, { jobId: job.id, sessionId })
+  }
+
+  /**
+   * GET /usage[?jobId=&limit=] —— 当前用户的用量明细 + 服务端全量聚合（T7）。
+   *
+   * **为什么明细与汇总在同一个响应里**（而不是分两个接口）：
+   * 前端 `UsageView` 要在同一屏同时显示"最近若干条"与"总计 token / 成功率"。
+   * 拆两个接口会让前端多一次往返、并多一个"两次请求之间账本变了"的不一致窗口。
+   *
+   * **汇总必须来自 `summarize()`（服务端全量），不能在响应里由本页明细算出** ——
+   * 那样"总数"会随 `?limit=` 变化，审计数字就有了第二口径。见 `usage/store.ts`。
+   *
+   * 关于越权：`jobId` 过滤是**在 userId 之上叠加**的（`list()` 内部先按 userId 收窄），
+   * 所以传别人的 jobId 只会得到空数组，不会泄漏。
+   */
+  async function handleListUsage(
+    res: http.ServerResponse,
+    url: URL,
+    userId: string,
+  ): Promise<void> {
+    if (usage === undefined) return reply(res, 404, { error: 'not found' })
+
+    const [events, summary] = await Promise.all([
+      usage.list({
+        userId, // ← 强制取自身份，不读查询串
+        jobId: url.searchParams.get('jobId') ?? undefined,
+        limit: parseUsageLimit(url.searchParams.get('limit')),
+      }),
+      usage.summarize(userId),
+    ])
+
+    return reply(res, 200, {
+      events: events.map(toWireUsage),
+      summary,
+    })
   }
 
   /** GET /jobs/:id[?after=<seq>] —— 状态快照 + 事件增量（**仅限本人 job**）。 */

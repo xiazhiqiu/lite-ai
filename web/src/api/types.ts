@@ -52,6 +52,46 @@ export type ChatAccepted = {
 }
 
 /**
+ * 用量 / 审计明细行 —— 对齐 `toWireUsage`（server/http.ts）。
+ *
+ * 与 `WireJob` 的**关键区别**：这些数字来自 `usage_events` 账本（T7），
+ * 是服务端在执行期**实测**出来的，不是从 job 时间戳推导的近似值。
+ */
+export type WireUsageEvent = {
+  id: number
+  jobId: string | null
+  sessionId: string | null
+  traceId: string | null
+  model: string | null
+  inputTokens: number
+  outputTokens: number
+  durationMs: number | null
+  status: string | null
+  createdAt: number
+}
+
+/**
+ * 服务端全量聚合（`UsageStore.summarize`）。
+ *
+ * **注意**：这个 summary **不受 `limit` 影响** —— 它是账本的全量口径。
+ * 前端**不得**用本页 `events` 自行累加来替代它（那样数字会随分页变化）。
+ */
+export type WireUsageSummary = {
+  total: number
+  completed: number
+  failed: number
+  inputTokens: number
+  outputTokens: number
+  avgDurationMs: number | null
+}
+
+/** `GET /usage` 响应体。 */
+export type UsageSnapshot = {
+  events: WireUsageEvent[]
+  summary: WireUsageSummary
+}
+
+/**
  * job 事件类型 —— 由 `src/jobs/exec.ts` 的回调决定。
  * 后端新增 kind 时这里补一行即可；未知 kind 前端按"通用事件"渲染（见 InvestigationStream）。
  */

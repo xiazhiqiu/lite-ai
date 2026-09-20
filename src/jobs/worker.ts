@@ -15,6 +15,7 @@
 import { getGlobalPool, type BoundedPool } from './pool.js'
 import type { JobStore } from './store.js'
 import type { Job } from './types.js'
+import { createLifecycleLogger, traceIdForJob, type LifecycleLogger } from '../server/trace.js'
 
 export type WorkerOptions = {
   store: JobStore
@@ -52,6 +53,18 @@ export type WorkerOptions = {
   now?: () => number
   /** 注入日志。 */
   log?: (level: 'log' | 'warn' | 'error', message: string) => void
+  /**
+   * 注入**结构化生命周期日志**（T7-c）。缺省用 `createLifecycleLogger()`
+   * （JSONL 写 stdout，可用 `LITE_AI_STRUCTURED_LOG=0` 关掉）。
+   *
+   * 与上面的 `log` 并存不是冗余：
+   * - `log` 是**给人看的**行文（自由格式、便于 grep）；
+   * - `structuredLog` 是**给机器吃的**（固定字段、单行 JSON、可入库做审计检索）。
+   *
+   * 银行场景要的是后者：能按 jobId/traceId/userId 精确检索"谁在何时跑了什么"。
+   * 两者都留，是因为排障时人还是要读前者（JSON 一行几百字符不方便扫）。
+   */
+  structuredLog?: LifecycleLogger
 }
 
 export type Worker = {
@@ -80,6 +93,7 @@ export function createWorker(opts: WorkerOptions): Worker {
   const claimBatch = opts.claimBatch ?? DEFAULT_CLAIM_BATCH
   const now = opts.now ?? Date.now
   const log = opts.log ?? ((level, message) => console[level](message))
+  const trace = opts.structuredLog ?? createLifecycleLogger()
 
   // 延迟到首次访问才建池：这样 worker 只做"读 store"的测试不会因建池而留下句柄。
   let poolRef: BoundedPool | null = opts.pool ?? null
@@ -109,6 +123,18 @@ export function createWorker(opts: WorkerOptions): Worker {
       )
       for (const job of jobs) {
         log('log', `[worker] 认领 ${job.id} (kind=${job.kind})`)
+        // 结构化：认领。这是"谁跑了什么"链条的起点 —— 从这条能顺着 traceId
+        // 把后面所有事件串起来。
+        trace({
+          level: 'info',
+          event: 'claimed',
+          traceId: traceIdForJob(job.id),
+          jobId: job.id,
+          userId: job.userId,
+          kind: job.kind,
+          assignee: opts.assignee,
+        })
+        const beganAt = now()
         // 交给池：并发上限由池统一裁决，worker 不做自己的限流。
         pool().enqueue(async () => {
           try {
@@ -121,11 +147,46 @@ export function createWorker(opts: WorkerOptions): Worker {
                 'warn',
                 `[worker] ${job.id} 完成写入被拒（可能已被回收重派），忽略本次结果`,
               )
+              // 结构化：这种情况必须留痕 —— 同一个 job 被两个实例跑过，
+              // 审计时要能看见"重复执行"这件事（否则只看到两条耗时记录，莫名其妙）。
+              trace({
+                level: 'warn',
+                event: 'completed',
+                traceId: traceIdForJob(job.id),
+                jobId: job.id,
+                userId: job.userId,
+                kind: job.kind,
+                assignee: opts.assignee,
+                durationMs: now() - beganAt,
+                error: '完成写入被拒（job 已被回收重派）',
+              })
+              return
             }
+            trace({
+              level: 'info',
+              event: 'completed',
+              traceId: traceIdForJob(job.id),
+              jobId: job.id,
+              userId: job.userId,
+              kind: job.kind,
+              assignee: opts.assignee,
+              durationMs: now() - beganAt,
+            })
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error)
             log('error', `[worker] ${job.id} 执行失败: ${reason}`)
             await opts.store.finish(job.id, 'failed', { error: reason, now: now() })
+            trace({
+              level: 'error',
+              event: 'failed',
+              traceId: traceIdForJob(job.id),
+              jobId: job.id,
+              userId: job.userId,
+              kind: job.kind,
+              assignee: opts.assignee,
+              durationMs: now() - beganAt,
+              error: reason,
+            })
           }
         })
       }
@@ -148,6 +209,22 @@ export function createWorker(opts: WorkerOptions): Worker {
             .map(j => j.id)
             .join(', ')}`,
         )
+        // 结构化：逐条记。**不合并成一行 summary** —— 审计要能按单个 jobId
+        // 查出"它被重派过几次"，合并就没法按 jobId 检索了。
+        for (const job of reclaimed) {
+          trace({
+            level: 'warn',
+            event: 'reassigned',
+            traceId: traceIdForJob(job.id),
+            jobId: job.id,
+            userId: job.userId,
+            kind: job.kind,
+            // assignee 为 null：重派后**尚无新主**（下轮 claim 才有人接）。
+            // 这正是要记的 —— 租期超时说明原实例失联。
+            assignee: null,
+            error: `租期超过 ${staleLeaseMs}ms 未完成，原 assignee=${job.assignee ?? '(未知)'}`,
+          })
+        }
       }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)

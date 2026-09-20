@@ -18,6 +18,8 @@ import { createWorker } from '../src/jobs/worker.js'
 import type { Job } from '../src/jobs/types.js'
 import type { ChatMessage } from '../src/types.js'
 import type { SessionStore } from '../src/session/store.js'
+import { createMemoryUsageStore } from '../src/usage/index.js'
+import { jobIdFromTrace } from '../src/server/trace.js'
 
 const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms))
 
@@ -454,6 +456,157 @@ describe('exec：失败路径', () => {
     )
     assert.match(String(events[1]!.payload.message), /429/)
     assert.equal(sessions.saves.length, 1, '失败也要尽力落盘（可 resume）')
+  })
+})
+
+describe('exec：T7 用量 / 审计记账', () => {
+  it('成功一轮记一条 completed，字段与 job 对齐（含 traceId 可反解）', async () => {
+    const jobStore = createMemoryJobStore()
+    const usage = createMemoryUsageStore()
+    const job = await jobStore.create({
+      userId: 'alice',
+      cwd: '/srv/workspace',
+      kind: 'chat',
+      sessionId: 'sin-usage',
+      payload: { message: '查一下' },
+    })
+    await jobStore.claim({ assignee: 'w1' })
+
+    const exec = createJobExecutor({
+      jobStore,
+      usage,
+      sessionStore: fakeSessionStore().store,
+      cwd: '/srv/workspace',
+      model: fakeModel,
+      modelName: 'deepseek-chat',
+      turnRunner: async () => [] as ChatMessage[],
+    })
+
+    await exec(job)
+
+    const rows = await usage.list({ userId: 'alice' })
+    assert.equal(rows.length, 1, '一轮 = 一条账（不多不少）')
+    const row = rows[0]!
+    assert.equal(row.jobId, job.id)
+    assert.equal(row.sessionId, 'sin-usage')
+    assert.equal(row.model, 'deepseek-chat')
+    assert.equal(row.status, 'completed')
+    assert.equal(typeof row.durationMs, 'number')
+    // traceId 必须能反解回 jobId —— 否则审计日志里的 trace 串不起来
+    assert.equal(jobIdFromTrace(String(row.traceId)), job.id)
+  })
+
+  it('失败一轮**同样**记账（只记成功会让失败调查在审计里消失）', async () => {
+    const jobStore = createMemoryJobStore()
+    const usage = createMemoryUsageStore()
+    const job = await jobStore.create({
+      userId: 'bob',
+      cwd: '/srv/workspace',
+      kind: 'chat',
+      payload: { message: 'boom' },
+    })
+    await jobStore.claim({ assignee: 'w1' })
+
+    const exec = createJobExecutor({
+      jobStore,
+      usage,
+      sessionStore: fakeSessionStore().store,
+      cwd: '/srv/workspace',
+      model: fakeModel,
+      turnRunner: async () => {
+        throw new Error('provider 500')
+      },
+    })
+
+    await assert.rejects(() => exec(job), /500/)
+
+    const rows = await usage.list({ userId: 'bob' })
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0]!.status, 'failed')
+  })
+
+  it('记账失败**不得**把已成功的 job 拖成 failed（审计可降级、job 不可）', async () => {
+    const jobStore = createMemoryJobStore()
+    const brokenUsage = {
+      async record(): Promise<never> {
+        throw new Error('审计库连接失败')
+      },
+      async list(): Promise<never[]> {
+        return []
+      },
+      async summarize(): Promise<never> {
+        throw new Error('unused')
+      },
+    } as unknown as ReturnType<typeof createMemoryUsageStore>
+
+    const errors: string[] = []
+    const job = await jobStore.create({
+      userId: 'u1',
+      cwd: '/srv/workspace',
+      kind: 'chat',
+      payload: { message: 'x' },
+    })
+    await jobStore.claim({ assignee: 'w1' })
+
+    const exec = createJobExecutor({
+      jobStore,
+      usage: brokenUsage,
+      sessionStore: fakeSessionStore().store,
+      cwd: '/srv/workspace',
+      model: fakeModel,
+      log: (level, msg) => {
+        if (level === 'error') errors.push(msg)
+      },
+      turnRunner: async () => [] as ChatMessage[],
+    })
+
+    // 关键断言：exec **不抛**（抛了 Worker 就会把 job 落 failed）
+    await exec(job)
+
+    // 但也不能静默吞掉 —— 必须留下一条错误日志（否则审计缺口无人知晓）
+    assert.equal(errors.length, 1)
+    assert.match(errors[0]!, /审计账本缺一条/)
+    assert.match(errors[0]!, /审计库连接失败/)
+  })
+
+  it('模型名取不到时落 null（不用占位串污染统计）', async () => {
+    const jobStore = createMemoryJobStore()
+    const usage = createMemoryUsageStore()
+    const job = await jobStore.create({
+      userId: 'u1',
+      cwd: '/srv/workspace',
+      kind: 'chat',
+      payload: { message: 'x' },
+    })
+    await jobStore.claim({ assignee: 'w1' })
+
+    const exec = createJobExecutor({
+      jobStore,
+      usage,
+      sessionStore: fakeSessionStore().store,
+      cwd: '/srv/workspace',
+      // 一个没有 model 字段的 adapter —— 探测不到就应落 null
+      model: {} as unknown as Parameters<typeof createJobExecutor>[0]['model'],
+      turnRunner: async () => [] as ChatMessage[],
+    })
+
+    await exec(job)
+    const rows = await usage.list({ userId: 'u1' })
+    assert.equal(rows[0]!.model, null)
+  })
+
+  it('不传 usage 时不记账、也不报错（单测 / CLI 场景）', async () => {
+    const jobStore = createMemoryJobStore()
+    const job = await jobStore.create({ userId: 'u1', cwd: '/srv/workspace', kind: 'chat' })
+    await jobStore.claim({ assignee: 'w1' })
+    const exec = createJobExecutor({
+      jobStore,
+      sessionStore: fakeSessionStore().store,
+      cwd: '/srv/workspace',
+      model: fakeModel,
+      turnRunner: async () => [] as ChatMessage[],
+    })
+    await exec(job) // 不抛即可
   })
 })
 

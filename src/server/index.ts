@@ -12,6 +12,7 @@ import { createMemoryJobStore } from '../jobs/memory-store.js'
 import { createPgJobStore } from '../jobs/pg-store.js'
 import type { JobStore } from '../jobs/store.js'
 import type { Job } from '../jobs/types.js'
+import { createMemoryUsageStore, createPgUsageStore, type UsageStore } from '../usage/index.js'
 import { createWorker, type Worker } from '../jobs/worker.js'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
@@ -42,6 +43,12 @@ export type ServeOptions = {
   apiKeys?: readonly ApiKeyEntry[]
   /** 外部注入 store（测试用）；缺省按 DATABASE_URL 自动选。 */
   store?: JobStore
+  /**
+   * 用量 / 审计账本（T7）。**与 `store` 独立选择**：审计要求持久化，
+   * 而 job 队列可以容忍内存形态，所以两者的降级策略不能绑死。
+   * 缺省按 `DATABASE_URL` 自动选 —— 有 PG 用 PG，没有则内存并**显式告警**。
+   */
+  usage?: UsageStore
   /**
    * Worker 执行器（T5 接线 `runAgentTurn`）。
    * 缺省时用一个**明确抛错**的占位实现 —— 让缺接线这件事暴露成 failed，
@@ -111,6 +118,25 @@ async function selectStore(opts: ServeOptions): Promise<{
 }
 
 /**
+ * 选用量账本实现（T7）。
+ *
+ * **与 `selectStore`（job 队列）分开判断，但共用同一份 PG 配置来源**：
+ * 审计数据与队列数据的持久化要求不同 —— 队列用内存只是"重启后任务丢了、重发即可"，
+ * 而审计用内存等于**合规检查时拿不出记录**。所以这里即使 job 队列是内存，
+ * 只要配了 PG 就仍然把账本写到 PG；反之，**job 队列是 PG 而账本是内存**才是
+ * 最危险的组合（运维看到 PG 连上了就以为一切持久化），必须显式告警。
+ */
+function selectUsage(opts: ServeOptions, jobStoreIsPg: boolean): UsageStore {
+  if (opts.usage !== undefined) return opts.usage
+  if (jobStoreIsPg) return createPgUsageStore(requirePgPool(process.env))
+  console.warn(
+    '[serve] 未检测到 Postgres：审计用量写入**内存**（重启即丢）。' +
+      '这只适合本机演示 —— 生产环境的用量/审计账本必须落 PG，否则合规检查时无据可查。',
+  )
+  return createMemoryUsageStore()
+}
+
+/**
  * 真实执行器装配（T5）。
  *
  * 模型选择沿用 `diagnose.ts` 的约定：`LITE_AI_MODEL_MODE=mock` 时用 MockModelAdapter
@@ -125,12 +151,14 @@ async function selectStore(opts: ServeOptions): Promise<{
 async function defaultExecute(
   store: JobStore,
   cwd: string,
+  usage: UsageStore,
 ): Promise<(job: Job) => Promise<void>> {
   const { createJobExecutor } = await import('../jobs/exec.js')
   const { getSessionStore } = await import('../session.js')
 
   return createJobExecutor({
     jobStore: store,
+    usage,
     sessionStore: getSessionStore(),
     cwd,
     model: async ({ tools }) => {
@@ -197,11 +225,16 @@ export async function runServe(opts: ServeOptions): Promise<void> {
 
   const { store, ready, dispose } = await selectStore(opts)
 
+  // T7：用量 / 审计账本。与 job 队列**独立选择**（见 selectUsage 的说明）。
+  const jobStoreIsPg = resolvePgConfigFromEnv(process.env) !== null
+  const usage = selectUsage(opts, jobStoreIsPg)
+
   // T10：托管前端（若已构建）。缺失不是错误 —— 纯 API 部署照常工作。
   const webRoot = resolveWebRoot(opts.webRoot)
 
   const app = createServerApp({
     store,
+    usage,
     cwd: opts.cwd,
     ready,
     auth: { keys: apiKeys },
@@ -212,7 +245,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
   // ── Worker 装配（T4）+ 执行器接线（T5）──
   // 真实执行器 = `createJobExecutor`：组装 runAgentTurn（唯一一份调查逻辑）
   // 并把回调翻译成 job_events。测试/嵌入方可用 `opts.execute` 覆盖。
-  const execute = opts.execute ?? (await defaultExecute(store, opts.cwd))
+  const execute = opts.execute ?? (await defaultExecute(store, opts.cwd, usage))
   const worker: Worker = createWorker({
     store,
     assignee: `${os.hostname()}-${process.pid}`,
@@ -231,6 +264,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       console.log('[serve]   POST /chat            入队（202 + jobId）')
       console.log('[serve]   GET  /jobs/:id         状态 + 事件增量（?after=<seq>）')
       console.log('[serve]   GET  /jobs/:id/stream  SSE 事件流')
+      console.log('[serve]   GET  /usage           用量 / 审计账本（T7）')
       console.log('[serve]   GET  /healthz /readyz  健康/就绪（免鉴权）')
       console.log(`[serve]   worker ${os.hostname()}-${process.pid} 已启动（消费 jobs 队列）`)
       if (webRoot !== undefined) {
