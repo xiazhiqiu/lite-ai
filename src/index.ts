@@ -10,6 +10,7 @@ import {
 } from './cli-commands.js'
 import { loadRuntimeConfig, loadWebhookConfig } from './config.js'
 import { runWebhookServer } from './webhook/index.js'
+import { runServe } from './server/index.js'
 import { forkSession } from './session.js'
 import { maybeHandleManagementCommand } from './manage-cli.js'
 import { summarizeMcpServers } from './mcp-status.js'
@@ -65,7 +66,29 @@ async function main(): Promise<void> {
     return
   }
 
+  // --serve [port]：常驻服务端模式（异步 job 队列 + HTTP API + SSE）。
+  const serveIndex = argv.indexOf('--serve')
+  if (serveIndex !== -1) {
+    argv.splice(serveIndex, 1)
+    let portOverride: number | undefined
+    const nextArg = argv[serveIndex]
+    if (nextArg && /^\d+$/.test(nextArg)) {
+      portOverride = Number(nextArg)
+      argv.splice(serveIndex, 1)
+    }
+    const config = await loadWebhookConfig()
+    await runServe({
+      cwd,
+      port: portOverride ?? config.port,
+      host: config.host,
+      secret: config.secret,
+    })
+    return
+  }
+
   // --webhook [port]：进入告警监听独立进程模式。
+  // ⚠️ deprecated：请改用 --serve（T3 的 G7 决策把告警摄入合并进服务端，
+  // 避免运维跑两个进程、两个并发池）。此分支保留作过渡期兼容。
   const webhookIndex = argv.indexOf('--webhook')
   if (webhookIndex !== -1) {
     argv.splice(webhookIndex, 1)
