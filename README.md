@@ -260,6 +260,52 @@ pull: provider.poll() → Alert[]   ┘
 - **恢复（`resolved`）只做收敛、不触发 RCA**：某个事件的全部成员都收到源侧恢复才关闭；否则最多等 30 分钟 TTL 收敛。恢复通知不消耗 token。
 - **已知取舍**：`Alert.id`（去重 fingerprint）只由 `alertname + labels` 派生、**不含 `source`** —— 因此不同源上报的同名同标签信号会被视为同一条告警而合并。这是有意为之（同一故障从多个监控系统进来时正该收敛），但需要按源区分时应在上游标签里带上来源维度。
 
+## 服务端形态与部署（`--serve`）
+
+除本地 CLI 外，LiteAI 还能以**常驻服务端**运行：HTTP API + 异步 job 队列 + SSE 实时调查流 + 内置 Worker，前端值班台同源托管。
+
+```bash
+# 先构建前端值班台（服务端会托管 dist/web）
+npm run build:web
+
+# 启动服务端；前端同源，不跨域
+DATABASE_URL=postgres://user:pw@db:5432/lite_ai \
+LITE_AI_API_KEYS="<key1>:alice,<key2>:bob" \
+node --import tsx src/index.ts --serve 8080
+```
+
+| 端点 | 说明 |
+| --- | --- |
+| `POST /chat` | 入队，**立刻返回 202 + jobId**（执行是 Worker 的事） |
+| `GET /jobs` | 当前用户的 job 列表（`userId` 只取自鉴权身份，查询串传 `?userId=` 被忽略） |
+| `GET /jobs/:id?after=<seq>` | 状态快照 + 事件**增量** |
+| `GET /jobs/:id/stream` | SSE 事件流（工具调用 / 证据 / 结论逐条推） |
+| `GET /usage` | 用量与审计账本 |
+| `GET /healthz` `GET /readyz` | 健康 / 就绪（**免鉴权**，给探针用） |
+| `GET /` | 前端值班台（构建后才有） |
+
+绑定非回环地址时**强制要求** API key，否则拒绝启动（fail-closed）。单 secret 形态（`webhook.secret`）仍兼容，但会降级为单一身份 `operator`、per-user 隔离失效并打告警。
+
+### ⚠️ 部署前必须知道的三件事
+
+1. **SSE 必须关闭反向代理缓冲**。否则事件被攒着不下发，前端一直空转而**服务端日志一切正常** —— 最难查的一类故障。服务端已主动下 `X-Accel-Buffering: no` 与 `Cache-Control: no-transform`，但反代侧仍要显式确认：nginx 需 `proxy_buffering off` 且 `proxy_read_timeout` 留够（长连接别被默认 60s 掐断）；Ingress-nginx 需 `proxy-buffering: "off"` 注解。
+2. **`run_command` 语义已变**：CLI 时代它跑在**用户本地**；中央化后跑在**服务进程所在机器**（`cwd` = 服务端工作区）。这不是"远程控制你的电脑"，是"让中央服务替你查它能看到的数据源"。服务端工具集已被收窄为只读子集并摘掉 `ask_user`（无交互通道，任何询问都等于挂死）。
+3. **凭证一律走环境变量、不落盘**：`DATABASE_URL` 或标准 `PG*` 变量二选一；鉴权用 `LITE_AI_API_KEYS`。
+
+### 三个存储的降级策略互不相同
+
+| 组件 | 无 PG 时 | 风险 |
+| --- | --- | --- |
+| job 队列 | 内存（重启即丢、多实例不共享） | 只是任务丢了，重发即可 |
+| 用量 / 审计账本 | 内存（重启即丢） | ⚠️ **合规检查时拿不出记录** |
+| 会话存储 | 自动回退 `file` | 多实例不共享同一会话 |
+
+「job 队列是 PG 而账本是内存」是最危险的组合，服务端会显式告警。会话后端可用 `LITE_AI_SESSION_BACKEND=pg|file` 显式指定，**非法值抛错而非静默回退**（打错配置要炸在启动阶段）。
+
+多实例部署时每个实例自带 Worker，job 靠 PG 原子 claim 保证不重复；实例猝死遗留的 `running` job 由 stale sweep 打回 `pending`（租期默认 5 分钟，必须明显大于一次调查耗时，否则会重跑、烧两次 token）。关停顺序是「停 claim → 等在途跑完 → 关连接与池」，所以 `terminationGracePeriodSeconds` 要留够。
+
+> `--webhook` 仍可用但已 deprecated：它与 `--serve` 是两个进程、两个并发池，同时跑会让 LLM 配额实际翻倍。**合并前严禁两进程共存。**
+
 ## 只读安全边界
 
 LiteAI 默认**只读优先**，放心用于生产排查：
