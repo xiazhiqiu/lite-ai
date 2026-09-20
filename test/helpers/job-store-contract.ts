@@ -252,5 +252,59 @@ export function runJobStoreContract(name: string, makeStore: () => JobStore): vo
       assert.equal((await store.listEvents(a.id)).length, 1)
       assert.equal((await store.listEvents(b.id))[0]!.kind, 'y')
     })
+
+    // ---- 批量追加（T5）：一次 turn 里数百条工具事件靠它压掉逐条 IO ----
+    it('appendEvents writes the whole batch with contiguous increasing seq', async () => {
+      const job = await store.create(baseJob(), 1000)
+      const batch = await store.appendEvents!(job.id, [
+        { kind: 'tool_start', payload: { tool: 'a' } },
+        { kind: 'tool_result', payload: { tool: 'a', ok: true } },
+        { kind: 'assistant_message', payload: { content: 'done' } },
+      ], 1100)
+
+      assert.equal(batch.length, 3)
+      assert.deepEqual(batch.map(e => e.seq), [1, 2, 3])
+      assert.deepEqual(
+        batch.map(e => e.kind),
+        ['tool_start', 'tool_result', 'assistant_message'],
+        '返回顺序必须与入参顺序一一对应（前端按序渲染）',
+      )
+      assert.equal(batch[0]!.jobId, job.id)
+      assert.equal(batch[2]!.payload.content, 'done')
+    })
+
+    it('appendEvents continues from the existing max seq', async () => {
+      const job = await store.create(baseJob(), 1000)
+      await store.appendEvent(job.id, 'before', {}, 1050)
+      const batch = await store.appendEvents!(job.id, [
+        { kind: 'a', payload: {} },
+        { kind: 'b', payload: {} },
+      ], 1100)
+
+      assert.deepEqual(batch.map(e => e.seq), [2, 3])
+      // 读回来也必须是连续 1,2,3 —— 中间不能有洞
+      assert.deepEqual(
+        (await store.listEvents(job.id)).map(e => e.seq),
+        [1, 2, 3],
+      )
+    })
+
+    it('appendEvents with an empty batch is a no-op', async () => {
+      const job = await store.create(baseJob(), 1000)
+      assert.deepEqual(await store.appendEvents!(job.id, [], 1100), [])
+      assert.equal((await store.listEvents(job.id)).length, 0)
+    })
+
+    it('appendEvents is scoped to its own job', async () => {
+      const a = await store.create(baseJob(), 1000)
+      const b = await store.create(baseJob(), 1001)
+      await store.appendEvents!(a.id, [
+        { kind: 'x', payload: {} },
+        { kind: 'y', payload: {} },
+      ], 1100)
+
+      assert.equal((await store.listEvents(a.id)).length, 2)
+      assert.equal((await store.listEvents(b.id)).length, 0)
+    })
   })
 }

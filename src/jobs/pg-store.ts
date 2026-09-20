@@ -202,5 +202,41 @@ export function createPgJobStore(pool: pg.Pool): JobStore {
       )
       return rows.map(toEvent)
     },
+
+    /**
+     * 批量追加（T5）：一条 `INSERT ... SELECT` 写完整批。
+     *
+     * 为什么必须是**单条语句**：seq 靠 `MAX(seq)+1` 现算，若逐条 INSERT，
+     * 中间会有别的写者插入（并发 append 同一 job）→ 整批 seq 被打散，
+     * 且并发下 `(job_id, seq)` 主键冲突导致部分成功（半批写入）。
+     *
+     * 用 `generate_series` + `row_number()` 在**一条语句的同一快照**里算出连续 seq，
+     * `unnest` 展开 kind/payload。整条语句是原子的：要么全写入，要么一条都不写。
+     */
+    async appendEvents(
+      jobId: string,
+      entries: ReadonlyArray<{ kind: string; payload: Record<string, unknown> }>,
+      at?: number,
+    ): Promise<JobEvent[]> {
+      if (entries.length === 0) return []
+      const kinds = entries.map(e => e.kind)
+      const payloads = entries.map(e => JSON.stringify(e.payload))
+      const { rows } = await pool.query<EventRow>(
+        `WITH base AS (
+           SELECT COALESCE((SELECT MAX(seq) FROM job_events WHERE job_id = $1), 0) AS max_seq
+         ), input AS (
+           SELECT kind, payload, ordinality
+             FROM unnest($2::text[], $3::jsonb[]) WITH ORDINALITY AS t(kind, payload, ordinality)
+         )
+         INSERT INTO job_events (job_id, seq, kind, payload, created_at)
+         SELECT $1, base.max_seq + input.ordinality, input.kind, input.payload, $4
+           FROM input CROSS JOIN base
+         RETURNING *`,
+        [jobId, kinds, payloads, now(at)],
+      )
+      // RETURNING 顺序不保证等于插入顺序 → 显式按 seq 排序，
+      // 以满足契约「返回顺序与入参顺序一一对应」。
+      return rows.map(toEvent).sort((a, b) => a.seq - b.seq)
+    },
   }
 }

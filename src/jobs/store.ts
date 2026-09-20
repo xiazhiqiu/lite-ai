@@ -83,4 +83,20 @@ export type JobStore = {
 
   /** 取事件增量：`seq > afterSeq`，按 seq 升序。 */
   listEvents(jobId: string, afterSeq?: number): Promise<JobEvent[]>
+
+  /**
+   * **批量**追加事件（T5）。一次 turn 里工具事件可达数百条，逐条 `appendEvent`
+   * 会把 DB 往返打成瓶颈（PG 实现下每条都是一次网络往返）。
+   *
+   * 语义约束：
+   * - 返回顺序与入参顺序**一一对应**，`seq` 在同一批内连续递增、且严格大于批前最大 seq。
+   * - **原子性**：整批要么都写入，要么都不写。半批写入会让 SSE 客户端拿到
+   *   缺号的事件流（`Last-Event-ID` 之后永远等不到那个 seq）。
+   * - 可选实现：缺省时调用方应回退到逐条 `appendEvent`。内存/PG 实现均提供。
+   */
+  appendEvents?(
+    jobId: string,
+    entries: ReadonlyArray<{ kind: string; payload: Record<string, unknown> }>,
+    now?: number,
+  ): Promise<JobEvent[]>
 }

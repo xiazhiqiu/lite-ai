@@ -153,5 +153,31 @@ export function createMemoryJobStore(): JobStore {
         .filter(event => event.seq > afterSeq)
         .map(event => ({ ...event, payload: { ...event.payload } }))
     },
+
+    /**
+     * 批量追加（T5）。整段同步无 await —— 保证一批的 seq 连续、不与他批交错。
+     * 但**先全量构造再一次性 push**：避免中途抛错造成"半批写入"。
+     */
+    async appendEvents(
+      jobId: string,
+      entries: ReadonlyArray<{ kind: string; payload: Record<string, unknown> }>,
+      at?: number,
+    ): Promise<JobEvent[]> {
+      if (entries.length === 0) return []
+      const base = nextSeq(jobId)
+      const ts = now(at)
+      // 构造阶段不触碰存储：任一条构造失败都不会留下半批。
+      const batch: JobEvent[] = entries.map((entry, index) => ({
+        jobId,
+        seq: base + index,
+        kind: entry.kind,
+        payload: { ...entry.payload },
+        createdAt: ts,
+      }))
+      const list = events.get(jobId)
+      if (list === undefined) events.set(jobId, [...batch])
+      else list.push(...batch)
+      return batch.map(event => ({ ...event, payload: { ...event.payload } }))
+    },
   }
 }

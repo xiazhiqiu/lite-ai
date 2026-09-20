@@ -93,6 +93,52 @@ async function selectStore(opts: ServeOptions): Promise<{
   }
 }
 
+/**
+ * 真实执行器装配（T5）。
+ *
+ * 模型选择沿用 `diagnose.ts` 的约定：`LITE_AI_MODEL_MODE=mock` 时用 MockModelAdapter
+ * （离线演示 / 冒烟测试），否则按运行时 provider 建真实 adapter。
+ *
+ * 模型走**工厂**而非实例：adapter 构造需要 tools（见 `diagnose.ts:40-52`），
+ * 而 tools 要到每次执行时才装配。工厂形态也让"服务启动"与"建模型客户端"解耦 ——
+ * 模型配置错误不该让 `/healthz` 起不来，而应落到那次 job 的 failed 上。
+ *
+ * 懒加载：只有真要跑 job 时才 import agent 栈。
+ */
+async function defaultExecute(
+  store: JobStore,
+  cwd: string,
+): Promise<(job: Job) => Promise<void>> {
+  const { createJobExecutor } = await import('../jobs/exec.js')
+  const { getSessionStore } = await import('../session.js')
+
+  return createJobExecutor({
+    jobStore: store,
+    sessionStore: getSessionStore(),
+    cwd,
+    model: async ({ tools }) => {
+      if (process.env.LITE_AI_MODEL_MODE === 'mock') {
+        const { MockModelAdapter } = await import('../mock-model.js')
+        return new MockModelAdapter()
+      }
+      const { loadRuntimeConfig } = await import('../config.js')
+      const runtime = await loadRuntimeConfig()
+      if (runtime.provider === 'openai') {
+        const { OpenAIModelAdapter } = await import('../openai-adapter.js')
+        return new OpenAIModelAdapter(tools, loadRuntimeConfig)
+      }
+      const { AnthropicModelAdapter } = await import('../anthropic-adapter.js')
+      return new AnthropicModelAdapter(tools, loadRuntimeConfig)
+    },
+    modelName: process.env.LITE_AI_MODEL_MODE === 'mock' ? 'mock' : '',
+    log: (level, message) => {
+      if (level === 'error') console.error(message)
+      else if (level === 'warn') console.warn(message)
+      else console.log(message)
+    },
+  })
+}
+
 export async function runServe(opts: ServeOptions): Promise<void> {
   const host = opts.host
 
@@ -112,28 +158,16 @@ export async function runServe(opts: ServeOptions): Promise<void> {
     abortSignal: opts.abortSignal,
   })
 
-  // ── Worker 装配（T4）──
-  // 真正的执行器（调 runAgentTurn + 事件回写）属 T5；这里先接一个占位实现，
-  // 让"入队 → 被消费 → 落终态"这条链路在服务里真实跑通（不再有 job 永远 pending）。
-  // 占位实现**明确落 failed**而非 completed —— 绝不能让"没真跑"看起来像"跑成功了"。
-  const worker: Worker =
-    opts.execute === undefined
-      ? createWorker({
-          store,
-          assignee: `${os.hostname()}-${process.pid}`,
-          execute: async job => {
-            throw new Error(
-              `[serve] Worker 执行器尚未接线（T5 待实现）——job ${job.id} 未被执行`,
-            )
-          },
-          pollMs: opts.workerPollMs,
-        })
-      : createWorker({
-          store,
-          assignee: `${os.hostname()}-${process.pid}`,
-          execute: opts.execute,
-          pollMs: opts.workerPollMs,
-        })
+  // ── Worker 装配（T4）+ 执行器接线（T5）──
+  // 真实执行器 = `createJobExecutor`：组装 runAgentTurn（唯一一份调查逻辑）
+  // 并把回调翻译成 job_events。测试/嵌入方可用 `opts.execute` 覆盖。
+  const execute = opts.execute ?? (await defaultExecute(store, opts.cwd))
+  const worker: Worker = createWorker({
+    store,
+    assignee: `${os.hostname()}-${process.pid}`,
+    execute,
+    pollMs: opts.workerPollMs,
+  })
   worker.start()
 
   await new Promise<void>((resolve, reject) => {
