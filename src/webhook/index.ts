@@ -12,6 +12,7 @@ import { timingSafeEqual } from 'node:crypto'
 import type { WebhookConfig } from '../config.js'
 import { routeAlertSource } from './sources/index.js'
 import { IngestPipeline } from '../ingest/pipeline.js'
+import type { BoundedPool } from '../jobs/pool.js'
 import { runAlertDiagnosis, type DiagnosisResult } from './diagnose.js'
 import type { Alert, Incident } from './types.js'
 
@@ -25,6 +26,12 @@ export type WebhookServerOptions = {
    * 事件级诊断时第二个参数为 Incident（sessionId 取 incidentId）；单条诊断时不传。
    */
   diagnose?: (alert: Alert, incident?: Incident) => Promise<DiagnosisResult>
+  /**
+   * 注入并发池（测试用）。缺省用进程级全局单例（plan G1）——
+   * 生产路径下摄入管道与 Worker **必须共用同一个池**，否则 provider
+   * 实际看到的并发会是两池之和。测试注入可隔离不同用例的限流上限。
+   */
+  pool?: BoundedPool
   /** 外部触发优雅关闭（测试可注入）；与 SIGINT/SIGTERM 等效 */
   abortSignal?: AbortSignal
 }
@@ -96,6 +103,7 @@ export async function runWebhookServer(
       opts.diagnose ??
       ((alert: Alert, incident?: Incident) =>
         runAlertDiagnosis({ cwd: opts.cwd, alert, incident })),
+    pool: opts.pool,
   })
   pipeline.start()
 

@@ -441,6 +441,9 @@ test('HTTP: 有界并发池按 maxConcurrentDiagnoses 限流且全部完成', as
   let maxActive = 0
 
   const { runWebhookServer } = await import('../src/webhook/index.js')
+  // 注入私有池：全局池（plan G1）的上限由首次调用者决定，无法在同一进程里
+  // 既验证 limit=3 又验证 limit=2。这里注入专属池，使断言"峰值并发恰为 2"成立。
+  const { BoundedPool } = await import('../src/jobs/pool.js')
   const serverPromise = runWebhookServer({
     cwd: SRE_CWD,
     config: {
@@ -450,6 +453,7 @@ test('HTTP: 有界并发池按 maxConcurrentDiagnoses 限流且全部完成', as
       maxConcurrentDiagnoses: 2,
       notifyHeaders: {},
     },
+    pool: new BoundedPool(2, () => {}),
     abortSignal: controller.signal,
     diagnose: async alert => {
       active += 1

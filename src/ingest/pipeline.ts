@@ -37,6 +37,7 @@ import { runAlertDiagnosis, type DiagnosisResult } from '../webhook/diagnose.js'
 import type { Alert, Incident } from '../webhook/types.js'
 import { createSourceProviders } from './provider.js'
 import { startPullScheduler } from './scheduler.js'
+import { getGlobalPool, type BoundedPool } from '../jobs/pool.js'
 
 /** 管道所需的配置子集（与 HTTP 监听参数 port/host/secret 无关）。 */
 export type IngestConfig = Pick<
@@ -74,63 +75,24 @@ export type IngestPipelineOptions = {
   now?: () => number
   /** 注入日志（测试静音 / 结构化收集）。 */
   log?: (level: 'log' | 'warn' | 'error', message: string) => void
+  /**
+   * 注入并发池。**缺省用进程级全局单例**（`getGlobalPool`，plan G1）——
+   * 生产路径必须共用同一个池，否则 provider 看到的并发会翻倍。
+   *
+   * 仅**测试**需要注入私有池：全局池一旦建立，其 `limit` 就固定为首次调用值，
+   * 而不同测试用例会各自断言不同的上限（如 2 与 3）。注入让每个用例拥有
+   * 独立的池，从而能在同一进程里验证"限流确实按传入值生效"。
+   */
+  pool?: BoundedPool
 }
 
 /**
- * 有界并发池：不同告警并行、同告警串行；上限防告警风暴打爆 LLM 配额。
- * 与摄入管道同生命周期（pull provider 复用同一池，全局限流才成立）。
+ * 有界并发池已抽到 `src/jobs/pool.ts`（T4，plan G1）——**全局单例**。
+ *
+ * 原因：服务化后 Worker 也要跑诊断，如果 Worker 再 new 一个池，两个池各自限流会让
+ * LLM provider 实际看到的并发 = 两池之和（全局配额翻倍）。池必须是进程级的。
+ * 本管道通过 `getGlobalPool()` 取用与 Worker 同一个实例。
  */
-class BoundedPool {
-  private active = 0
-  private readonly pending: Array<() => Promise<void>> = []
-  private resolveDrained: (() => void) | null = null
-
-  constructor(
-    private readonly limit: number,
-    private readonly onError: (message: string) => void,
-  ) {}
-
-  enqueue(task: () => Promise<void>): void {
-    this.pending.push(task)
-    this.drain()
-  }
-
-  /** 等待池排空（优雅关停用）。 */
-  drained(): Promise<void> {
-    return new Promise<void>(resolve => {
-      if (this.active === 0 && this.pending.length === 0) {
-        resolve()
-        return
-      }
-      this.resolveDrained = resolve
-    })
-  }
-
-  private drain(): void {
-    while (this.active < this.limit && this.pending.length > 0) {
-      const task = this.pending.shift()!
-      this.active += 1
-      void task()
-        .catch(error => {
-          this.onError(error instanceof Error ? error.message : String(error))
-        })
-        .finally(() => {
-          this.active -= 1
-          this.drain()
-          this.notifyIfIdle()
-        })
-    }
-    this.notifyIfIdle()
-  }
-
-  private notifyIfIdle(): void {
-    if (this.active === 0 && this.pending.length === 0 && this.resolveDrained) {
-      const resolve = this.resolveDrained
-      this.resolveDrained = null
-      resolve()
-    }
-  }
-}
 
 /**
  * 告警摄入管道。
@@ -177,10 +139,15 @@ export class IngestPipeline {
       opts.diagnose ??
       ((alert: Alert, incident?: Incident) =>
         runAlertDiagnosis({ cwd: this.cwd, alert, incident }))
-    this.pool = new BoundedPool(
-      config.maxConcurrentDiagnoses ?? DEFAULT_MAX_CONCURRENT_DIAGNOSES,
-      message => this.log('error', `[webhook] 诊断失败: ${message}`),
-    )
+    // 全局单例池（plan G1）：Worker 与摄入管道共用同一个限流上限，
+    // 否则两个池各自限流会让 provider 实际看到的并发翻倍。
+    // 测试可注入私有池（见 IngestPipelineOptions.pool 注释）。
+    this.pool =
+      opts.pool ??
+      getGlobalPool(
+        config.maxConcurrentDiagnoses ?? DEFAULT_MAX_CONCURRENT_DIAGNOSES,
+        message => this.log('error', `[webhook] 诊断失败: ${message}`),
+      )
   }
 
   /**

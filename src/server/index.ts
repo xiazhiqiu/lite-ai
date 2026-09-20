@@ -6,10 +6,13 @@
  * （选 JobStore、接 PG、装信号处理），两者关注点不同、测试方式也不同。
  */
 import type http from 'node:http'
+import os from 'node:os'
 import { requirePgPool, pingPg, resolvePgConfigFromEnv } from '../db/pool.js'
 import { createMemoryJobStore } from '../jobs/memory-store.js'
 import { createPgJobStore } from '../jobs/pg-store.js'
 import type { JobStore } from '../jobs/store.js'
+import type { Job } from '../jobs/types.js'
+import { createWorker, type Worker } from '../jobs/worker.js'
 import { createServerApp, MAX_BODY_BYTES } from './http.js'
 
 export type ServeOptions = {
@@ -24,6 +27,14 @@ export type ServeOptions = {
   secret?: string
   /** 外部注入 store（测试用）；缺省按 DATABASE_URL 自动选。 */
   store?: JobStore
+  /**
+   * Worker 执行器（T5 接线 `runAgentTurn`）。
+   * 缺省时用一个**明确抛错**的占位实现 —— 让缺接线这件事暴露成 failed，
+   * 而不是静默假装成功。
+   */
+  execute?: (job: Job) => Promise<void>
+  /** Worker claim 轮询间隔（测试可调）。 */
+  workerPollMs?: number
   /** 外部触发关闭。 */
   abortSignal?: AbortSignal
 }
@@ -101,6 +112,30 @@ export async function runServe(opts: ServeOptions): Promise<void> {
     abortSignal: opts.abortSignal,
   })
 
+  // ── Worker 装配（T4）──
+  // 真正的执行器（调 runAgentTurn + 事件回写）属 T5；这里先接一个占位实现，
+  // 让"入队 → 被消费 → 落终态"这条链路在服务里真实跑通（不再有 job 永远 pending）。
+  // 占位实现**明确落 failed**而非 completed —— 绝不能让"没真跑"看起来像"跑成功了"。
+  const worker: Worker =
+    opts.execute === undefined
+      ? createWorker({
+          store,
+          assignee: `${os.hostname()}-${process.pid}`,
+          execute: async job => {
+            throw new Error(
+              `[serve] Worker 执行器尚未接线（T5 待实现）——job ${job.id} 未被执行`,
+            )
+          },
+          pollMs: opts.workerPollMs,
+        })
+      : createWorker({
+          store,
+          assignee: `${os.hostname()}-${process.pid}`,
+          execute: opts.execute,
+          pollMs: opts.workerPollMs,
+        })
+  worker.start()
+
   await new Promise<void>((resolve, reject) => {
     app.server.once('error', reject)
     app.server.listen(opts.port, host, () => {
@@ -112,6 +147,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       console.log('[serve]   GET  /jobs/:id         状态 + 事件增量（?after=<seq>）')
       console.log('[serve]   GET  /jobs/:id/stream  SSE 事件流')
       console.log('[serve]   GET  /healthz /readyz  健康/就绪（免鉴权）')
+      console.log(`[serve]   worker ${os.hostname()}-${process.pid} 已启动（消费 jobs 队列）`)
       resolve()
     })
   })
@@ -122,9 +158,16 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       if (shuttingDown) return
       shuttingDown = true
       console.log('[serve] 收到退出信号，关闭 ...')
+      // 顺序很重要：先停 claim（不再接新活），等在途 job 跑完，最后关连接与池。
+      // 反过来的话，正在执行的 job 会被拦腰砍断，而它已经占着 running 状态，
+      // 只能等租期超时才被回收 —— 白白浪费一次已完成的调查。
+      worker.stop()
       app.server.close()
       app.server.closeAllConnections?.()
-      void dispose().then(() => resolve())
+      void worker
+        .drained()
+        .then(() => dispose())
+        .then(() => resolve())
     }
     process.on('SIGINT', shutdown)
     process.on('SIGTERM', shutdown)
