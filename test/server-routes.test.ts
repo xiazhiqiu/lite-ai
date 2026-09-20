@@ -4,14 +4,25 @@
  * 与 T2 同样的取向：队列的可用性必须能在任何环境被真实证明，而不是因为
  * CI 里没有 PG 就 skip 掉。所有用例都对着真实 `http.createServer` 发请求
  * （真监听回环端口 + 真 fetch），不打桩路由内部函数——测的是**线上那条路径**。
+ *
+ * 【T6 起】所有业务端点都要求身份。本文件统一用 `TEST_KEY` 里的那个 key，
+ * `AUTH` 预置请求头；只有专门的鉴权用例才故意不带。
  */
 import assert from 'node:assert/strict'
 import { after, before, describe, it } from 'node:test'
 import type { AddressInfo } from 'node:net'
 import { createMemoryJobStore } from '../src/jobs/memory-store.js'
 import type { JobStore } from '../src/jobs/store.js'
+import type { ApiKeyEntry } from '../src/server/auth.js'
 import { createServerApp } from '../src/server/http.js'
 import type { ServerApp } from '../src/server/http.js'
+
+/** 本文件统一身份：`u1`（与既有断言里的 `userId: 'u1'` 对齐）。 */
+const TEST_USER = 'u1'
+const TEST_KEY = 'test-key-u1'
+const TEST_KEYS: ApiKeyEntry[] = [{ key: TEST_KEY, userId: TEST_USER }]
+/** 业务请求的预置头（含身份）。 */
+const AUTH = { authorization: `Bearer ${TEST_KEY}` }
 
 /** 起一个真实监听回环端口的 app，返回 baseUrl 与关闭函数。 */
 async function startApp(overrides: { store?: JobStore; ready?: () => Promise<boolean> } = {}) {
@@ -20,6 +31,7 @@ async function startApp(overrides: { store?: JobStore; ready?: () => Promise<boo
     store,
     cwd: '/srv/workspace',
     ready: overrides.ready,
+    auth: { keys: TEST_KEYS },
   })
   await new Promise<void>((resolve, reject) => {
     app.server.once('error', reject)
@@ -48,7 +60,7 @@ describe('POST /chat', () => {
   it('入队后立即返回 202 + jobId（异步队列核心语义，不做长连接阻塞）', async () => {
     const res = await fetch(`${ctx.baseUrl}/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ message: '为什么 api 延迟升高了？' }),
     })
     // 202 而非 200 —— 语义是"已受理、还没跑完"，这是异步队列与同步端点的分界线
@@ -61,7 +73,7 @@ describe('POST /chat', () => {
   it('新建的 job 落库为 pending，且带上提交者与消息内容', async () => {
     const res = await fetch(`${ctx.baseUrl}/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ message: '第二个问题' }),
     })
     const { jobId } = (await res.json()) as { jobId: string }
@@ -77,14 +89,14 @@ describe('POST /chat', () => {
   it('【G2 多轮续接】传 sessionId 时复用该会话，而不是新建', async () => {
     const first = await fetch(`${ctx.baseUrl}/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ message: '第一轮' }),
     })
     const { sessionId } = (await first.json()) as { sessionId: string }
 
     const second = await fetch(`${ctx.baseUrl}/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ message: '第二轮追问', sessionId }),
     })
     const body = (await second.json()) as { jobId: string; sessionId: string }
@@ -110,7 +122,7 @@ describe('POST /chat', () => {
     // 值班员接着问 —— 复用同一个 sessionId，这就是"机器先查、人接着问"
     const res = await fetch(`${ctx.baseUrl}/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ message: '那这个和昨天的发布有关吗？', sessionId: 'sin-alert-42' }),
     })
     assert.equal(res.status, 202)
@@ -126,7 +138,7 @@ describe('POST /chat', () => {
     const before = await ctx.store.list()
     const res = await fetch(`${ctx.baseUrl}/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: JSON.stringify({ nope: true }),
     })
     assert.equal(res.status, 400)
@@ -137,14 +149,14 @@ describe('POST /chat', () => {
   it('body 不是合法 JSON 时返回 400', async () => {
     const res = await fetch(`${ctx.baseUrl}/chat`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { ...AUTH, 'content-type': 'application/json' },
       body: '{ not json',
     })
     assert.equal(res.status, 400)
   })
 
   it('GET /chat 返回 405（方法不允许）', async () => {
-    const res = await fetch(`${ctx.baseUrl}/chat`)
+    const res = await fetch(`${ctx.baseUrl}/chat`, { headers: AUTH })
     assert.equal(res.status, 405)
   })
 })
@@ -165,7 +177,7 @@ describe('GET /jobs/:id', () => {
       kind: 'chat',
       payload: { message: 'hi' },
     })
-    const res = await fetch(`${ctx.baseUrl}/jobs/${job.id}`)
+    const res = await fetch(`${ctx.baseUrl}/jobs/${job.id}`, { headers: AUTH })
     assert.equal(res.status, 200)
     const body = (await res.json()) as { job: { id: string; status: string }; events: unknown[] }
     assert.equal(body.job.id, job.id)
@@ -174,7 +186,7 @@ describe('GET /jobs/:id', () => {
   })
 
   it('不存在的 job 返回 404', async () => {
-    const res = await fetch(`${ctx.baseUrl}/jobs/job-does-not-exist`)
+    const res = await fetch(`${ctx.baseUrl}/jobs/job-does-not-exist`, { headers: AUTH })
     assert.equal(res.status, 404)
   })
 
@@ -189,7 +201,7 @@ describe('GET /jobs/:id', () => {
     await ctx.store.appendEvent(job.id, 'tool_result', { ok: true })
     await ctx.store.appendEvent(job.id, 'assistant_message', { text: '结论' })
 
-    const all = await fetch(`${ctx.baseUrl}/jobs/${job.id}`)
+    const all = await fetch(`${ctx.baseUrl}/jobs/${job.id}`, { headers: AUTH })
     const allBody = (await all.json()) as { events: Array<{ seq: number }> }
     assert.equal(allBody.events.length, 3)
     assert.deepEqual(
@@ -198,7 +210,7 @@ describe('GET /jobs/:id', () => {
     )
 
     // seq=1 之后 → 只剩 2、3（前端靠这个做断点续拉）
-    const inc = await fetch(`${ctx.baseUrl}/jobs/${job.id}?after=1`)
+    const inc = await fetch(`${ctx.baseUrl}/jobs/${job.id}?after=1`, { headers: AUTH })
     const incBody = (await inc.json()) as { events: Array<{ seq: number; kind: string }> }
     assert.deepEqual(
       incBody.events.map(e => e.seq),
@@ -226,7 +238,7 @@ describe('GET /jobs/:id/stream（SSE）', () => {
 
       // 带 Last-Event-ID: 1 → 只应收到 seq>1 的事件（断线重连不重复推送）
       const res = await fetch(`${ctx.baseUrl}/jobs/${job.id}/stream`, {
-        headers: { 'last-event-id': '1' },
+        headers: { ...AUTH, 'last-event-id': '1' },
       })
       assert.equal(res.status, 200)
       assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/)
@@ -255,7 +267,7 @@ describe('GET /jobs/:id/stream（SSE）', () => {
       await ctx.store.finish(job.id, 'completed')
 
       // 直接读到底就说明连接被正常关闭了（终态后不再等待）
-      const res = await fetch(`${ctx.baseUrl}/jobs/${job.id}/stream`)
+      const res = await fetch(`${ctx.baseUrl}/jobs/${job.id}/stream`, { headers: AUTH })
       await res.text()
       assert.equal(res.status, 200)
     } finally {
@@ -266,7 +278,7 @@ describe('GET /jobs/:id/stream（SSE）', () => {
   it('不存在的 job 返回 404', async () => {
     const ctx = await startApp()
     try {
-      const res = await fetch(`${ctx.baseUrl}/jobs/job-nope/stream`)
+      const res = await fetch(`${ctx.baseUrl}/jobs/job-nope/stream`, { headers: AUTH })
       assert.equal(res.status, 404)
     } finally {
       await ctx.close()
@@ -307,10 +319,11 @@ describe('/healthz 与 /readyz', () => {
     }
   })
 
-  it('未知路径返回 404', async () => {
+  it('未知路径（带合法身份）返回 404', async () => {
     const ctx = await startApp()
     try {
-      const res = await fetch(`${ctx.baseUrl}/nope`)
+      // T6 起：鉴权在路由之前 —— 带身份才是 404，不带身份会是 401（见 routes-auth.test.ts）
+      const res = await fetch(`${ctx.baseUrl}/nope`, { headers: AUTH })
       assert.equal(res.status, 404)
     } finally {
       await ctx.close()

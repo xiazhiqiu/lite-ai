@@ -13,6 +13,11 @@ import { createPgJobStore } from '../jobs/pg-store.js'
 import type { JobStore } from '../jobs/store.js'
 import type { Job } from '../jobs/types.js'
 import { createWorker, type Worker } from '../jobs/worker.js'
+import {
+  assertAuthConfigForBinding,
+  resolveApiKeysFromEnv,
+  type ApiKeyEntry,
+} from './auth.js'
 import { createServerApp, MAX_BODY_BYTES } from './http.js'
 
 export type ServeOptions = {
@@ -21,10 +26,17 @@ export type ServeOptions = {
   port: number
   host: string
   /**
-   * 共享 secret（T6 会升级为 API key / SSO）。
-   * 绑定非回环地址时**强制要求**，否则拒绝启动（防未授权触发调查）。
+   * 共享 secret（T3 形态）。绑定非回环地址时**强制要求**，否则拒绝启动。
+   *
+   * T6 起逐步被下面的 `apiKeys` 取代 —— 单 secret 只能答"是不是自己人"，
+   * 答不了"你是谁"，无法支撑 per-user 隔离。留着是为了兼容老部署。
    */
   secret?: string
+  /**
+   * T6 鉴权 key 表（key → userId）。缺省时从环境变量解析
+   * （`LITE_AI_API_KEYS` / `LITE_AI_API_KEY`，见 `auth.ts`）。
+   */
+  apiKeys?: readonly ApiKeyEntry[]
   /** 外部注入 store（测试用）；缺省按 DATABASE_URL 自动选。 */
   store?: JobStore
   /**
@@ -37,12 +49,6 @@ export type ServeOptions = {
   workerPollMs?: number
   /** 外部触发关闭。 */
   abortSignal?: AbortSignal
-}
-
-/** 回环地址判定：仅回环时允许多进程本机访问而无需 secret。 */
-function isLoopbackHost(host: string): boolean {
-  const h = host.trim().toLowerCase()
-  return h === 'localhost' || h === '127.0.0.1' || h === '::1'
 }
 
 /**
@@ -142,11 +148,25 @@ async function defaultExecute(
 export async function runServe(opts: ServeOptions): Promise<void> {
   const host = opts.host
 
-  // fail-closed：非回环绑定必须有 secret，否则任何人可触发诊断（提权/RCE 面）。
-  if (!opts.secret && !isLoopbackHost(host)) {
-    throw new Error(
-      `[serve] 绑定到非回环地址 ${host} 时必须配置 webhook.secret，否则拒绝启动（防未授权调查）`,
+  // ── 鉴权配置（T6）──
+  // 解析顺序：显式 opts.apiKeys > 环境变量 LITE_AI_API_KEYS/LITE_AI_API_KEY >
+  // 老形态 opts.secret（降级为单一身份）。
+  let apiKeys: readonly ApiKeyEntry[] = opts.apiKeys ?? resolveApiKeysFromEnv(process.env)
+  if (apiKeys.length === 0 && opts.secret !== undefined && opts.secret.length > 0) {
+    // 老部署兼容：单个共享 secret → 映射成单一 userId（per-user 隔离随之退化，
+    // 只挡"外人"、不区分"内部谁是谁"）。这里显式打日志，别让它静默发生。
+    apiKeys = [{ key: opts.secret, userId: 'operator' }]
+    console.warn(
+      '[serve] 使用单 secret 形态（webhook.secret）：所有调用方共享身份 operator，' +
+        'per-user 隔离不生效。要区分用户请配置 LITE_AI_API_KEYS="<key>:<userId>,..."。',
     )
+  }
+
+  // fail-closed：非回环绑定必须有 key，否则任何人可触发诊断（提权/RCE 面）。
+  // 回环绑定允许无 key（本机开发形态，Docker/k8s 探针也不需要凭证）。
+  assertAuthConfigForBinding(host, apiKeys)
+  if (apiKeys.length === 0) {
+    console.warn('[serve] 回环地址且未配置 API key：**不启用鉴权**，仅限本机开发使用。')
   }
 
   const { store, ready, dispose } = await selectStore(opts)
@@ -155,6 +175,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
     store,
     cwd: opts.cwd,
     ready,
+    auth: { keys: apiKeys },
     abortSignal: opts.abortSignal,
   })
 

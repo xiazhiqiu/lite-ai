@@ -10,12 +10,14 @@
  * 2. **入队/查询**：调 `JobStore`，**不执行业务**——真正的调查由 Worker（T4/T5）
  *    在别处消费，这正是异步队列的意义（HTTP 层必须立刻返回，不能阻塞）。
  *
- * 边界：本文件**不含**鉴权（T6）、**不含** Worker（T4）、**不含** 聚合（T12）。
+ * 边界：本文件**不含** Worker（T4）、**不含** 聚合（T12）。
+ * 鉴权（T6）在本文件内**只做接线**：真正的校验/身份解析在 `auth.ts`。
  */
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import type { JobStore } from '../jobs/store.js'
 import type { Job } from '../jobs/types.js'
+import { authenticate, isExemptPath, type AuthConfig } from './auth.js'
 
 const MAX_BODY_BYTES = 5 * 1024 * 1024
 /** SSE 心跳间隔：防反向代理/负载均衡把空闲连接掐掉。 */
@@ -37,10 +39,10 @@ export type ServerAppOptions = {
    */
   ready?: () => Promise<boolean>
   /**
-   * 默认提交者（T6 鉴权落地前的占位）。
-   * T6 会从 API key / SSO header 解析出真实 userId 并覆盖此值。
+   * 鉴权配置（T6）。`keys` 为空 = **不启用鉴权**（仅回环开发形态才允许，
+   * 非回环绑定的 fail-fast 在 `server/index.ts` 装配层拦截）。
    */
-  defaultUserId?: string
+  auth?: AuthConfig
   /**
    * 外部触发关闭（测试注入）；与 SIGINT/SIGTERM 等效。
    */
@@ -131,7 +133,7 @@ function parseSeq(raw: string | null | undefined): number {
 export function createServerApp(opts: ServerAppOptions): ServerApp {
   const { store } = opts
   const ready = opts.ready ?? (async () => true)
-  const defaultUserId = opts.defaultUserId ?? 'anonymous'
+  const auth: AuthConfig = opts.auth ?? { keys: [] }
 
   const server = http.createServer((req, res) => {
     void handle(req, res)
@@ -145,11 +147,13 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
     const path = url.pathname
 
     // ---- 健康检查：**免鉴权**（对齐 HolmesGPT auth.py 豁免，LB/k8s 探针不能带凭证）----
-    if (path === '/healthz') {
-      if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
-      return reply(res, 200, { status: 'ok' })
-    }
-    if (path === '/readyz') {
+    // 豁免判定须用**归一化后的 pathname 精确匹配**，不信任任何转发头
+    // （HolmesGPT CVE-2026-48710 的教训：Host 头可伪造，别用它重建豁免路径）。
+    if (isExemptPath(path, auth.exemptPaths)) {
+      if (path === '/healthz') {
+        if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
+        return reply(res, 200, { status: 'ok' })
+      }
       if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
       let ok = false
       try {
@@ -161,9 +165,18 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
       return reply(res, ok ? 200 : 503, { status: ok ? 'ready' : 'not ready' })
     }
 
+    // ---- T6 鉴权：非豁免路径一律先验身份，拿到 userId 再进业务 ----
+    // 401 文案对"没带凭证"与"凭证不对"**保持一致**，不泄漏哪一种失败。
+    const ident = authenticate(req.headers as Record<string, unknown>, auth)
+    if (!ident.ok) {
+      res.setHeader('WWW-Authenticate', 'Bearer')
+      return reply(res, 401, { error: 'unauthorized' })
+    }
+    const userId = ident.userId
+
     if (path === '/chat') {
       if (req.method !== 'POST') return reply(res, 405, { error: 'method not allowed' })
-      return handleChat(req, res)
+      return handleChat(req, res, userId)
     }
 
     // /jobs/:id 与 /jobs/:id/stream
@@ -173,10 +186,10 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
       const isStream = jobMatch[2] !== undefined
       if (isStream) {
         if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
-        return handleStream(req, res, jobId, url)
+        return handleStream(req, res, jobId, url, userId)
       }
       if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
-      return handleGetJob(req, res, jobId, url)
+      return handleGetJob(req, res, jobId, url, userId)
     }
 
     reply(res, 404, { error: 'not found' })
@@ -186,6 +199,7 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
   async function handleChat(
     req: http.IncomingMessage,
     res: http.ServerResponse,
+    userId: string,
   ): Promise<void> {
     let bodyStr: string
     try {
@@ -223,10 +237,9 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
         ? sessionIdRaw
         : `sin-${randomUUID()}`
 
-    const userIdRaw = obj.userId
-    const userId =
-      typeof userIdRaw === 'string' && userIdRaw.length > 0 ? userIdRaw : defaultUserId
-
+    // 【T6】提交者**只能**来自鉴权结果，绝不读 body.userId ——
+    // 否则任何人塞一个 `userId: "admin"` 就能伪造身份、绕过 per-user 隔离。
+    // body 里若带 userId 一律忽略（不报错：老客户端可能仍在发，静默以鉴权身份为准）。
     const job = await store.create({
       userId,
       cwd: opts.cwd,
@@ -239,15 +252,21 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
     return reply(res, 202, { jobId: job.id, sessionId })
   }
 
-  /** GET /jobs/:id[?after=<seq>] —— 状态快照 + 事件增量。 */
+  /** GET /jobs/:id[?after=<seq>] —— 状态快照 + 事件增量（**仅限本人 job**）。 */
   async function handleGetJob(
     _req: http.IncomingMessage,
     res: http.ServerResponse,
     jobId: string,
     url: URL,
+    userId: string,
   ): Promise<void> {
     const job = await store.get(jobId)
-    if (job === null) return reply(res, 404, { error: 'job not found' })
+    // 【T6】跨用户访问返回 **404 而非 403**：403 等于告诉攻击者"这个 job 确实存在，
+    // 只是不归你"，可用于枚举他人 jobId / 探测系统规模。404 把"不存在"与"不是你的"
+    // 统一成一个回答，不泄漏资源存在性（对齐 HolmesGPT 的越权处理口径）。
+    if (job === null || job.userId !== userId) {
+      return reply(res, 404, { error: 'job not found' })
+    }
 
     // 增量拉取：前端轮询带上次收到的最后一个 seq，避免重复传全量事件
     const after = parseSeq(url.searchParams.get('after'))
@@ -272,9 +291,14 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
     res: http.ServerResponse,
     jobId: string,
     _url: URL,
+    userId: string,
   ): Promise<void> {
     const job = await store.get(jobId)
-    if (job === null) return reply(res, 404, { error: 'job not found' })
+    // 【T6】SSE 同样做归属校验：事件流里含工具调用细节与调查结论，越权订阅
+    // 等于把别人的调查过程直接推到攻击者浏览器里。404 口径与 GET 一致。
+    if (job === null || job.userId !== userId) {
+      return reply(res, 404, { error: 'job not found' })
+    }
 
     res.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
