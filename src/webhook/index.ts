@@ -15,8 +15,9 @@ import { IngestPipeline } from '../ingest/pipeline.js'
 import type { BoundedPool } from '../jobs/pool.js'
 import { runAlertDiagnosis, type DiagnosisResult } from './diagnose.js'
 import type { Alert, Incident } from './types.js'
-
-const MAX_BODY_BYTES = 5 * 1024 * 1024
+// G7：body 读取与上限合并到 `src/server/body.ts`，`--serve` 与 `--webhook` 共用一份 ——
+// 同一条告警在两种形态下必须被同一套护栏处理，否则会出现口径漂移。
+import { MAX_BODY_BYTES, readBody } from '../server/body.js'
 
 export type WebhookServerOptions = {
   cwd: string
@@ -34,29 +35,6 @@ export type WebhookServerOptions = {
   pool?: BoundedPool
   /** 外部触发优雅关闭（测试可注入）；与 SIGINT/SIGTERM 等效 */
   abortSignal?: AbortSignal
-}
-
-function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    let size = 0
-    let rejected = false
-    req.on('data', (chunk: Buffer) => {
-      if (rejected) return
-      size += chunk.length
-      if (size > MAX_BODY_BYTES) {
-        rejected = true
-        reject(new Error('payload too large'))
-        req.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => {
-      if (!rejected) resolve(Buffer.concat(chunks).toString('utf8'))
-    })
-    req.on('error', reject)
-  })
 }
 
 /** 校验 secret：支持 `Bearer <token>` 或裸 token，恒定时间比较防时序侧信道。 */

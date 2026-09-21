@@ -30,6 +30,22 @@ export type DiagnoseDeps = {
   maxSteps?: number
   /** 覆盖 webhook 配置（测试注入 notifyUrl 等） */
   config?: WebhookConfig
+  /**
+   * 事件回调（G7）：原样透传给 `runAgentTurn`，用于把告警诊断的**过程**写进
+   * `job_events`，让值班台的 SSE 能看到工具调用 / 证据 / 结论逐条冒出。
+   *
+   * 全部可选、缺省不传 → 行为与 G7 之前完全一致（单进程 webhook 形态零变化）。
+   * 这也保证了告警诊断与人工对话共用**同一份** `runAgentTurn` 推理链。
+   */
+  onToolStart?: (toolUseId: string, toolName: string, input: unknown) => void
+  onToolResult?: (
+    toolUseId: string,
+    toolName: string,
+    output: string,
+    isError: boolean,
+  ) => void
+  onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
+  onProgressMessage?: (content: string) => void
 }
 
 export type DiagnosisResult = {
@@ -127,6 +143,11 @@ export async function runAlertDiagnosis(args: {
       modelName: runtime.model || '',
       contentReplacementState,
       contextCollapseState,
+      // G7：诊断过程对外可见面。缺省 undefined → runAgentTurn 内部用 ?. 调用，零影响。
+      onToolStart: deps.onToolStart,
+      onToolResult: deps.onToolResult,
+      onAssistantMessage: deps.onAssistantMessage,
+      onProgressMessage: deps.onProgressMessage,
     })
   } catch (error) {
     // 失败优雅降级：记录 failed + 尽力落可 resume 会话 + 失败通知，再抛给队列日志

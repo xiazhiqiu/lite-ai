@@ -23,6 +23,8 @@ import {
   type ApiKeyEntry,
 } from './auth.js'
 import { createServerApp, MAX_BODY_BYTES } from './http.js'
+import type { Alert } from '../webhook/types.js'
+import type { IngestResult, IngestContext } from '../ingest/pipeline.js'
 
 export type ServeOptions = {
   /** 服务端工作区路径（plan G4），缺省 `process.cwd()`。 */
@@ -65,6 +67,18 @@ export type ServeOptions = {
    * 只会在访问 `/` 时 404（并打一条提示）。
    */
   webRoot?: string
+  /**
+   * 【G7】告警摄入开关。默认 true —— `--serve` 直接吸收 `POST /webhook`，
+   * 告警经归一化 / 去重 / 关联后入**同一个 jobs 队列**（`kind='alert'`），
+   * 由本进程的 Worker 消费，不再单独起 webhook 进程。
+   * 显式 false → 不挂 `/webhook` 路由（纯人工对话部署）。
+   */
+  enableAlerts?: boolean
+  /**
+   * 【G7】告警摄入实现覆盖（测试注入）。
+   * 缺省按 `loadWebhookConfig()` 装配真实管道。
+   */
+  alertIngest?: (alerts: Alert[], ctx: IngestContext) => IngestResult
   /** 外部触发关闭。 */
   abortSignal?: AbortSignal
 }
@@ -232,6 +246,16 @@ export async function runServe(opts: ServeOptions): Promise<void> {
   // T10：托管前端（若已构建）。缺失不是错误 —— 纯 API 部署照常工作。
   const webRoot = resolveWebRoot(opts.webRoot)
 
+  // ── G7 告警摄入：与 /chat 同一进程、同一队列 ──
+  // 诊断不再在管道自己的池里跑，而是落成 kind='alert' 的 job 由 Worker 认领，
+  // 因此告警诊断自动获得 job 的一切：过程可见（SSE）、失败可重派、故障转移。
+  const alerts =
+    opts.alertIngest !== undefined
+      ? { ingest: opts.alertIngest, dispose: async (): Promise<void> => {} }
+      : opts.enableAlerts === false
+        ? null
+        : await createAlertIngest(store, opts.cwd)
+
   const app = createServerApp({
     store,
     usage,
@@ -240,6 +264,8 @@ export async function runServe(opts: ServeOptions): Promise<void> {
     auth: { keys: apiKeys },
     webRoot,
     abortSignal: opts.abortSignal,
+    // 未启用告警形态时不传 → /webhook 明确 404（不是 200 空响应）。
+    ...(alerts !== null ? { alertIngest: alerts.ingest } : {}),
   })
 
   // ── Worker 装配（T4）+ 执行器接线（T5）──
@@ -266,6 +292,11 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       console.log('[serve]   GET  /jobs/:id/stream  SSE 事件流')
       console.log('[serve]   GET  /usage           用量 / 审计账本（T7）')
       console.log('[serve]   GET  /healthz /readyz  健康/就绪（免鉴权）')
+      if (alerts !== null) {
+        console.log(
+          '[serve]   POST /webhook          告警摄入（入同一 jobs 队列，kind=alert）',
+        )
+      }
       console.log(`[serve]   worker ${os.hostname()}-${process.pid} 已启动（消费 jobs 队列）`)
       if (webRoot !== undefined) {
         console.log(`[serve]   GET  /                前端值班台（${webRoot}）`)
@@ -293,12 +324,68 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       void worker
         .drained()
         .then(() => dispose())
+        .then(() => (alerts !== null ? alerts.dispose() : undefined))
         .then(() => resolve())
     }
     process.on('SIGINT', shutdown)
     process.on('SIGTERM', shutdown)
     opts.abortSignal?.addEventListener('abort', shutdown, { once: true })
   })
+}
+
+/**
+ * 【G7】装配告警摄入：告警 → 归一化 / 去重 / 关联 → 入**同一个 jobs 队列**。
+ *
+ * 与旧形态的唯一差别就在 `enqueueDiagnosis`：诊断不再在摄入管道自己的池里跑，
+ * 而是落成 `kind='alert'` 的 job 交给 Worker。去重 / 关联这些**零 LLM 的规则判定**
+ * 仍留在同步的 `ingest()` 里（HTTP 要立刻回 accepted/deduplicated）。
+ */
+async function createAlertIngest(
+  store: JobStore,
+  cwd: string,
+): Promise<{
+  ingest: (alerts: Alert[], ctx: IngestContext) => IngestResult
+  dispose: () => Promise<void>
+}> {
+  const [{ IngestPipeline }, { loadWebhookConfig }, { alertSessionId }] =
+    await Promise.all([
+      import('../ingest/pipeline.js'),
+      import('../config.js'),
+      import('../webhook/types.js'),
+    ])
+
+  const config = await loadWebhookConfig()
+  const pipeline = new IngestPipeline(cwd, config, {
+    enqueueDiagnosis: (alert, incident, ctx) => {
+      // sessionId 取 incidentId（事件级）或告警派生 id（单条）—— 与 diagnose 内部
+      // 的口径一致，因此人工后续可用同一 sessionId 续问（"机器先查、人接着问"）。
+      const sessionId = incident ? incident.incidentId : alertSessionId(alert)
+      void store
+        .create({
+          userId: ctx?.userId ?? 'alertmanager',
+          cwd,
+          kind: 'alert',
+          incidentId: incident?.incidentId ?? null,
+          sessionId,
+          payload: { alert, incident: incident ?? null },
+        })
+        .catch(err => {
+          console.error(
+            '[serve] 告警 job 入队失败:',
+            err instanceof Error ? err.message : String(err),
+          )
+        })
+    },
+  })
+  pipeline.start()
+
+  return {
+    ingest: (alerts, ctx) => pipeline.ingest(alerts, ctx),
+    dispose: async () => {
+      pipeline.close()
+      await pipeline.drained()
+    },
+  }
 }
 
 export { MAX_BODY_BYTES, createServerApp }

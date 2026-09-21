@@ -281,6 +281,7 @@ node --import tsx src/index.ts --serve 8080
 | `GET /jobs/:id?after=<seq>` | 状态快照 + 事件**增量** |
 | `GET /jobs/:id/stream` | SSE 事件流（工具调用 / 证据 / 结论逐条推） |
 | `GET /usage` | 用量与审计账本 |
+| `POST /webhook` | 告警摄入（G7：**与 `/chat` 同一队列**，落成 `kind='alert'` 的 job） |
 | `GET /healthz` `GET /readyz` | 健康 / 就绪（**免鉴权**，给探针用） |
 | `GET /` | 前端值班台（构建后才有） |
 
@@ -304,7 +305,11 @@ node --import tsx src/index.ts --serve 8080
 
 多实例部署时每个实例自带 Worker，job 靠 PG 原子 claim 保证不重复；实例猝死遗留的 `running` job 由 stale sweep 打回 `pending`（租期默认 5 分钟，必须明显大于一次调查耗时，否则会重跑、烧两次 token）。关停顺序是「停 claim → 等在途跑完 → 关连接与池」，所以 `terminationGracePeriodSeconds` 要留够。
 
-> `--webhook` 仍可用但已 deprecated：它与 `--serve` 是两个进程、两个并发池，同时跑会让 LLM 配额实际翻倍。**合并前严禁两进程共存。**
+> **G7 已完成**：`POST /webhook` 已并入 `--serve` —— 同一进程、同一队列、同一鉴权（都认 `LITE_AI_API_KEYS`，不再单独认 `webhook.secret`）。旧 `--webhook` 独立进程仍可用但已 deprecated：它与 `--serve` 是两个进程、两个并发池，同时跑会让 LLM 配额实际翻倍。**严禁两进程共存。**
+>
+> 合并的实质变化：告警诊断**不再在摄入管道自己的池里跑**，而是落成 `kind='alert'` 的 job 由 Worker 认领。因此告警诊断第一次拥有 job 的一切 —— 过程在值班台 SSE 逐条可见、失败能被 stale sweep 重派、崩溃不留黑盒。去重 / 关联这些**零 LLM 规则**仍在同步的摄入路径上完成，HTTP 照旧立刻回 `accepted/deduplicated`，Alertmanager 侧无需改解析。
+>
+> **告警归属哪个人？** 告警 job 的 `userId` 取**投递告警时用的那把 key**。所以值班台要看到本系统的告警，投递用的 key 与值班员登录用的 key 必须是**同一个 `userId`**（例如都配 `alice`）；否则 per-user 隔离会把告警 job 正确地隔在值班员视野之外 —— 这是设计使然，不是 Bug。
 
 ## 只读安全边界
 

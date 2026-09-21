@@ -65,6 +65,19 @@ export type IngestResult = {
   closedIncidents: number
 }
 
+/**
+ * 摄入上下文（G7）：随本次 HTTP 请求传入的元信息。
+ *
+ * 目前只有 `userId` —— 告警 job 必须落在**投递方的身份**下，否则值班台按 userId
+ * 过滤时会看不到告警 job（per-user 隔离会把它们隔在外面）。
+ *
+ * 刻意做成参数一路透传，而不是给管道塞一个"当前请求"的可变字段：
+ * 后者在并发请求下是共享可变状态，而 `ingest()` 是同步的，传参即可无竞态。
+ */
+export type IngestContext = {
+  userId?: string
+}
+
 export type IngestPipelineOptions = {
   /**
    * 诊断执行器，默认 `runAlertDiagnosis`（测试可注入）。
@@ -84,6 +97,23 @@ export type IngestPipelineOptions = {
    * 独立的池，从而能在同一进程里验证"限流确实按传入值生效"。
    */
   pool?: BoundedPool
+  /**
+   * 【G7】诊断出口注入。提供时，**末端那次 RCA 不再在管道自己的池里跑**，而是
+   * 交给调用方 —— 服务端形态即"入 jobs 队列（kind='alert'）"，由 Worker 认领执行，
+   * 从而获得 job 的一切好处：过程可见（SSE）、失败可重派、多实例故障转移。
+   *
+   * 缺省（undefined）→ 退回原行为（池内直接跑），单进程 webhook 形态**零变化**。
+   *
+   * 为什么注入的是"出口"而不是"换掉 diagnose"：
+   * 去重 / 关联 / 分级这些**零 LLM 的规则判定必须留在同步的 `ingest()` 里** ——
+   * HTTP 要立刻回 `accepted/deduplicated`，而这些都是纯内存判定、不耗时。
+   * 真正需要异步化的只有末端那一次烧 token 的 RCA。
+   */
+  enqueueDiagnosis?: (
+    alert: Alert,
+    incident?: Incident,
+    ctx?: IngestContext,
+  ) => void | Promise<void>
 }
 
 /**
@@ -116,6 +146,13 @@ export class IngestPipeline {
   ) => Promise<DiagnosisResult>
   private readonly now: () => number
   private readonly log: (level: 'log' | 'warn' | 'error', message: string) => void
+  /**
+   * 【G7】诊断出口。undefined = 退回池内执行（单进程形态）。
+   * 见 `IngestPipelineOptions.enqueueDiagnosis` 注释。
+   */
+  private readonly enqueueDiagnosis:
+    | ((alert: Alert, incident?: Incident, ctx?: IngestContext) => void | Promise<void>)
+    | undefined
 
   /** L2 拓扑关联用的依赖图；未启用 / 拉取失败时为 null（退化为纯规则关联）。 */
   private topologyGraph: DependencyGraph | null = null
@@ -139,6 +176,8 @@ export class IngestPipeline {
       opts.diagnose ??
       ((alert: Alert, incident?: Incident) =>
         runAlertDiagnosis({ cwd: this.cwd, alert, incident }))
+    // G7：诊断出口。未注入 → dispatchDiagnosis 退回池内执行，单进程形态行为不变。
+    this.enqueueDiagnosis = opts.enqueueDiagnosis
     // 全局单例池（plan G1）：Worker 与摄入管道共用同一个限流上限，
     // 否则两个池各自限流会让 provider 实际看到的并发翻倍。
     // 测试可注入私有池（见 IngestPipelineOptions.pool 注释）。
@@ -255,7 +294,7 @@ export class IngestPipeline {
    *
    * 同步返回：只做"入队"决策，诊断在后台并发池里跑，因此 HTTP 可以快速回 202。
    */
-  ingest(alerts: Alert[]): IngestResult {
+  ingest(alerts: Alert[], ctx?: IngestContext): IngestResult {
     const { alerts: kept, truncated } = truncateAlerts(
       alerts,
       this.config.maxBatchPerRequest ?? DEFAULT_MAX_BATCH_PER_REQUEST,
@@ -307,8 +346,8 @@ export class IngestPipeline {
       for (const unit of units) {
         const ok =
           unit.level === 'incident'
-            ? this.handleIncident(unit.incident)
-            : this.handleAlert(unit.alert)
+            ? this.handleIncident(unit.incident, ctx)
+            : this.handleAlert(unit.alert, ctx)
         if (ok) accepted += 1
         else deduplicated += 1
       }
@@ -324,7 +363,7 @@ export class IngestPipeline {
   }
 
   /** 单条告警诊断：双层去重后入队。返回 true 表示已入队。 */
-  private handleAlert(alert: Alert): boolean {
+  private handleAlert(alert: Alert, ctx?: IngestContext): boolean {
     // 双层去重：完整重复（静默期内内容未变）→ 抑制；内容变化 → 更新重诊断。
     const outcome = this.dedupe.shouldDiagnose(alert)
     if (outcome === 'suppressed') {
@@ -340,19 +379,52 @@ export class IngestPipeline {
         `[webhook] 告警内容变化，重诊断 ${alert.title} (${alert.id})`,
       )
     }
-    this.pool.enqueue(async () => {
-      try {
-        const result = await this.diagnose(alert)
-        this.log(
-          'log',
-          `[webhook] 诊断完成 ${alert.title} (${alert.severity}) → session ${result.sessionId}`,
-        )
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        this.log('error', `[webhook] 诊断异常 ${alert.title}: ${reason}`)
-      }
-    })
+    this.dispatchDiagnosis(alert, undefined, ctx)
     return true
+  }
+
+  /**
+   * 【G7】诊断出口：决定"跑一次 RCA"这件事交给谁执行。
+   *
+   * - 注入了 `enqueueDiagnosis`（服务端形态）→ 入 jobs 队列，由 Worker 认领执行；
+   *   失败归队列侧记录（job → failed + 可被 stale sweep 重派），这里只兜底防
+   *   unhandled rejection —— 入队失败不该让告警摄入的 HTTP 请求崩掉。
+   * - 缺省（单进程 webhook）→ 走有界并发池，异常记 error 日志后吞掉（G7 前原行为）。
+   */
+  private dispatchDiagnosis(
+    alert: Alert,
+    incident?: Incident,
+    ctx?: IngestContext,
+  ): void {
+    if (this.enqueueDiagnosis === undefined) {
+      this.pool.enqueue(async () => {
+        try {
+          const result = await this.diagnose(alert, incident)
+          this.log(
+            'log',
+            incident
+              ? `[webhook] 事件诊断完成 ${incident.incidentId}（${incident.alerts.length} 条成员，主告警 ${incident.primaryAlert.title}）→ session ${result.sessionId}`
+              : `[webhook] 诊断完成 ${alert.title} (${alert.severity}) → session ${result.sessionId}`,
+          )
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error)
+          this.log(
+            'error',
+            incident
+              ? `[webhook] 事件诊断异常 ${incident.incidentId}: ${reason}`
+              : `[webhook] 诊断异常 ${alert.title}: ${reason}`,
+          )
+        }
+      })
+      return
+    }
+    void Promise.resolve(this.enqueueDiagnosis(alert, incident, ctx)).catch(error => {
+      const reason = error instanceof Error ? error.message : String(error)
+      this.log(
+        'error',
+        `[ingest] 诊断入队失败 ${incident?.incidentId ?? alert.title}: ${reason}`,
+      )
+    })
   }
 
   /**
@@ -360,21 +432,10 @@ export class IngestPipeline {
    * 是否触发由注册表的关联决策决定（同一告警重复到达不触发），因此这里**不再做冷却判定**
    * —— 否则跨批次新成员并入已有事件时会被"同 incidentId 冷却"误拦（既有缺陷）。
    */
-  private handleIncident(incident: Incident): boolean {
+  private handleIncident(incident: Incident, ctx?: IngestContext): boolean {
     // 先标记已诊断：同一事件后续到达的新成员据此标记为"增量重分析"。
     this.registry.markDiagnosed(incident.incidentId)
-    this.pool.enqueue(async () => {
-      try {
-        const result = await this.diagnose(incident.primaryAlert, incident)
-        this.log(
-          'log',
-          `[webhook] 事件诊断完成 ${incident.incidentId}（${incident.alerts.length} 条成员，主告警 ${incident.primaryAlert.title}）→ session ${result.sessionId}`,
-        )
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error)
-        this.log('error', `[webhook] 事件诊断异常 ${incident.incidentId}: ${reason}`)
-      }
-    })
+    this.dispatchDiagnosis(incident.primaryAlert, incident, ctx)
     return true
   }
 }

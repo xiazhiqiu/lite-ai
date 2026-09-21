@@ -27,6 +27,7 @@ import type { Job } from './types.js'
 import type { SessionStore } from '../session/store.js'
 import type { PermissionManager } from '../permissions.js'
 import type { UsageStore } from '../usage/index.js'
+import type { Alert, Incident } from '../webhook/types.js'
 import { traceIdForJob } from '../server/trace.js'
 
 /**
@@ -55,6 +56,30 @@ export type TurnRunner = (args: {
   signal?: AbortSignal
 }) => Promise<ChatMessage[]>
 
+/**
+ * 【G7】告警诊断执行器签名（与 `runAlertDiagnosis` 的参数面对齐）。
+ *
+ * 刻意**不**复用上面的 `TurnRunner`：告警诊断走 `runAlertDiagnosis` 这条既有链路
+ * （自带事件包构造 / 会话落盘 / 告警记录 / 通知），与人工对话的组装方式不同。
+ * 可注入让测试能验证"告警 job 被执行 + 事件落库"而不真烧 token。
+ */
+export type AlertDiagnoser = (args: {
+  cwd: string
+  alert: Alert
+  incident?: Incident
+  deps?: {
+    onToolStart?: (toolUseId: string, toolName: string, input: unknown) => void
+    onToolResult?: (
+      toolUseId: string,
+      toolName: string,
+      output: string,
+      isError: boolean,
+    ) => void
+    onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
+    onProgressMessage?: (content: string) => void
+  }
+}) => Promise<{ sessionId: string; diagnosisSummary: string }>
+
 export type JobExecutorDeps = {
   /** job 事件要写到这里。 */
   jobStore: JobStore
@@ -74,6 +99,11 @@ export type JobExecutorDeps = {
   permissions?: PermissionManager
   /** turn runner；缺省懒加载真实 `runAgentTurn`（避免测试拉起整个 agent 栈）。 */
   turnRunner?: TurnRunner
+  /**
+   * 【G7】告警诊断执行器；缺省懒加载真实 `runAlertDiagnosis`。
+   * 仅 `kind='alert'` 的 job 用到；chat job 走上面的 `turnRunner`。
+   */
+  alertDiagnoser?: AlertDiagnoser
   /** 最大工具步数，默认 200（与 diagnose 对齐）。 */
   maxSteps?: number
   /** 模型名（写入 trace / 事件元数据）。 */
@@ -154,6 +184,31 @@ function jobMessage(job: Job): string {
 }
 
 /**
+ * 【G7】从 alert job 的 payload 还原告警（与可选事件）。
+ *
+ * payload 由 IngestPipeline 入队时写入，经 PG 后会走一轮 JSON 序列化 ——
+ * 因此这里按"纯 JSON 对象"处理（`Incident` 的 `reasons` 是数组而非 Set，可安全往返）。
+ * 缺 alert 直接抛错：宁可让这条 job 明确 failed，也不要静默跑一个空诊断。
+ */
+function parseAlertPayload(payload: Record<string, unknown>): {
+  alert: Alert
+  incident?: Incident
+} {
+  const alert = payload.alert as Alert | undefined
+  if (alert === undefined || alert === null || typeof alert !== 'object') {
+    throw new Error('alert job 的 payload 缺少 alert 对象')
+  }
+  const incident = payload.incident as Incident | undefined
+  return incident ? { alert, incident } : { alert }
+}
+
+/** 懒加载真实 `runAlertDiagnosis`（测试注入 diagnoser 时完全不加载 agent 栈）。 */
+async function resolveRealAlertDiagnoser(): Promise<AlertDiagnoser> {
+  const mod = await import('../webhook/diagnose.js')
+  return mod.runAlertDiagnosis as unknown as AlertDiagnoser
+}
+
+/**
  * 记账：往审计账本追加一条本轮的用量事实（T7）。
  *
  * **两条硬约束**：
@@ -214,24 +269,10 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
     // "这次调查占用了多久"，而不是"纯推理花了多久"。
     const startedAt = Date.now()
 
-    // ── G2：取历史（带 sessionId 才取；刻意不校验会话是否已存在，
-    //         以便对 diagnose 落下的告警会话直接续接） ──
-    let history: ChatMessage[] = []
-    if (job.sessionId !== null) {
-      const loaded = await deps.sessionStore.load(cwd, job.sessionId)
-      if (loaded !== null) history = loaded
-    }
-    const business: ChatMessage[] = [
-      ...history,
-      { role: 'user', content: jobMessage(job) },
-    ]
-
-    const tools =
-      deps.tools ??
-      (await buildServiceToolRegistryAsync({ cwd }))
-    const permissions = deps.permissions ?? (await buildServicePermissions(cwd))
-
     // ── 事件缓冲（批量写） ──
+    // 刻意提到 kind 分派**之前**：alert 与 chat 两条分支共用同一套落库与 flush
+    // 语义，"结束前必须 flush 干净（含失败路径）"这条纪律才有单一实现，
+    // 不会在将来加第三条分支时被漏掉。
     let pending: Array<{ kind: string; payload: Record<string, unknown> }> = []
     let flushing: Promise<void> = Promise.resolve()
     let closed = false
@@ -271,6 +312,90 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       })
     }, flushMs)
     timer.unref?.()
+
+    // ── G7：告警诊断分支（kind='alert'，由 IngestPipeline 入队） ──
+    //
+    // 关键差异：告警诊断走**既有的** `runAlertDiagnosis` 链路 —— 它自带
+    // 「事件包构造（主告警 + 全部成员）/ 会话落盘 / 告警记录 / 通知」，
+    // 这些是告警语义的一部分，不能在服务端另写一套（否则又是两条 divergent 口径）。
+    // 因此这里**不**复用上面的 tools/model，让 diagnose 内部按自己的工具集装配。
+    if (job.kind === 'alert') {
+      const { alert, incident } = parseAlertPayload(job.payload)
+      const diagnoser = deps.alertDiagnoser ?? (await resolveRealAlertDiagnoser())
+      try {
+        const result = await diagnoser({
+          cwd,
+          alert,
+          incident,
+          deps: {
+            // 过程逐条落库：告警诊断第一次拥有"可见的调查过程" —— 值班台 SSE 能
+            // 看到工具调用 / 证据 / 结论逐条冒出，失败也能被 stale sweep 重派。
+            onToolStart: (toolUseId, toolName, input) => {
+              push('tool_start', { toolUseId, toolName, input })
+            },
+            onToolResult: (toolUseId, toolName, output, isError) => {
+              push('tool_result', { toolUseId, toolName, output, isError })
+            },
+            onAssistantMessage: (content, metadata) => {
+              push('assistant_message', {
+                content,
+                final: metadata?.final === true,
+              })
+            },
+            onProgressMessage: content => {
+              push('progress', { content })
+            },
+          },
+        })
+        push('diagnosis', {
+          sessionId: result.sessionId,
+          summary: result.diagnosisSummary,
+        })
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error)
+        push('error', { message: reason })
+        // 不重复 persistSession：runAlertDiagnosis 内部（含其失败分支）已负责
+        // 尽力落一个可 resume 的会话，这里再写一次会重复追加事件。
+        closed = true
+        clearInterval(timer)
+        await flush().catch(() => {})
+        await recordUsage(deps, job, log, {
+          modelName: null,
+          durationMs: Date.now() - startedAt,
+          status: 'failed',
+        })
+        throw error
+      }
+
+      closed = true
+      clearInterval(timer)
+      await flush()
+      await recordUsage(deps, job, log, {
+        // 模型由 runAlertDiagnosis 内部按运行时配置自建，执行器拿不到也不猜。
+        modelName: null,
+        durationMs: Date.now() - startedAt,
+        status: 'completed',
+      })
+      return
+    }
+
+    // ── chat 分支：人工对话 / 续聊追问 ──
+    // ── G2：取历史（带 sessionId 才取；刻意不校验会话是否已存在，
+    //         以便对 diagnose 落下的告警会话直接续接） ──
+    let history: ChatMessage[] = []
+    if (job.sessionId !== null) {
+      const loaded = await deps.sessionStore.load(cwd, job.sessionId)
+      if (loaded !== null) history = loaded
+    }
+    const business: ChatMessage[] = [
+      ...history,
+      { role: 'user', content: jobMessage(job) },
+    ]
+
+    const tools =
+      deps.tools ??
+      (await buildServiceToolRegistryAsync({ cwd }))
+    const permissions = deps.permissions ?? (await buildServicePermissions(cwd))
 
     const runner = deps.turnRunner ?? (await resolveRealTurnRunner())
     const model =

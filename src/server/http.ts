@@ -20,8 +20,13 @@ import type { Job } from '../jobs/types.js'
 import type { UsageRecord, UsageStore } from '../usage/index.js'
 import { authenticate, isExemptPath, type AuthConfig } from './auth.js'
 import { tryServeStatic } from './static.js'
+// G7：请求体读取与本文件原本自建的那份**合并为一份**（`body.ts`），
+// 否则同一条告警会在两种形态下被两套上限处理。
+import { MAX_BODY_BYTES, readBody } from './body.js'
+import { routeAlertSource } from '../webhook/sources/index.js'
+import type { Alert } from '../webhook/types.js'
+import type { IngestResult, IngestContext } from '../ingest/pipeline.js'
 
-const MAX_BODY_BYTES = 5 * 1024 * 1024
 /** SSE 心跳间隔：防反向代理/负载均衡把空闲连接掐掉。 */
 const SSE_HEARTBEAT_MS = 15_000
 /** SSE 轮询间隔：事件源是 PG/Store 而非内存总线（plan G5），靠轮询拉增量。 */
@@ -61,6 +66,15 @@ export type ServerAppOptions = {
    */
   webRoot?: string
   /**
+   * 【G7】告警摄入。提供时才启用 `POST /webhook`（未提供 → 404，即不启用告警形态）。
+   *
+   * 为什么是注入而不是在 http 层 `new IngestPipeline`：本文件是**传输层**，
+   * 不该知道去重 / 关联 / 队列的存在；由装配层决定"告警进来之后去哪"。
+   * 返回值 `IngestResult`（accepted/deduplicated/...）直接作为 202 响应体，
+   * 与旧 webhook 进程**同口径**，Alertmanager 侧无需改解析。
+   */
+  alertIngest?: (alerts: Alert[], ctx: IngestContext) => IngestResult
+  /**
    * 外部触发关闭（测试注入）；与 SIGINT/SIGTERM 等效。
    */
   abortSignal?: AbortSignal
@@ -71,29 +85,6 @@ export type ServerApp = {
   store: JobStore
   /** 停止接收新连接并关闭（等待在途请求结束）。 */
   close(): Promise<void>
-}
-
-function readBody(req: http.IncomingMessage): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = []
-    let size = 0
-    let rejected = false
-    req.on('data', (chunk: Buffer) => {
-      if (rejected) return
-      size += chunk.length
-      if (size > MAX_BODY_BYTES) {
-        rejected = true
-        reject(new Error('payload too large'))
-        req.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => {
-      if (!rejected) resolve(Buffer.concat(chunks).toString('utf8'))
-    })
-    req.on('error', reject)
-  })
 }
 
 function reply(
@@ -226,6 +217,7 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
   const ready = opts.ready ?? (async () => true)
   const auth: AuthConfig = opts.auth ?? { keys: [] }
   const webRoot = opts.webRoot
+  const alertIngest = opts.alertIngest
 
   const server = http.createServer((req, res) => {
     void handle(req, res)
@@ -298,6 +290,56 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
       if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
       if (usage === undefined) return reply(res, 404, { error: 'not found' })
       return handleListUsage(res, url, userId)
+    }
+
+    // POST /webhook —— 告警摄入（G7：由 `--serve` 直接吸收，不再单独起进程）。
+    //
+    // 与旧 webhook 进程**同一套口径**：读 body → JSON.parse → routeAlertSource
+    // 归一化 → 交给注入的 alertIngest → 202 + IngestResult。
+    // 鉴权走本文件统一身份（serve API key），不再单独认 webhook.secret ——
+    // 一个 key 管所有入口，密钥轮换与审计只有一处，不会两套凭证各自过期。
+    if (path === '/webhook') {
+      if (req.method !== 'POST') {
+        return reply(res, 405, { error: 'method not allowed' })
+      }
+      if (alertIngest === undefined) {
+        return reply(res, 404, { error: 'not found' })
+      }
+
+      let alertBody: string
+      try {
+        alertBody = await readBody(req)
+      } catch {
+        return reply(res, 400, { error: 'payload too large' })
+      }
+
+      let payload: unknown
+      try {
+        payload = JSON.parse(alertBody || '{}')
+      } catch {
+        return reply(res, 400, { error: 'invalid json' })
+      }
+
+      let sourceAdapter
+      try {
+        sourceAdapter = routeAlertSource(payload)
+      } catch {
+        return reply(res, 400, { error: 'unrecognized alert source payload' })
+      }
+
+      let alerts: Alert[]
+      try {
+        alerts = sourceAdapter.parse(payload)
+      } catch {
+        return reply(res, 400, { error: 'payload parse failed' })
+      }
+
+      // 归一化之后的一切与"这条告警是怎么来的"无关 —— 推送与拉取共用同一条管道。
+      //
+      // `userId` 取自身份：告警 job 落在**投递方**名下，per-user 隔离才能正确覆盖
+      // （运维含义：告警投递用什么 key，告警 job 就属于谁 —— 值班台要看到它们，
+      //  就得用同一个 userId 的 key，见 README「服务端形态与部署」）。
+      return reply(res, 202, { ...alertIngest(alerts, { userId }) })
     }
 
     // /jobs/:id 与 /jobs/:id/stream
