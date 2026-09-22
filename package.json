@@ -15,6 +15,7 @@
     "build:web": "vite build --config web/vite.config.ts",
     "dev:web": "vite --config web/vite.config.ts",
     "check:tracing": "tsx scripts/check-tracing.mjs",
+    "check:trace-endpoint": "tsx scripts/check-trace-endpoint.mjs",
     "eval:itbench": "tsx src/eval/itbench/index.ts",
     "install-local": "tsx src/install.ts"
   },

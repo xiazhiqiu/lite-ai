@@ -29,6 +29,17 @@ LANGFUSE_BASE_URL=http://localhost:3000 \
 npm run check:tracing        # 8 项断言；失败时会告诉你去翻哪几条日志
 ```
 
+上面那条验的是**写**路径（span 有没有真落库）。**读**路径另有一条，验
+`GET /trace/:jobId` 汇总出的四轨引用指过去能不能查到东西 —— 尤其是两套 traceId
+（可反解的 `tr-<jobId>` vs 不可反解的 `sha256(jobId)[:32]`）在运行期能不能 join 上：
+
+```bash
+LITE_AI_BASE_URL=http://127.0.0.1:4180 LITE_AI_API_KEY=... \
+LANGFUSE_PUBLIC_KEY=pk-lf-... LANGFUSE_SECRET_KEY=sk-lf-... \
+LANGFUSE_BASE_URL=http://localhost:3000 \
+npm run check:trace-endpoint # 15 项断言；缺 Langfuse 凭据时会明确说 B 轨被跳过，不假报全绿
+```
+
 没接上时启动日志会打印 noop 的**原因**，`GET /info` 的
 `capabilities.tracingReason` 是同一个值 —— 不必翻日志。
 
