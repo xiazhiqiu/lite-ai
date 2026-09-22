@@ -69,6 +69,14 @@ export type ServeOptions = {
    */
   webRoot?: string
   /**
+   * 【T57】管理面开关。默认 **false** —— 只有显式开启（或
+   * `LITE_AI_ENABLE_ADMIN_API=1`）才挂 `POST /admin/reload`。
+   *
+   * 为什么默认关：热重载配置是"运维口子"，暴露给任何持有普通 API key 的调用方
+   * 都会放大影响面。对齐 HolmesGPT 的 `ENABLE_ADMIN_API` 口径。
+   */
+  adminApiEnabled?: boolean
+  /**
    * 【G7】告警摄入开关。默认 true —— `--serve` 直接吸收 `POST /webhook`，
    * 告警经归一化 / 去重 / 关联后入**同一个 jobs 队列**（`kind='alert'`），
    * 由本进程的 Worker 消费，不再单独起 webhook 进程。
@@ -263,6 +271,53 @@ async function readPackageVersion(): Promise<string> {
 }
 
 /**
+ * 【T57】配置快照 —— 只取"运维关心"的几个字段（`/admin/reload` 比对差异用）。
+ *
+ * 刻意**不含** `authToken` / `apiKey`：这个对象会被 diff 成响应体回给调用方，
+ * 放凭证进去就是把密钥印在 reload 的回执上。
+ */
+type RuntimeSnapshot = {
+  provider: string | null
+  model: string | null
+  baseUrl: string | null
+  mcpServers: string[]
+}
+
+/** 【T57】读一份配置快照。读不到就全空 —— 不编造。 */
+async function readRuntimeSnapshot(): Promise<RuntimeSnapshot> {
+  try {
+    const { loadRuntimeConfig } = await import('../config.js')
+    const runtime = await loadRuntimeConfig()
+    return {
+      provider: runtime.provider,
+      model: runtime.model,
+      baseUrl: runtime.baseUrl,
+      mcpServers: Object.keys(runtime.mcpServers).sort(),
+    }
+  } catch {
+    return { provider: null, model: null, baseUrl: null, mcpServers: [] }
+  }
+}
+
+/** 【T57】比对两份快照，产出 `{field, from, to}` 列表。 */
+function diffSnapshots(
+  before: RuntimeSnapshot | null,
+  after: RuntimeSnapshot,
+): Array<{ field: string; from: string | null; to: string | null }> {
+  if (before === null) return []
+  const changes: Array<{ field: string; from: string | null; to: string | null }> = []
+  const push = (field: string, a: string | null, b: string | null): void => {
+    if (a !== b) changes.push({ field, from: a, to: b })
+  }
+  push('provider', before.provider, after.provider)
+  push('model', before.model, after.model)
+  push('baseUrl', before.baseUrl, after.baseUrl)
+  // MCP 服务器按**名字集合**比对（配置体可能很大，回执只需说清"增删了哪个"）。
+  push('mcpServers', before.mcpServers.join(',') || null, after.mcpServers.join(',') || null)
+  return changes
+}
+
+/**
  * 解析前端静态资源目录（T10）。
  *
  * 缺省推导：`dist/web` 相对**本文件编译产物**的位置往上找。但本仓库以 tsx
@@ -343,6 +398,14 @@ export async function runServe(opts: ServeOptions): Promise<void> {
   // 与 exec 侧取的是**同一个** store（同一后端选择：file 或 pg），不会各挑一份。
   const { getSessionStore } = await import('../session.js')
 
+  // ── 【T57】管理面（**默认关闭**） ──
+  // 只有显式开启时才读一份配置快照（作为 reload 的比对基线）—— 关闭时零开销。
+  const adminEnabled =
+    opts.adminApiEnabled ?? process.env.LITE_AI_ENABLE_ADMIN_API === '1'
+  let configSnapshot: RuntimeSnapshot | null = adminEnabled
+    ? await readRuntimeSnapshot()
+    : null
+
   const app = createServerApp({
     store,
     usage,
@@ -374,6 +437,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
         // 判断其内部，故以 PG 配置为准 —— 宁可低估，不可高估合规能力。
         usageDurable: jobStoreIsPg,
         static: webRoot !== undefined,
+        admin: adminEnabled,
       },
       runtime: {
         node: process.versions.node,
@@ -381,6 +445,26 @@ export async function runServe(opts: ServeOptions): Promise<void> {
         host: os.hostname(),
       },
     }),
+    // ── 【T57】POST /admin/reload（默认关闭，显式开启才挂） ──
+    // 如实报告：`changes` 是配置差异，`note` 说清**生效时机** —— 不假装全热更。
+    ...(adminEnabled
+      ? {
+          admin: {
+            reload: async () => {
+              const next = await readRuntimeSnapshot()
+              const changes = diffSnapshots(configSnapshot, next)
+              configSnapshot = next
+              return {
+                reloaded: true,
+                changes,
+                note:
+                  '配置已重读，新值已反映在 GET /info。已装配的模型 adapter 与工具集' +
+                  '在**下次 job** 生效 —— 换 provider / 模型建议重启进程以彻底生效。',
+              }
+            },
+          },
+        }
+      : {}),
   })
 
   // ── Worker 装配（T4）+ 执行器接线（T5）──
@@ -409,6 +493,9 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       console.log('[serve]   GET  /sessions        会话列表（per-user，按 job 归属过滤）')
       console.log('[serve]   POST /sessions/:id/rename|fork  重命名 / 分叉会话')
       console.log('[serve]   GET  /info            实例自述（版本 / 模型 / 能力开关）')
+      if (adminEnabled) {
+        console.log('[serve]   POST /admin/reload    重读配置（管理面；默认关闭）')
+      }
       console.log(
         tracing.enabled
           ? '[serve]   tracing             Langfuse 已启用（OTel span → OTLP）'

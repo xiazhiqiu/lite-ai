@@ -45,7 +45,7 @@ const SSE_POLL_MS = 250
  * 条件链：新增 API 只在此处加一行，不会再漏。`isApiPath` 同时覆盖
  * `/jobs` 与 `/jobs/:id`、`/sessions` 与 `/sessions/:id/rename` 两类形态。
  */
-const API_PATH_PREFIXES = ['/chat', '/jobs', '/usage', '/sessions', '/info', '/webhook'] as const
+const API_PATH_PREFIXES = ['/chat', '/jobs', '/usage', '/sessions', '/info', '/admin', '/webhook'] as const
 
 /** 该路径是否属于数据面 API（静态托管须跳过）。 */
 function isApiPath(pathname: string): boolean {
@@ -79,8 +79,24 @@ export type ServerInfo = {
     usageDurable: boolean
     /** 是否在同源托管前端（`dist/web` 存在）。 */
     static: boolean
+    /** 【T57】管理面是否启用（`POST /admin/reload` 是否可用）。 */
+    admin: boolean
   }
   runtime: { node: string; pid: number; host: string }
+}
+
+/**
+ * 【T57】`POST /admin/reload` 的结果。
+ *
+ * 设计上刻意**如实报告**：把"重读了配置"与"新配置真正生效"分开讲。已装配的
+ * 模型 adapter / 工具集在本进程内不可能凭空换掉，所以 `note` 里必须说清哪些
+ * 要等重启 —— 假装"热重载成功"比不做这个端点更危险。
+ */
+export type AdminReloadResult = {
+  reloaded: boolean
+  changes: Array<{ field: string; from: string | null; to: string | null }>
+  /** 生效时机说明（例如"已装配的 adapter 仍用旧配置，重启后生效"）。 */
+  note?: string
 }
 
 export type ServerAppOptions = {
@@ -146,6 +162,14 @@ export type ServerAppOptions = {
    * 任何凭证（`authToken`/`apiKey`）与服务器绝对路径。见 `ServerInfo` 的说明。
    */
   info?: () => ServerInfo | Promise<ServerInfo>
+  /**
+   * 【T57】管理面（`POST /admin/reload`）。
+   *
+   * **不传 = 不挂路由**（404），而且这是**默认**：热重载配置是"运维口子"，
+   * 对齐 HolmesGPT 的 `ENABLE_ADMIN_API`（默认关、显式开、开了也必须鉴权）。
+   * 与 `usage`/`sessions`/`info` 的"缺口显式暴露"是同一套范式。
+   */
+  admin?: { reload: () => Promise<AdminReloadResult> | AdminReloadResult }
   /**
    * 外部触发关闭（测试注入）；与 SIGINT/SIGTERM 等效。
    */
@@ -306,6 +330,7 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
   const alertIngest = opts.alertIngest
   const sessions = opts.sessions
   const info = opts.info
+  const admin = opts.admin
 
   const server = http.createServer((req, res) => {
     void handle(req, res)
@@ -399,6 +424,22 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
       } catch {
         // 自述失败不该 500 掩盖成"实例坏了"—— 明确告知取不到，且不泄漏内部错误。
         return reply(res, 503, { error: 'info unavailable' })
+      }
+    }
+
+    // ── POST /admin/reload（T57）：重读配置（**默认关闭**） ──
+    //
+    // 对齐 HolmesGPT `ENABLE_ADMIN_API`：热重载是"运维口子"，默认不挂；未接线
+    // 时 404（同 usage / sessions / info 的"缺口显式暴露"）。它落在鉴权**之后**，
+    // 因此天然要求凭证 —— 不存在"匿名重载配置"这种口子。
+    if (path === '/admin/reload') {
+      if (admin === undefined) return reply(res, 404, { error: 'not found' })
+      if (req.method !== 'POST') return reply(res, 405, { error: 'method not allowed' })
+      try {
+        return reply(res, 200, await admin.reload())
+      } catch {
+        // 重载失败不附加内部错误文本（配置文件内容可能含敏感字段）。
+        return reply(res, 500, { error: 'reload failed' })
       }
     }
 

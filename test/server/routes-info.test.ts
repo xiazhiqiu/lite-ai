@@ -36,6 +36,7 @@ const SAMPLE: ServerInfo = {
     sessions: true,
     usageDurable: false,
     static: false,
+    admin: false,
   },
   runtime: { node: 'v22.0.0', pid: 1234, host: 'test-host' },
 }

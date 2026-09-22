@@ -300,6 +300,7 @@ node --import tsx src/index.ts --serve 8080
 | `GET /jobs/:id/stream` | SSE 事件流（工具调用 / 证据 / 结论逐条推） |
 | `GET /usage` | 用量与审计账本 |
 | `GET /info` | 实例自述：版本 / 模型 / provider / 能力开关（用没用 PG、tracing 开没开）。**需鉴权**，且**不含任何凭证** |
+| `POST /admin/reload` | 重读配置并回报差异。**默认关闭**（`LITE_AI_ENABLE_ADMIN_API=1` 才挂）；启用后仍需鉴权 |
 | `GET /sessions` | 当前用户的会话列表（`SessionStore` 无 `userId`，归属由「该会话下有属于你的 job」反查；无 job 的会话不出现） |
 | `POST /sessions/:id/rename` | 重命名会话，body `{ title }` |
 | `POST /sessions/:id/fork` | 分叉会话为独立副本，201 + `{ sessionId }` |
