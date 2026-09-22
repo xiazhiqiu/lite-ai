@@ -20,18 +20,25 @@ function makeHomeDir(): string {
 }
 
 /**
- * 符号链接是否**真的可用**（能解析）。
+ * 尝试创建符号链接，并返回它是否**真的可用**（能解析）。
  *
- * 为什么需要探测：Windows 上 `fs.symlinkSync` 在缺少
- * `SeCreateSymbolicLinkPrivilege`（管理员 / 开发者模式）时会**静默"成功"**，
- * 但链接根本不存在 —— 实测 `readlink`/`realpath`/`lstat`/`readFile` 全部 ENOENT。
- * 于是 `realpath()` 失败、走到 `not found` 分支，永远到不了 `out-of-root`，
- * 用例会稳定地红在一个**本机根本无法构造的场景**上。
+ * 为什么需要探测：本机（Windows）在缺少 `SeCreateSymbolicLinkPrivilege`
+ * （管理员 / 开发者模式）时，创建符号链接会出现**两种都不靠谱的表现**：
+ *   · 抛 `EPERM: operation not permitted, symlink ...`；或
+ *   · **静默"成功"**，但链接根本不存在 —— `readlink`/`realpath`/`lstat`/`readFile`
+ *     全部 ENOENT。
+ * 后者会让被测代码的 `realpath()` 失败、走到 `not found` 分支，永远到不了
+ * `out-of-root`，用例便稳定地红在一个**本机根本无法构造的场景**上。
  *
- * 这里只探测"链接是否可解析"，不吞掉真实断言 —— 探测不过就 skip，
- * 探测过了（Linux/macOS 及开了开发者模式的 Windows）断言照旧生效。
+ * 两种表现都要覆盖：创建放在 try 里，解析能力再单独确认。探测不过就 skip，
+ * 探测过了（Linux/macOS 及开了开发者模式的 Windows）断言照旧生效 —— 不吞真断言。
  */
-function isUsableSymlink(link: string): boolean {
+function tryCreateUsableSymlink(target: string, link: string): boolean {
+  try {
+    fs.symlinkSync(target, link)
+  } catch {
+    return false
+  }
   try {
     return fs.lstatSync(link).isSymbolicLink() && fs.readlinkSync(link).length > 0
   } catch {
@@ -77,10 +84,11 @@ describe('discoverInstructionFiles', () => {
       write(projectDir, 'LITE.local.md', '正常指令行\n@escaped-link\n')
       // symlink: project/escaped-link -> outside/secret.txt
       const link = path.join(projectDir, 'escaped-link')
-      fs.symlinkSync(path.join(dir, 'outside', 'secret.txt'), link)
-
-      if (!isUsableSymlink(link)) {
-        t.skip('本机无法创建可解析的符号链接（Windows 需开发者模式/管理员权限），该场景不可验证')
+      if (!tryCreateUsableSymlink(path.join(dir, 'outside', 'secret.txt'), link)) {
+        t.skip(
+          '本机无法创建可用的符号链接（Windows 需开发者模式/管理员权限；' +
+            '可能抛 EPERM，也可能静默创建失败），该场景在本机不可验证',
+        )
         return
       }
 

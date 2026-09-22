@@ -172,13 +172,29 @@ function toOpenAIMessages(
   // thinking 模式：把上一条 assistant_thinking 的推理文本回传到后续 assistant 消息的 reasoning_content
   let pendingReasoning: string | undefined
 
+  // thinking 模式要求的是字段**在场**，不是字段**非空** —— 空串同样必须回传。
+  //
+  // 曾经的写法是 `...(pendingReasoning ? { reasoning_content } : {})`：provider 返回
+  // `reasoning_content: ""`（字段在、内容空）时被当成"没有推理"，字段整个消失，
+  // 下一次请求直接 400 `The reasoning_content in the thinking mode must be passed back to the API`。
+  //
+  // 对真实失败请求体做过单变量变异，结论：
+  //   · 只给「带 tool_calls 那条」补 → 仍 400
+  //   · 只给「tool_calls 之前那条文本 assistant」补 → 200
+  //   · 给「全部 assistant」补（空串）→ 200
+  // 因此这里取安全超集：只要开了回传，每条 assistant 消息都带上该字段。
+  const reasoningFields = (): { reasoning_content?: string } => {
+    if (opts.passBackReasoning) return { reasoning_content: pendingReasoning ?? '' }
+    return pendingReasoning ? { reasoning_content: pendingReasoning } : {}
+  }
+
   const flushToolCalls = (): void => {
     if (pendingToolCalls.length === 0) return
     converted.push({
       role: 'assistant',
       content: null,
       tool_calls: pendingToolCalls.map(toOpenAIToolCall),
-      ...(pendingReasoning ? { reasoning_content: pendingReasoning } : {}),
+      ...reasoningFields(),
     })
     pendingToolCalls = []
     pendingReasoning = undefined
@@ -219,7 +235,7 @@ function toOpenAIMessages(
       converted.push({
         role: 'assistant',
         content: message.content,
-        ...(pendingReasoning ? { reasoning_content: pendingReasoning } : {}),
+        ...reasoningFields(),
       })
       pendingReasoning = undefined
       continue
@@ -275,6 +291,16 @@ function parseToolArguments(raw: string): unknown {
 }
 
 export class OpenAIModelAdapter implements ModelAdapter {
+  /**
+   * provider 是否在响应里返回过 `reasoning_content` 字段（**含空串**）。
+   *
+   * 用来补 `isThinkingModel()` 的名字启发式的漏判：`deepseek-v4-flash` 这类名字既不含
+   * "reasoner" 也不含 "thinking"，启发式判为 false，但服务端确实按 thinking 模式校验，
+   * 会在带 tool 的下一轮要求回传该字段（实测 400）。以「provider 真的返回过」为依据，
+   * 比猜模型名可靠。
+   */
+  private sawReasoningField = false
+
   constructor(
     private readonly tools: ToolRegistry,
     private readonly getRuntimeConfig: () => Promise<RuntimeConfig>,
@@ -304,7 +330,8 @@ export class OpenAIModelAdapter implements ModelAdapter {
       model: runtime.model,
       messages: toOpenAIMessages(messages, {
         passBackReasoning:
-          runtime.passBackReasoning ?? isThinkingModel(runtime.model),
+          runtime.passBackReasoning ??
+          (isThinkingModel(runtime.model) || this.sawReasoningField),
       }),
       tools: (options.tools ?? this.tools.list()).map(tool => ({
         type: 'function' as const,
@@ -377,6 +404,10 @@ export class OpenAIModelAdapter implements ModelAdapter {
     }
 
     const reasoning = message?.reasoning_content
+    // 记录"provider 返回了该字段"这一事实（含空串），供下一轮决定是否回传。
+    if (message !== undefined && 'reasoning_content' in message) {
+      this.sawReasoningField = true
+    }
     const thinkingBlocks: ProviderThinkingBlock[] = reasoning
       ? [{ type: 'thinking' as const, text: reasoning }]
       : []
