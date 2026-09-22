@@ -38,7 +38,14 @@ export type ApiKeyEntry = {
 }
 
 export type AuthConfig = {
-  /** key → userId 映射。**空数组 = 不启用鉴权**（仅回环可容忍，见 fail-fast）。 */
+  /**
+   * key → userId 映射。
+   *
+   * **空数组 = 不放行任何身份**（fail-closed）—— 而**不是**"关闭鉴权"。空表意味着
+   * "没有任何 key 能匹配"，因此即便绑定回环地址、即便请求带了 key，业务端点也一律
+   * 401。这是刻意的：绝不静默放行，避免部署方"以为配了、实际没配"却仍得到一个
+   * 可访问的端点。启动层只对回环地址放行"允许启动"，与请求是否放行是两回事。
+   */
   keys: readonly ApiKeyEntry[]
   /**
    * 免鉴权路径（精确匹配）。
@@ -134,7 +141,9 @@ export function authenticate(
     return { ok: false, reason: 'missing', status: 401 }
   }
 
-  // 空 key 表 = 不启用鉴权（仅回环场景，config 层已 fail-fast 拦住非回环）。
+  // 空 key 表 = **不放行任何身份**（fail-closed），措辞上不要读成"关闭鉴权"。
+  // 空表里没有任何 key 可匹配，所以即便回环地址、即便请求带了凭证，也一律 401。
+  // 这条行为被 auth.test.ts 与 routes-auth.test.ts 的用例钉死。
   if (config.keys.length === 0) {
     return { ok: false, reason: 'invalid', status: 401 }
   }

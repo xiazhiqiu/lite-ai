@@ -215,7 +215,7 @@ describe('T6 per-user 隔离：甲看不到乙的调查', () => {
   })
 })
 
-describe('T6 关闭鉴权（key 表为空）时的回环开发形态', () => {
+describe('T6 空 key 表 + 回环（fail-closed：业务端点仍 401，只有 /healthz 豁免）', () => {
   it('空 key 表 + 回环：业务端点仍要求凭证（不放行任何身份）', async () => {
     const ctx = await startApp({ keys: [] })
     try {

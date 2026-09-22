@@ -240,10 +240,16 @@ export async function runServe(opts: ServeOptions): Promise<void> {
   }
 
   // fail-closed：非回环绑定必须有 key，否则任何人可触发诊断（提权/RCE 面）。
-  // 回环绑定允许无 key（本机开发形态，Docker/k8s 探针也不需要凭证）。
+  // 回环绑定允许**无 key 启动**（本机开发形态，Docker/k8s 探针也不需要凭证）。
+  // ⚠️ 但「启动放行」≠「请求放行」：空 key 表下没有任何 key 能匹配，业务端点仍
+  // 一律 401。这里必须把话说全，否则运维会以为本机无需配 key 就能用（见下面的 warn）。
   assertAuthConfigForBinding(host, apiKeys)
   if (apiKeys.length === 0) {
-    console.warn('[serve] 回环地址且未配置 API key：**不启用鉴权**，仅限本机开发使用。')
+    console.warn(
+      '[serve] 回环地址且未配置 API key：业务端点（/chat、/jobs、/usage、SSE）' +
+        '**将一律返回 401**（fail-closed，即便回环也不静默放行）。' +
+        '本机开发请用 LITE_AI_API_KEY=<key> 启动，并在前端「访问密钥」处填入同一个 key。',
+    )
   }
 
   const { store, ready, dispose } = await selectStore(opts)

@@ -54,8 +54,9 @@ export type ServerAppOptions = {
    */
   ready?: () => Promise<boolean>
   /**
-   * 鉴权配置（T6）。`keys` 为空 = **不启用鉴权**（仅回环开发形态才允许，
-   * 非回环绑定的 fail-fast 在 `server/index.ts` 装配层拦截）。
+   * 鉴权配置（T6）。`keys` 为空 = **业务请求一律 401**（fail-closed），
+   * 而非"不启用鉴权"：空表里没有任何 key 可匹配。启动层的 fail-fast 只对
+   * 回环地址放行"允许启动"（`server/index.ts` 装配层），但那不代表端点开放。
    */
   auth?: AuthConfig
   /**

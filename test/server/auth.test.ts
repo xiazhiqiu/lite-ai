@@ -166,7 +166,7 @@ describe('assertAuthConfigForBinding（fail-fast）', () => {
     assert.doesNotThrow(() => assertAuthConfigForBinding('0.0.0.0', KEYS))
   })
 
-  it('回环 + 无 key → 放行（本机开发形态）', () => {
+  it('回环 + 无 key → 允许启动（注意：只放行启动，业务端点仍一律 401）', () => {
     for (const h of ['127.0.0.1', 'localhost', '::1']) {
       assert.doesNotThrow(() => assertAuthConfigForBinding(h, []), `${h} 应允许`)
     }

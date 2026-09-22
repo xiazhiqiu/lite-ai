@@ -264,6 +264,24 @@ pull: provider.poll() → Alert[]   ┘
 
 除本地 CLI 外，LiteAI 还能以**常驻服务端**运行：HTTP API + 异步 job 队列 + SSE 实时调查流 + 内置 Worker，前端值班台同源托管。
 
+### 本机 60 秒上手
+
+```bash
+npm run build:web                        # 构建前端值班台（dist/web）；已构建过可跳过
+
+LITE_AI_API_KEY=demo npm run dev -- --serve
+# → [serve] listening on http://127.0.0.1:8787
+```
+
+浏览器打开 <http://127.0.0.1:8787>，在「访问密钥」处填 `demo`（key 只存页面内存，刷新需重输）。
+想**离线演示**、不烧 token：前面再加 `LITE_AI_MODEL_MODE=mock`。
+
+> ⚠️ **回环 ≠ 免鉴权。** 即便绑在 `127.0.0.1`，未配 key 时 `/chat` `/jobs` `/usage` 与 SSE 也
+> **一律返回 401** —— 空 key 表是 fail-closed（没有任何 key 能匹配），刻意不静默放行，
+> 避免"以为配了、实际没配"。**本机开发同样必须给一把 key**，否则界面能打开却读不到任何数据。
+
+### 生产部署
+
 ```bash
 # 先构建前端值班台（服务端会托管 dist/web）
 npm run build:web
