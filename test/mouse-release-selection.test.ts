@@ -2,13 +2,13 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import type { TranscriptSelection } from '../src/tui/transcript.ts'
 
-const ttyAppModulePromise = import('../src/tty-app.ts')
+const renderModulePromise = import('../src/tui/app/render.ts')
 
 describe('mouse release selection', () => {
   it('keeps the current selection after mouse release', async () => {
-    const ttyAppModule = await ttyAppModulePromise
+    const renderModule = await renderModulePromise
     const keepSelectionAfterMouseRelease =
-      (ttyAppModule as { keepSelectionAfterMouseRelease?: (selection: TranscriptSelection | null) => TranscriptSelection | null })
+      (renderModule as { keepSelectionAfterMouseRelease?: (selection: TranscriptSelection | null) => TranscriptSelection | null })
         .keepSelectionAfterMouseRelease
 
     assert.equal(typeof keepSelectionAfterMouseRelease, 'function')
@@ -24,9 +24,9 @@ describe('mouse release selection', () => {
   })
 
   it('keeps null when there is no selection', async () => {
-    const ttyAppModule = await ttyAppModulePromise
+    const renderModule = await renderModulePromise
     const keepSelectionAfterMouseRelease =
-      (ttyAppModule as { keepSelectionAfterMouseRelease?: (selection: TranscriptSelection | null) => TranscriptSelection | null })
+      (renderModule as { keepSelectionAfterMouseRelease?: (selection: TranscriptSelection | null) => TranscriptSelection | null })
         .keepSelectionAfterMouseRelease
 
     assert.equal(typeof keepSelectionAfterMouseRelease, 'function')

@@ -8,7 +8,7 @@ import {
   pushWelcomeAnimation,
   renderWelcomeBody,
   startWelcomeEscapeAnimation,
-} from '../src/tty-app.ts'
+} from '../src/tui/app/welcome.ts'
 
 function makeState() {
   return {

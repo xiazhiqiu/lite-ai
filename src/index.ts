@@ -26,7 +26,7 @@ import { createSubAgentTools } from './tools/sub-agents.js'
 import { SubAgentManager } from './agents/manager.js'
 import type { ChatMessage } from './types.js'
 import { renderBanner } from './ui.js'
-import { runTtyApp } from './tty-app.js'
+import { runTtyApp } from './tui/app/run.js'
 import { runAgentTurn } from './agent-loop.js'
 import {
   applyContextCollapseIfNeeded,

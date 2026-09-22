@@ -1,13 +1,13 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-const ttyAppModulePromise = import('../src/tty-app.ts')
+const clipboardModulePromise = import('../src/tui/app/clipboard.ts')
 
 describe('Windows clipboard encoding', () => {
   it('encodes clipboard text as UTF-16LE with BOM on win32', async () => {
-    const ttyAppModule = await ttyAppModulePromise
+    const clipboardModule = await clipboardModulePromise
     const encodeClipboardTextForPlatform =
-      (ttyAppModule as {
+      (clipboardModule as {
         encodeClipboardTextForPlatform?: (platform: NodeJS.Platform, text: string) => string | Buffer
       }).encodeClipboardTextForPlatform
 
