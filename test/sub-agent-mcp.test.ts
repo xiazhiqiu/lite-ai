@@ -8,7 +8,6 @@ function makeTool(name: string, opts: { isReadOnly?: boolean } = {}): ToolDefini
     name,
     description: `test tool ${name}`,
     inputSchema: { type: 'object', properties: {} },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     schema: {} as any,
     async run() {
       return { ok: true, output: name }

@@ -57,9 +57,7 @@ import {
   type DependencyGraph,
 } from './topology.js'
 import type { IncidentStore } from '../incident/store.js'
-import type { IncidentRecord } from '../incident/types.js'
 import {
-  recordFromOpen,
   openFromRecord,
   toIncidentDiff,
 } from '../incident/serialize.js'

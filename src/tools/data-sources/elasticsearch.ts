@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { ToolDefinition } from '../../tool.js'
-import { clampToolOutput, DEFAULT_OUTPUT_CHARS, type ToolsetStatus } from './base.js'
+import { clampToolOutput, DEFAULT_OUTPUT_CHARS, fetchWithTimeout, type ToolsetStatus } from './base.js'
 import type { ResolvedToolsetConfig } from '../../config.js'
 
 /**
@@ -33,19 +33,12 @@ async function esRequest(
   body?: unknown,
   hitsLimit?: number,
 ): Promise<{ ok: boolean; output: string }> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 15_000)
-  let res: Response
-  try {
-    res = await fetch(`${baseUrl}${path}`, {
-      method,
-      signal: controller.signal,
-      headers: body !== undefined ? { 'content-type': 'application/json' } : {},
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    })
-  } finally {
-    clearTimeout(timer)
-  }
+  const res = await fetchWithTimeout(`${baseUrl}${path}`, {
+    method,
+    headers: body !== undefined ? { 'content-type': 'application/json' } : {},
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    timeoutMs: 15_000,
+  })
   const rawText = await res.text()
   if (!res.ok) {
     return { ok: false, output: clampToolOutput(`HTTP ${res.status}: ${rawText}`, DEFAULT_OUTPUT_CHARS) }

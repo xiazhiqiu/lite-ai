@@ -1,4 +1,3 @@
-import type { ToolDefinition } from '../../tool.js'
 import type { ResolvedToolsetConfig } from '../../config.js'
 
 /**
@@ -27,24 +26,40 @@ export type HttpResult = {
 }
 
 /** 统一 fetch 封装：非 2xx 不抛错，返回正文供上层解析。 */
+/** 任意 fetch 实现；与 webhook/topology 的 FetchLike 结构一致，便于注入测试桩。 */
+export type FetchFn = (input: string, init?: RequestInit) => Promise<Response>
+
+/**
+ * 带超时的 fetch 核心：统一 AbortController + setTimeout 中止逻辑，
+ * 避免各 data-source 重复实现同一段超时代码。返回原始 Response，由调用方决定如何解析。
+ */
+export async function fetchWithTimeout(
+  url: string,
+  init: RequestInit & { timeoutMs?: number; fetchImpl?: FetchFn } = {},
+): Promise<Response> {
+  const { timeoutMs = 15_000, fetchImpl = fetch, ...rest } = init
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetchImpl(url, { ...rest, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function httpGet(
   url: string,
   options: { headers?: Record<string, string>; timeoutMs?: number } = {},
 ): Promise<HttpResult> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 15_000)
-  try {
-    const res = await fetch(url, {
-      headers: options.headers ?? {},
-      signal: controller.signal,
-    })
-    return {
-      ok: res.ok,
-      status: res.status,
-      text: await res.text(),
-    }
-  } finally {
-    clearTimeout(timer)
+  const res = await fetchWithTimeout(url, {
+    method: 'GET',
+    headers: options.headers ?? {},
+    timeoutMs: options.timeoutMs,
+  })
+  return {
+    ok: res.ok,
+    status: res.status,
+    text: await res.text(),
   }
 }
 

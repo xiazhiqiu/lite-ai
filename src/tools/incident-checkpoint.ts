@@ -5,7 +5,6 @@ import {
   type IncidentCheckpoint,
   SEVERITIES,
   checkpointsFilePath,
-  emptyCheckpointList,
   enforceCheckpointLimit,
   readCheckpoints,
   updateCheckpoints,

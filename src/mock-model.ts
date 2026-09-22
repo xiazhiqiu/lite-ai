@@ -9,18 +9,6 @@ function lastToolMessage(messages: ChatMessage[]): ChatMessage | undefined {
   return [...messages].reverse().find(message => message.role === 'tool_result')
 }
 
-function extractLatestAssistantCall(messages: ChatMessage[]): string | undefined {
-  const last = [...messages]
-    .reverse()
-    .find(
-      message =>
-        message.role === 'assistant_tool_call',
-    )
-  return last?.role === 'assistant_tool_call'
-    ? last.toolName
-    : undefined
-}
-
 export class MockModelAdapter implements ModelAdapter {
   async next(messages: ChatMessage[]): Promise<AgentStep> {
     const toolMessage = lastToolMessage(messages)

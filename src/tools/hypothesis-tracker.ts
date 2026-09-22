@@ -2,10 +2,8 @@ import { z } from 'zod'
 import type { ToolDefinition } from '../tool.js'
 import {
   AbortMutationError,
-  type Evidence,
   type Hypothesis,
   HYPOTHESIS_STATUSES,
-  isHypothesisStatus,
   readHypotheses,
   updateHypotheses,
   validateHypothesisList,

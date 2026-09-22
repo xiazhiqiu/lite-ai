@@ -111,7 +111,6 @@ export type AlertGroup = {
 export function planAlertGroups(
   alerts: Alert[],
   config: Partial<CorrelationConfig> = {},
-  now: number = Date.now(),
   graph: DependencyGraph | null = null,
 ): AlertGroup[] {
   const cfg: CorrelationConfig = { ...DEFAULT_CORRELATION_CONFIG, ...config }
@@ -304,7 +303,7 @@ export function correlateAlerts(
   if (!cfg.enabled) return []
 
   const incidents: Incident[] = []
-  for (const group of planAlertGroups(alerts, config, now, graph)) {
+  for (const group of planAlertGroups(alerts, config, graph)) {
     if (group.type === 'topology') {
       // 拓扑簇已在 clusterByTopology 内按拓扑阈值过滤，直接成事件。
       incidents.push(
