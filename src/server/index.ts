@@ -235,6 +235,34 @@ async function readConfiguredModelName(): Promise<string> {
 }
 
 /**
+ * 【T56】读配置里的 provider 名（`/info` 用）。读不到返回 `null`，不猜。
+ */
+async function readConfiguredProvider(): Promise<string | null> {
+  try {
+    const { loadRuntimeConfig } = await import('../config.js')
+    const runtime = await loadRuntimeConfig()
+    return typeof runtime.provider === 'string' ? runtime.provider : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 【T56】读包版本（`/info` 用）。读不到返回 `'unknown'` —— 宁可不报，不编造。
+ */
+async function readPackageVersion(): Promise<string> {
+  try {
+    const { readFile } = await import('node:fs/promises')
+    // 相对本文件：`src/server/index.ts` → 仓库根 `package.json`。
+    const raw = await readFile(new URL('../../package.json', import.meta.url), 'utf8')
+    const parsed = JSON.parse(raw) as { version?: unknown }
+    return typeof parsed.version === 'string' ? parsed.version : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
  * 解析前端静态资源目录（T10）。
  *
  * 缺省推导：`dist/web` 相对**本文件编译产物**的位置往上找。但本仓库以 tsx
@@ -273,7 +301,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
   assertAuthConfigForBinding(host, apiKeys)
   if (apiKeys.length === 0) {
     console.warn(
-      '[serve] 回环地址且未配置 API key：业务端点（/chat、/jobs、/usage、/sessions、SSE）' +
+      '[serve] 回环地址且未配置 API key：业务端点（/chat、/jobs、/usage、/sessions、/info、SSE）' +
         '**将一律返回 401**（fail-closed，即便回环也不静默放行）。' +
         '本机开发请用 LITE_AI_API_KEY=<key> 启动，并在前端「访问密钥」处填入同一个 key。',
     )
@@ -326,6 +354,33 @@ export async function runServe(opts: ServeOptions): Promise<void> {
     abortSignal: opts.abortSignal,
     // 未启用告警形态时不传 → /webhook 明确 404（不是 200 空响应）。
     ...(alerts !== null ? { alertIngest: alerts.ingest } : {}),
+    // ── 【T56】GET /info：实例自述 ──
+    // 只暴露"这个实例装了什么"，供运维/前端一次问清。
+    // ⚠️ 安全红线：`RuntimeConfig` 带 `authToken`/`apiKey` —— 这里**逐字段挑选**，
+    // 绝不整体展开 runtime（那会把密钥 JSON 出去）。`cwd` 同理不外泄。
+    info: async () => ({
+      version: await readPackageVersion(),
+      model:
+        process.env.LITE_AI_MODEL_MODE === 'mock'
+          ? 'mock'
+          : (await readConfiguredModelName()) || null,
+      provider: await readConfiguredProvider(),
+      capabilities: {
+        tracing: tracing.enabled,
+        alerts: alerts !== null,
+        // sessions 恒接线（上面的 getSessionStore()）—— 除非将来改成可选。
+        sessions: true,
+        // 内存账本重启即丢；只有配了 PG 才敢说"持久"。注入的实现无法在本层
+        // 判断其内部，故以 PG 配置为准 —— 宁可低估，不可高估合规能力。
+        usageDurable: jobStoreIsPg,
+        static: webRoot !== undefined,
+      },
+      runtime: {
+        node: process.versions.node,
+        pid: process.pid,
+        host: os.hostname(),
+      },
+    }),
   })
 
   // ── Worker 装配（T4）+ 执行器接线（T5）──
@@ -353,6 +408,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       console.log('[serve]   GET  /usage           用量 / 审计账本（T7）')
       console.log('[serve]   GET  /sessions        会话列表（per-user，按 job 归属过滤）')
       console.log('[serve]   POST /sessions/:id/rename|fork  重命名 / 分叉会话')
+      console.log('[serve]   GET  /info            实例自述（版本 / 模型 / 能力开关）')
       console.log(
         tracing.enabled
           ? '[serve]   tracing             Langfuse 已启用（OTel span → OTLP）'

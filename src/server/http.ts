@@ -45,13 +45,42 @@ const SSE_POLL_MS = 250
  * 条件链：新增 API 只在此处加一行，不会再漏。`isApiPath` 同时覆盖
  * `/jobs` 与 `/jobs/:id`、`/sessions` 与 `/sessions/:id/rename` 两类形态。
  */
-const API_PATH_PREFIXES = ['/chat', '/jobs', '/usage', '/sessions', '/webhook'] as const
+const API_PATH_PREFIXES = ['/chat', '/jobs', '/usage', '/sessions', '/info', '/webhook'] as const
 
 /** 该路径是否属于数据面 API（静态托管须跳过）。 */
 function isApiPath(pathname: string): boolean {
   return API_PATH_PREFIXES.some(
     prefix => pathname === prefix || pathname.startsWith(`${prefix}/`),
   )
+}
+
+/**
+ * `GET /info` 的响应体（T56）—— 实例自述。
+ *
+ * **安全红线**：这个对象会被原样 JSON 出去，所以只放**非敏感的运行事实**。
+ * 尤其不许放 `RuntimeConfig.authToken` / `apiKey`（凭证泄漏），也不放服务器
+ * 绝对路径 `cwd`（给攻击者提供落点信息）。
+ */
+export type ServerInfo = {
+  version: string
+  model: string | null
+  provider: string | null
+  capabilities: {
+    /** 可观测性 sink（OTel → Langfuse）是否已启用。 */
+    tracing: boolean
+    /** 告警摄入形态是否启用（决定 `POST /webhook` 是否可用）。 */
+    alerts: boolean
+    /** 会话管理端点是否可用（`/sessions`）。 */
+    sessions: boolean
+    /**
+     * 审计账本是否**持久**（落 PG）。false = 内存账本，重启即丢 ——
+     * 运维要据此判断"合规检查到底有没有据可查"，所以必须实事求是地暴露。
+     */
+    usageDurable: boolean
+    /** 是否在同源托管前端（`dist/web` 存在）。 */
+    static: boolean
+  }
+  runtime: { node: string; pid: number; host: string }
 }
 
 export type ServerAppOptions = {
@@ -107,6 +136,16 @@ export type ServerAppOptions = {
    * 由本层用「该用户发起过的 job」反查归属后强制贯彻 —— 见 `handleListSessions`。
    */
   sessions?: SessionStore
+  /**
+   * 【T56】`GET /info` —— 实例自述（版本 / 模型 / 能力开关）。
+   *
+   * 注入而非在本层读配置：本文件是**传输层**，不该知道 config / tracing / webRoot
+   * 的存在（那些是装配层的知识）。不传 = 不挂路由（404），与 `usage`/`sessions` 同范式。
+   *
+   * ⚠️ 返回值会**原样 JSON** 出去 —— 装配层（`server/index.ts`）必须保证不含
+   * 任何凭证（`authToken`/`apiKey`）与服务器绝对路径。见 `ServerInfo` 的说明。
+   */
+  info?: () => ServerInfo | Promise<ServerInfo>
   /**
    * 外部触发关闭（测试注入）；与 SIGINT/SIGTERM 等效。
    */
@@ -266,6 +305,7 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
   const webRoot = opts.webRoot
   const alertIngest = opts.alertIngest
   const sessions = opts.sessions
+  const info = opts.info
 
   const server = http.createServer((req, res) => {
     void handle(req, res)
@@ -341,6 +381,25 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
       if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
       if (usage === undefined) return reply(res, 404, { error: 'not found' })
       return handleListUsage(res, url, userId)
+    }
+
+    // ── GET /info（T56）：实例自述 ──
+    //
+    // 为什么需要：部署后"这个实例到底装了什么"此前只能靠**翻启动日志**或逐个
+    // 试端点来推断（tracing 开没开？用的是内存队列还是 PG？）。`GET /info` 让
+    // 运维与前端用**一个**请求问清，也对齐 HolmesGPT 的 `GET /api/info`。
+    //
+    // **需要鉴权**：它暴露部署内部结构（存储后端、可观测性开关），属于"侦察面"，
+    // 不能匿名给。豁免与否由 `auth.exemptPaths` 决定，这里不另开口子。
+    if (path === '/info') {
+      if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
+      if (info === undefined) return reply(res, 404, { error: 'not found' })
+      try {
+        return reply(res, 200, await info())
+      } catch {
+        // 自述失败不该 500 掩盖成"实例坏了"—— 明确告知取不到，且不泄漏内部错误。
+        return reply(res, 503, { error: 'info unavailable' })
+      }
     }
 
     // ── /sessions 系列（第 1 档：会话管理） ──
