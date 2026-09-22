@@ -35,8 +35,19 @@
  *
  * 本文件**每一处** SDK 调用都在 try/catch 内，失败只记一条 debug 级信息。
  * 观测失败最多丢一个 span，绝不允许冒泡进 `exec.ts` 的调查主流程。
+ *
+ * ## 但"不会把调查搞挂"不等于"可以不说"（T-obs 补）
+ *
+ * 全包 try/catch 的副作用是：**上报彻底坏掉时本模块一声不吭**。而且 SDK 的
+ * 后台批量导出失败走的是 OTel `diag`，其默认实现是 no-op —— 错误在那里就被丢了，
+ * 连 SDK 自己都不会打印。结果是日志写着"Langfuse 已启用"、实际一个 span 都没上去，
+ * **没有任何一条提示**：正是本文件要防的那种静默偏差，只不过换了个藏身处。
+ *
+ * 所以 `createLangfuseTracingSink` 会显式把 `diag` 接到本模块的 `log`
+ * （`installExportDiagnostics`，附实测依据）。
  */
 import { NodeSDK } from '@opentelemetry/sdk-node'
+import { diag, DiagLogLevel } from '@opentelemetry/api'
 import { LangfuseSpanProcessor } from '@langfuse/otel'
 import {
   startObservation,
@@ -80,6 +91,69 @@ function attrString(value: string | null | undefined): string | undefined {
 }
 
 type Logger = (level: 'info' | 'warn' | 'error', message: string) => void
+
+/** 安全字符串化诊断参数（可能含 Error / 普通对象；序列化失败不许抛）。 */
+function fmtDiagArg(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value instanceof Error) return value.message
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+/**
+ * 把 OTel 的内部诊断（`diag`）接到本模块的 `log` —— **让导出失败不再静默**。
+ *
+ * ## 为什么必须显式做（实测缺口，不是推测）
+ *
+ * `LangfuseSpanProcessor` 继承 `BatchSpanProcessor`，走的是**后台批量导出**。
+ * 导出失败时它只调 `diag.error(...)`，而 OTel 的 `diag` **默认是 no-op**：
+ * 消息就在那一行被丢掉，SDK 自己也不会打印。
+ *
+ * 实测对照（`tmp/probe-diag-fix.mjs`，两个**独立进程**各跑一次，避免同进程
+ * 重复起 NodeSDK 产生的 "duplicate registration" 噪声污染实验）：
+ *
+ * | baseUrl 指向没人监听的端口，发 3 个 span 后等一轮批量导出 | 输出 |
+ * |---|---|
+ * | 不装 diag | **0 行**（完全静默） |
+ * | 装了 diag | `connect ECONNREFUSED 127.0.0.1:59999` 完整可见 |
+ *
+ * ## 一个更简单、但实测行不通的替代方案（别再试）
+ *
+ * 曾考虑用"周期性 `forceFlush()` 当看门狗"——零新依赖、好测。**实测不成立**：
+ * 批量导出失败后待发队列已被清空，其后的 `forceFlush()` **不再抛错**，
+ * 看门狗对那次失败完全无感（`tmp/probe-watchdog-viability.mjs`）。
+ *
+ * ## 代价与边界
+ *
+ * - `diag` 是**进程级单例**：装载后影响本进程内所有 OTel 组件。本仓 OTel 的唯一
+ *   使用者就是本模块，可接受；因此也只在真实 sink（有凭据）这条路径上装。
+ * - `DiagLogLevel.WARN`：只放行 warn/error。刻意**不**开 INFO/DEBUG ——
+ *   OTel 内部 DEBUG 会打印 span 细节，其中可能含工具输入输出（保密性）。
+ * - `suppressOverrideMessage`：重复装配（测试 / 热重载）时不刷"logger 被覆盖"。
+ * - **不在 shutdown 里 `diag.disable()`**：装了就一直装着。理由是这个 logger 只是
+ *   把消息转给调用方的 `log` 回调（通常是 console），关停后继续装着无害；
+ *   而主动 disable 会让"关停后仍可能有残余导出"的告警无处可去。
+ */
+function installExportDiagnostics(log: Logger): void {
+  try {
+    diag.setLogger(
+      {
+        error: (...args: unknown[]) => log('error', `[tracing] OTel 诊断：${args.map(fmtDiagArg).join(' ')}`),
+        warn: (...args: unknown[]) => log('warn', `[tracing] OTel 诊断：${args.map(fmtDiagArg).join(' ')}`),
+        // 以下三级刻意留空：见上面 DiagLogLevel.WARN 的说明
+        info: () => {},
+        debug: () => {},
+        verbose: () => {},
+      },
+      { logLevel: DiagLogLevel.WARN, suppressOverrideMessage: true },
+    )
+  } catch {
+    // 诊断本身装不上，不该拖累上报（纪律 2）：宁可少一类告警，不可让 sink 起不来。
+  }
+}
 
 /**
  * 一条 job trace 的真实实现。
@@ -254,6 +328,9 @@ export async function createLangfuseTracingSink(args: {
   const { credentials } = args
   const log = args.log ?? ((): void => {})
 
+  // 先接诊断再起 SDK：否则启动早期的导出失败仍会落在 no-op diag 上被丢掉。
+  installExportDiagnostics(log)
+
   const processor = new LangfuseSpanProcessor({
     publicKey: credentials.publicKey,
     secretKey: credentials.secretKey,
@@ -271,6 +348,8 @@ export async function createLangfuseTracingSink(args: {
 
   return {
     enabled: true,
+    // `GET /trace/:jobId` 用它回报"B 轨去哪看"（不拼 UI 深链，理由见 tracing.ts）。
+    baseUrl: credentials.baseUrl ?? 'https://cloud.langfuse.com',
     startJobTrace: info => new LangfuseJobTrace(info),
     flush: async () => {
       try {

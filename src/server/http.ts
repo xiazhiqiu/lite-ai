@@ -27,6 +27,8 @@ import { routeAlertSource } from '../webhook/sources/index.js'
 import type { Alert } from '../webhook/types.js'
 import type { IngestResult, IngestContext } from '../ingest/pipeline.js'
 import type { SessionMeta, SessionStore } from '../session/store.js'
+import { deriveTraceId, type TracingSink } from '../observability/tracing.js'
+import { traceIdForJob } from './trace.js'
 
 /** SSE 心跳间隔：防反向代理/负载均衡把空闲连接掐掉。 */
 const SSE_HEARTBEAT_MS = 15_000
@@ -45,7 +47,7 @@ const SSE_POLL_MS = 250
  * 条件链：新增 API 只在此处加一行，不会再漏。`isApiPath` 同时覆盖
  * `/jobs` 与 `/jobs/:id`、`/sessions` 与 `/sessions/:id/rename` 两类形态。
  */
-const API_PATH_PREFIXES = ['/chat', '/jobs', '/usage', '/sessions', '/info', '/admin', '/webhook'] as const
+const API_PATH_PREFIXES = ['/chat', '/jobs', '/usage', '/sessions', '/info', '/admin', '/webhook', '/trace'] as const
 
 /** 该路径是否属于数据面 API（静态托管须跳过）。 */
 function isApiPath(pathname: string): boolean {
@@ -68,6 +70,17 @@ export type ServerInfo = {
   capabilities: {
     /** 可观测性 sink（OTel → Langfuse）是否已启用。 */
     tracing: boolean
+    /**
+     * 【T-obs 补】未启用 tracing 时的**原因**（启用时为 `null`）。
+     *
+     * 为什么需要一个布尔之外的东西：`tracing:false` 只说了"没上报"，却分不清是
+     * "故意的"（`LITE_AI_TRACING=0`）、"忘了配 key"（`no-langfuse-credentials`）
+     * 还是"sink 加载炸了"（`sdk-load-failed`）。这三者的处置完全不同 —— 前者无
+     * 事，后者要改配置，最后者要查依赖。启动日志里本来就打印这个 `reason`
+     * （`TracingSink.reason`），但**长跑实例的日志翻起来很贵**，而 `/info`
+     * 存在的全部意义就是"一个请求问清"，所以把同一个事实也放到这里。
+     */
+    tracingReason: string | null
     /** 告警摄入形态是否启用（决定 `POST /webhook` 是否可用）。 */
     alerts: boolean
     /** 会话管理端点是否可用（`/sessions`）。 */
@@ -174,6 +187,14 @@ export type ServerAppOptions = {
    * 外部触发关闭（测试注入）；与 SIGINT/SIGTERM 等效。
    */
   abortSignal?: AbortSignal
+  /**
+   * 【T-obs】可观测性 sink（B 轨）—— 只为 `GET /trace/:jobId` 回报"B 轨去哪看"。
+   *
+   * 本层**不读** sink 的任何 span（接口本身只出不入，见 `observability/tracing.ts`），
+   * 只用它的 `enabled` / `baseUrl` 两个只读事实。不传 = 视作未启用 B 轨，
+   * 响应里如实标 `langfuse.enabled: false`，而不是省掉该键。
+   */
+  tracing?: TracingSink
 }
 
 export type ServerApp = {
@@ -331,6 +352,7 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
   const sessions = opts.sessions
   const info = opts.info
   const admin = opts.admin
+  const tracing = opts.tracing
 
   const server = http.createServer((req, res) => {
     void handle(req, res)
@@ -535,6 +557,18 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
       return handleGetJob(req, res, jobId, url, userId)
     }
 
+    // ── GET /trace/:jobId（T-obs）：跨轨聚合视图 ──
+    //
+    // 为什么不复用 `/jobs/:id`（它同样以 jobId 为键）：那个端点的契约是**状态快照
+    // + 事件增量**，是前端值班台的轮询源，返回体要保持小而稳。跨轨视图要额外查
+    // D 轨账本、并回报 B 轨去哪个 baseUrl 看 —— 语义与成本都不同，混在一起会让
+    // 值班台每次轮询都白查一遍审计表。
+    const traceMatch = /^\/trace\/([^/]+)$/.exec(path)
+    if (traceMatch !== null) {
+      if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
+      return handleGetTrace(res, decodeURIComponent(traceMatch[1]!), url, userId)
+    }
+
     reply(res, 404, { error: 'not found' })
   }
 
@@ -627,6 +661,94 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
     return reply(res, 200, {
       events: events.map(toWireUsage),
       summary,
+    })
+  }
+
+  /**
+   * `GET /trace/:jobId` —— **跨轨聚合视图**（观测层的查询出口）。
+   *
+   * ## 为什么需要它
+   *
+   * 四条轨道各自都有读法（`/jobs/:id` 读 A 轨、`/usage?jobId=` 读 D 轨、Langfuse UI
+   * 读 B 轨、`metrics.db` 给本机开发看），但**没有任何一处能一次回答"这个 job 在
+   * 各条轨上分别是什么样"** —— 而这恰是排障时第一个要问的问题。三轨唯一的通用
+   * 关联键是 `jobId`（不是 traceId，理由见 `observability/tracing.ts`），
+   * 所以"事后按 jobId join"只能在服务端做。
+   *
+   * ## 取数与两条刻意的"不"
+   *
+   * - **A `job_events`**：`store.listEvents(jobId, after)` —— 真相源，逐事件，
+   *   与 `/jobs/:id` 同一套 `?after=` 增量语义（不重复实现分页）。
+   * - **D `usage_events`**：`usage.list({ userId, jobId })` —— 审计账本，每 job 一行。
+   * - **B Langfuse**：本层**不查**。接口方向单向（只出不入），且 Langfuse 走异步
+   *   OTLP、可见性有分钟级延迟，拿它当查询源会给出"事件不全"的假象。这里只回报
+   *   `enabled` / `baseUrl` / `traceId` 三个事实，**不拼 UI 深链**（路径随 Langfuse
+   *   大版本变化，本层没有 projectId，拼出来大概率 404 —— 宁可给料不给链接）。
+   * - **C `metrics.db`**：**明确不在这里**。它按本机 SQLite 聚合、**没有 job 维度**，
+   *   按 jobId 查不到任何行。响应里如实标 `available: false` + 原因，而不是省掉
+   *   这个键让调用方以为"接口漏了 C 轨"。
+   *
+   * ## 两套 traceId 都回，且各自标注归属
+   *
+   * `auditTraceId`（`tr-<jobId>`，可反解）与 `otelTraceId`（sha256 前 32 hex）
+   * **取值不等**，是刻意并存的两套（`observability/tracing.ts` 有完整论证）。
+   * 只回其中一个，调用方会以为"另一轨的 id 没落上"。
+   *
+   * ## 鉴权
+   *
+   * 与 `/jobs/:id` **完全同口径**：越权与不存在都回 404（403 会泄漏资源存在性，
+   * 可被用来枚举他人 jobId）。
+   */
+  async function handleGetTrace(
+    res: http.ServerResponse,
+    jobId: string,
+    url: URL,
+    userId: string,
+  ): Promise<void> {
+    const job = await store.get(jobId)
+    if (job === null || job.userId !== userId) {
+      return reply(res, 404, { error: 'job not found' })
+    }
+
+    const after = parseSeq(url.searchParams.get('after'))
+    const usageLimit = parseUsageLimit(url.searchParams.get('limit'))
+
+    // 两轨并发取：互不依赖，串行只会给这个"排障首问"接口白加一个 DB 往返。
+    // usage 未接线时退化为空数组（而不是让整个端点 404）—— A 轨永远可用，
+    // 不该因为 D 轨没装就读不到 trace。
+    const [events, usageRows] = await Promise.all([
+      store.listEvents(jobId, after),
+      usage === undefined ? Promise.resolve([]) : usage.list({ userId, jobId, limit: usageLimit }),
+    ])
+
+    const otelTraceId = deriveTraceId(jobId)
+    const langfuseEnabled = tracing?.enabled === true
+
+    return reply(res, 200, {
+      job: toWireJob(job),
+      identity: {
+        userId,
+        sessionId: job.sessionId,
+        jobId,
+        /** D 轨账本列 + 生命周期 JSONL 日志里用的 id（`tr-<jobId>`，可反解回 jobId）。 */
+        auditTraceId: traceIdForJob(jobId),
+        /** B 轨 OTel/Langfuse 的 traceId（`sha256(jobId)` 前 32 hex）。**与上面不等**。 */
+        otelTraceId,
+      },
+      tracks: {
+        jobEvents: { source: 'job_events', events: events.map(toWireEvent) },
+        usage: { source: 'usage_events', records: usageRows.map(toWireUsage) },
+        langfuse: {
+          enabled: langfuseEnabled,
+          baseUrl: langfuseEnabled ? (tracing?.baseUrl ?? null) : null,
+          traceId: langfuseEnabled ? otelTraceId : null,
+        },
+        metrics: {
+          available: false,
+          source: 'metrics.db',
+          reason: '本机聚合表无 job 维度，按 jobId 不可查（见 observability/metrics.ts）',
+        },
+      },
     })
   }
 

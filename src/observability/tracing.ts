@@ -117,6 +117,17 @@ export interface TracingSink {
    * 启动日志打印它，避免"以为接了 Langfuse 其实没接"的静默偏差。
    */
   readonly reason?: string
+  /**
+   * 分析后端地址（`enabled` 时为自托管/云端 Langfuse 的 baseUrl）。
+   *
+   * 用途单一：`GET /trace/:jobId` 要把"这条 trace 在 B 轨里长什么样、去哪看"
+   * 一并回给值班台。**这里只给地址与 id，不给拼好的 UI 深链** —— Langfuse 的
+   * trace 页面路径随大版本变化（v2 是 `/trace/<id>`，v3+ 是
+   * `/project/<projectId>/traces/<id>`），本层没有 projectId，拼出来大概率 404。
+   * 与其给一个"看起来能点、点了 404"的链接，不如把 `baseUrl` + `traceId` 交给
+   * 使用方自行拼接（前端知道自己的 Langfuse 版本）。
+   */
+  readonly baseUrl?: string
   startJobTrace(info: JobTraceInfo): JobTrace
   /** 把缓冲的 span 刷出去（纪律 3：SIGTERM 关闭序列里调用）。**永不抛错**。 */
   flush(): Promise<void>

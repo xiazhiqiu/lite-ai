@@ -415,6 +415,9 @@ export async function runServe(opts: ServeOptions): Promise<void> {
     auth: { keys: apiKeys },
     webRoot,
     abortSignal: opts.abortSignal,
+    // T-obs：`GET /trace/:jobId` 要回报"B 轨在哪个 Langfuse、traceId 是什么"。
+    // 只传 sink 本身（它只读 `enabled`/`baseUrl`），http 层不会去读 span。
+    tracing,
     // 未启用告警形态时不传 → /webhook 明确 404（不是 200 空响应）。
     ...(alerts !== null ? { alertIngest: alerts.ingest } : {}),
     // ── 【T56】GET /info：实例自述 ──
@@ -430,6 +433,9 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       provider: await readConfiguredProvider(),
       capabilities: {
         tracing: tracing.enabled,
+        // 未启用时给出原因（disabled-by-env / no-langfuse-credentials / sdk-load-failed），
+        // 启用时为 null —— 见 ServerInfo.capabilities.tracingReason。
+        tracingReason: tracing.enabled ? null : (tracing.reason ?? 'unknown'),
         alerts: alerts !== null,
         // sessions 恒接线（上面的 getSessionStore()）—— 除非将来改成可选。
         sessions: true,
