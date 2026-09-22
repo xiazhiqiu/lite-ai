@@ -31,6 +31,20 @@ export type WireJob = {
   finishedAt: number | null
 }
 
+/**
+ * 对齐 `toWireSession`（server/http.ts）—— `GET /sessions` 的返回项。
+ *
+ * 与 `WireJob` 的关键区别：会话是**跨多轮**的容器（追问两轮 = 一个会话、两条 job），
+ * 而 `WireJob` 是单次执行。值班台的左侧栏应按会话分组，而不是按 job 平铺。
+ */
+export type WireSession = {
+  id: string
+  /** `null` = 还没起名（刻意区别于空串），前端自行兜底成占位标题。 */
+  title: string | null
+  messageCount: number
+  updatedAt: number
+}
+
 /** 对齐 `toWireEvent`（server/http.ts）。 */
 export type WireEvent = {
   seq: number

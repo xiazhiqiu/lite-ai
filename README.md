@@ -276,7 +276,7 @@ LITE_AI_API_KEY=demo npm run dev -- --serve
 浏览器打开 <http://127.0.0.1:8787>，在「访问密钥」处填 `demo`（key 只存页面内存，刷新需重输）。
 想**离线演示**、不烧 token：前面再加 `LITE_AI_MODEL_MODE=mock`。
 
-> ⚠️ **回环 ≠ 免鉴权。** 即便绑在 `127.0.0.1`，未配 key 时 `/chat` `/jobs` `/usage` 与 SSE 也
+> ⚠️ **回环 ≠ 免鉴权。** 即便绑在 `127.0.0.1`，未配 key 时 `/chat` `/jobs` `/usage` `/sessions` 与 SSE 也
 > **一律返回 401** —— 空 key 表是 fail-closed（没有任何 key 能匹配），刻意不静默放行，
 > 避免"以为配了、实际没配"。**本机开发同样必须给一把 key**，否则界面能打开却读不到任何数据。
 
@@ -299,6 +299,9 @@ node --import tsx src/index.ts --serve 8080
 | `GET /jobs/:id?after=<seq>` | 状态快照 + 事件**增量** |
 | `GET /jobs/:id/stream` | SSE 事件流（工具调用 / 证据 / 结论逐条推） |
 | `GET /usage` | 用量与审计账本 |
+| `GET /sessions` | 当前用户的会话列表（`SessionStore` 无 `userId`，归属由「该会话下有属于你的 job」反查；无 job 的会话不出现） |
+| `POST /sessions/:id/rename` | 重命名会话，body `{ title }` |
+| `POST /sessions/:id/fork` | 分叉会话为独立副本，201 + `{ sessionId }` |
 | `POST /webhook` | 告警摄入（G7：**与 `/chat` 同一队列**，落成 `kind='alert'` 的 job） |
 | `GET /healthz` `GET /readyz` | 健康 / 就绪（**免鉴权**，给探针用） |
 | `GET /` | 前端值班台（构建后才有） |

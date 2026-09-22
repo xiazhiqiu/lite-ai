@@ -273,7 +273,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
   assertAuthConfigForBinding(host, apiKeys)
   if (apiKeys.length === 0) {
     console.warn(
-      '[serve] 回环地址且未配置 API key：业务端点（/chat、/jobs、/usage、SSE）' +
+      '[serve] 回环地址且未配置 API key：业务端点（/chat、/jobs、/usage、/sessions、SSE）' +
         '**将一律返回 401**（fail-closed，即便回环也不静默放行）。' +
         '本机开发请用 LITE_AI_API_KEY=<key> 启动，并在前端「访问密钥」处填入同一个 key。',
     )
@@ -311,9 +311,14 @@ export async function runServe(opts: ServeOptions): Promise<void> {
         ? null
         : await createAlertIngest(store, opts.cwd)
 
+  // 会话管理（第 1 档）：`/sessions` 的列表 / rename / fork 需要 SessionStore。
+  // 与 exec 侧取的是**同一个** store（同一后端选择：file 或 pg），不会各挑一份。
+  const { getSessionStore } = await import('../session.js')
+
   const app = createServerApp({
     store,
     usage,
+    sessions: getSessionStore(),
     cwd: opts.cwd,
     ready,
     auth: { keys: apiKeys },
@@ -346,6 +351,8 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       console.log('[serve]   GET  /jobs/:id         状态 + 事件增量（?after=<seq>）')
       console.log('[serve]   GET  /jobs/:id/stream  SSE 事件流')
       console.log('[serve]   GET  /usage           用量 / 审计账本（T7）')
+      console.log('[serve]   GET  /sessions        会话列表（per-user，按 job 归属过滤）')
+      console.log('[serve]   POST /sessions/:id/rename|fork  重命名 / 分叉会话')
       console.log(
         tracing.enabled
           ? '[serve]   tracing             Langfuse 已启用（OTel span → OTLP）'

@@ -26,11 +26,33 @@ import { MAX_BODY_BYTES, readBody } from './body.js'
 import { routeAlertSource } from '../webhook/sources/index.js'
 import type { Alert } from '../webhook/types.js'
 import type { IngestResult, IngestContext } from '../ingest/pipeline.js'
+import type { SessionMeta, SessionStore } from '../session/store.js'
 
 /** SSE 心跳间隔：防反向代理/负载均衡把空闲连接掐掉。 */
 const SSE_HEARTBEAT_MS = 15_000
 /** SSE 轮询间隔：事件源是 PG/Store 而非内存总线（plan G5），靠轮询拉增量。 */
 const SSE_POLL_MS = 250
+
+/**
+ * **数据面** API 路径前缀。静态资源托管必须对它们让路。
+ *
+ * 为什么要有这张表：静态托管跑在鉴权**之前**（登录页要匿名可取，见 `handle` 内注释），
+ * 而 SPA fallback 会把"无扩展名的未命中路径"一律回 `index.html`。于是只要某个 API
+ * 路径没被排除，`GET` 它就会拿到一坨 HTML —— 无鉴权、200、且路由根本不生效。
+ * （真实事故：`/sessions` 加进来时漏登，`GET /sessions` 返回了前端首页。）
+ *
+ * 用**集中登记 + 前缀匹配**替代散落的 `path !== x && !path.startsWith(y)`
+ * 条件链：新增 API 只在此处加一行，不会再漏。`isApiPath` 同时覆盖
+ * `/jobs` 与 `/jobs/:id`、`/sessions` 与 `/sessions/:id/rename` 两类形态。
+ */
+const API_PATH_PREFIXES = ['/chat', '/jobs', '/usage', '/sessions', '/webhook'] as const
+
+/** 该路径是否属于数据面 API（静态托管须跳过）。 */
+function isApiPath(pathname: string): boolean {
+  return API_PATH_PREFIXES.some(
+    prefix => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  )
+}
 
 export type ServerAppOptions = {
   store: JobStore
@@ -76,6 +98,16 @@ export type ServerAppOptions = {
    */
   alertIngest?: (alerts: Alert[], ctx: IngestContext) => IngestResult
   /**
+   * 会话存储（第 1 档：`/sessions` 系列 —— 列表 / 重命名 / 分叉）。
+   *
+   * **不传 = 不挂这些路由**（404）—— 与 `usage` 同范式：宁可让缺口显式暴露在
+   * 集成测试里，也不要静默给一个看起来能用、实则没接数据的端点。
+   *
+   * ⚠️ `SessionStore` 是 **cwd 作用域**的，本身**没有 userId**。per-user 隔离
+   * 由本层用「该用户发起过的 job」反查归属后强制贯彻 —— 见 `handleListSessions`。
+   */
+  sessions?: SessionStore
+  /**
    * 外部触发关闭（测试注入）；与 SIGINT/SIGTERM 等效。
    */
   abortSignal?: AbortSignal
@@ -119,6 +151,20 @@ function toWireJob(job: Job): Record<string, unknown> {
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     finishedAt: job.finishedAt,
+  }
+}
+
+/**
+ * session → 对外的 JSON 形态。
+ *
+ * `title` 缺省落 `null`（而不是空串）：前端可据此区分"还没起名"与"起了个空名"。
+ */
+function toWireSession(meta: SessionMeta): Record<string, unknown> {
+  return {
+    id: meta.id,
+    title: meta.title ?? null,
+    messageCount: meta.messageCount,
+    updatedAt: meta.updatedAt,
   }
 }
 
@@ -219,6 +265,7 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
   const auth: AuthConfig = opts.auth ?? { keys: [] }
   const webRoot = opts.webRoot
   const alertIngest = opts.alertIngest
+  const sessions = opts.sessions
 
   const server = http.createServer((req, res) => {
     void handle(req, res)
@@ -252,9 +299,12 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
 
     // ---- T10 静态资源：**在鉴权之前** ----
     // 理由：HTML/JS/CSS 本身不含任何数据，登录页必须能匿名拿到，否则用户
-    // 连"输入 key 的界面"都看不到。真正的数据面（/chat、/jobs、SSE）仍在
-    // 下面严格鉴权 —— 静态资源免鉴权不等于数据免鉴权。
-    if (webRoot !== undefined && path !== '/chat' && !path.startsWith('/jobs') && path !== '/usage') {
+    // 连"输入 key 的界面"都看不到。真正的数据面（/chat、/jobs、/usage、
+    // /sessions、/webhook）仍在下面严格鉴权 —— 静态免鉴权不等于数据免鉴权。
+    //
+    // **数据面路径一律不走静态**：交由 `isApiPath` 集中判定（见其注释），
+    // 否则 SPA fallback 会把 `GET /sessions` 之类当深链回 HTML。
+    if (webRoot !== undefined && !isApiPath(path)) {
       const result = await tryServeStatic(req, res, { root: webRoot })
       if (result.served) return
     }
@@ -291,6 +341,35 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
       if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
       if (usage === undefined) return reply(res, 404, { error: 'not found' })
       return handleListUsage(res, url, userId)
+    }
+
+    // ── /sessions 系列（第 1 档：会话管理） ──
+    //
+    // 为什么需要：`SessionStore` 早有 list / rename / fork，但 HTTP 层**一条都没
+    // 暴露** —— 值班台只能拿 job 列表充数（同一会话追问两轮 = 两条 job），且无法
+    // 重命名 / 分叉。
+    //
+    // 归属模型：`SessionStore` 是 cwd 作用域、**没有 userId**；所以"这个会话是不是
+    // 你的"只能靠 **job 所有权** 判定（会话因有人发起调查而存在，job 是所有权凭证）。
+    if (path === '/sessions') {
+      if (req.method !== 'GET') return reply(res, 405, { error: 'method not allowed' })
+      if (sessions === undefined) return reply(res, 404, { error: 'not found' })
+      return handleListSessions(res, url, userId)
+    }
+
+    const sessionActionMatch = /^\/sessions\/([^/]+)\/(rename|fork)$/.exec(path)
+    if (sessionActionMatch !== null) {
+      if (sessions === undefined) return reply(res, 404, { error: 'not found' })
+      if (req.method !== 'POST') return reply(res, 405, { error: 'method not allowed' })
+      const sessionId = decodeURIComponent(sessionActionMatch[1]!)
+      if (!(await sessionOwnedBy(sessionId, userId))) {
+        // 刻意**不区分**"不存在"与"不属于你" —— 否则它就成了探测他人会话 id 的信道。
+        return reply(res, 404, { error: 'session not found' })
+      }
+      if (sessionActionMatch[2] === 'rename') {
+        return handleRenameSession(req, res, sessionId)
+      }
+      return handleForkSession(res, sessionId)
     }
 
     // POST /webhook —— 告警摄入（G7：由 `--serve` 直接吸收，不再单独起进程）。
@@ -449,6 +528,80 @@ export function createServerApp(opts: ServerAppOptions): ServerApp {
       events: events.map(toWireUsage),
       summary,
     })
+  }
+
+  /**
+   * `GET /sessions` —— 会话列表（**per-user**）。
+   *
+   * 归属判定：**逐会话**查「它下面有没有属于本用户的 job」。刻意不用"先拉一批 job
+   * 取 sessionId 集合"那种写法 —— 那需要一个"拉多少条"的魔数，超过它的老会话会被
+   * **静默漏掉**；而会话量级（几十~几百）下逐条判定的代价完全可以接受。
+   *
+   * **诚实标注的边界**：没有任何 job 的会话不会出现在结果里（例如 CLI 直接建的、
+   * 或迁移进来的历史会话）。它们不是丢了，只是没有服务端归属凭证。
+   */
+  async function handleListSessions(
+    res: http.ServerResponse,
+    url: URL,
+    userId: string,
+  ): Promise<void> {
+    const all = await sessions!.list(opts.cwd)
+    const owned: SessionMeta[] = []
+    for (const meta of all) {
+      if (await sessionOwnedBy(meta.id, userId)) owned.push(meta)
+    }
+    const limit = parseLimit(url.searchParams.get('limit'))
+    return reply(res, 200, { sessions: owned.slice(0, limit).map(toWireSession) })
+  }
+
+  /**
+   * 会话归属判定：该会话下是否有属于 `userId` 的 job。
+   *
+   * `limit: 1` 只为回答"有没有"，不拉全量 —— 判定代价与会话内 job 数无关。
+   */
+  async function sessionOwnedBy(sessionId: string, userId: string): Promise<boolean> {
+    const mine = await store.list({ userId, sessionId, limit: 1 })
+    return mine.length > 0
+  }
+
+  /** `POST /sessions/:id/rename` —— body `{ title }`（归属校验在路由层已做）。 */
+  async function handleRenameSession(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    sessionId: string,
+  ): Promise<void> {
+    let bodyStr: string
+    try {
+      bodyStr = await readBody(req)
+    } catch {
+      return reply(res, 400, { error: 'payload too large' })
+    }
+    let body: unknown
+    try {
+      body = JSON.parse(bodyStr || '{}')
+    } catch {
+      return reply(res, 400, { error: 'invalid json' })
+    }
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      return reply(res, 400, { error: 'body must be a json object' })
+    }
+    const title = (body as Record<string, unknown>).title
+    if (typeof title !== 'string' || title.trim().length === 0) {
+      return reply(res, 400, { error: 'title is required' })
+    }
+    const ok = await sessions!.rename(opts.cwd, sessionId, title.trim())
+    if (!ok) return reply(res, 404, { error: 'session not found' })
+    return reply(res, 200, { ok: true })
+  }
+
+  /** `POST /sessions/:id/fork` —— 派生独立副本，201 + 新 sessionId。 */
+  async function handleForkSession(
+    res: http.ServerResponse,
+    sessionId: string,
+  ): Promise<void> {
+    const newId = await sessions!.fork(opts.cwd, sessionId)
+    if (newId === null) return reply(res, 404, { error: 'session not found' })
+    return reply(res, 201, { sessionId: newId })
   }
 
   /** GET /jobs/:id[?after=<seq>] —— 状态快照 + 事件增量（**仅限本人 job**）。 */

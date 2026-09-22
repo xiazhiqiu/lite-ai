@@ -41,9 +41,30 @@ if (testFiles.length === 0) {
 
 console.log(`[test] 发现 ${testFiles.length} 个测试文件`)
 
+/**
+ * 并发度。默认交给 `node --test` 自己决定（≈ CPU 核数 - 1）。
+ *
+ * 为什么留这个旋钮：多个测试文件并发跑时，若某个文件持有全局副作用
+ * （真实 HTTP 监听、OTLP/Langfuse 建连、模型加载等），并发下会互相干扰，
+ * 表现为**整个 run 挂住不出结果**（单文件跑却全绿）。资源受限的机器 / CI
+ * 上可用 `LITE_AI_TEST_CONCURRENCY=1 npm test` 复现或规避。
+ * 显式给非法值即报错，不静默回退 —— 否则"我明明设了 1 怎么还并发"很难查。
+ */
+const concurrency = process.env.LITE_AI_TEST_CONCURRENCY?.trim()
+if (concurrency !== undefined && concurrency !== '' && !/^[1-9]\d*$/.test(concurrency)) {
+  console.error(`LITE_AI_TEST_CONCURRENCY 取值非法：${concurrency}（只接受正整数）`)
+  process.exit(1)
+}
+
 const child = spawn(
   process.execPath,
-  ['--import', 'tsx', '--test', ...testFiles],
+  [
+    '--import',
+    'tsx',
+    '--test',
+    ...(concurrency ? [`--test-concurrency=${concurrency}`] : []),
+    ...testFiles,
+  ],
   { stdio: 'inherit' },
 )
 

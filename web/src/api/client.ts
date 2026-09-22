@@ -13,7 +13,13 @@
  *    job"这类正常业务分支，调用方 catch 后按需处理。不做"404 返回 null"的
  *    隐式宽恕——那会把越权 404 和真的不存在混为一谈（服务端刻意让二者同形）。
  */
-import type { ChatAccepted, JobSnapshot, UsageSnapshot, WireJob } from './types.js'
+import type {
+  ChatAccepted,
+  JobSnapshot,
+  UsageSnapshot,
+  WireJob,
+  WireSession,
+} from './types.js'
 
 /** 服务端返回的业务错误（非 2xx）。 */
 export class ApiError extends Error {
@@ -146,4 +152,43 @@ export async function getUsage(filter?: {
   if (filter?.limit !== undefined) params.set('limit', String(filter.limit))
   const qs = params.toString()
   return request<UsageSnapshot>(`/usage${qs.length > 0 ? `?${qs}` : ''}`)
+}
+
+/**
+ * 列出会话（第 1 档）。
+ *
+ * **只返回"自己有 job 的会话"** —— 归属由服务端用 job 所有权反查（`SessionStore`
+ * 本身没有 userId 维度）。所以拿不到"别人的会话"、也拿不到"没有任何 job 的历史
+ * 会话"，这两条都是**刻意的**，不是漏了。
+ */
+export async function listSessions(filter?: { limit?: number }): Promise<WireSession[]> {
+  const params = new URLSearchParams()
+  if (filter?.limit !== undefined) params.set('limit', String(filter.limit))
+  const qs = params.toString()
+  const body = await request<{ sessions: WireSession[] }>(
+    `/sessions${qs.length > 0 ? `?${qs}` : ''}`,
+  )
+  return body.sessions
+}
+
+/**
+ * 重命名会话。
+ *
+ * 服务端做归属校验：不是你的会话 → **404**（与"不存在"同形，不泄漏存在性）。
+ * 所以调用方 catch 到 404 时，**不要**断言"这个会话一定不存在"。
+ */
+export async function renameSession(sessionId: string, title: string): Promise<void> {
+  await request<{ ok: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/rename`, {
+    method: 'POST',
+    body: { title },
+  })
+}
+
+/** 会话分叉：从现有会话派生独立副本，返回**新的** sessionId。 */
+export async function forkSession(sessionId: string): Promise<string> {
+  const body = await request<{ sessionId: string }>(
+    `/sessions/${encodeURIComponent(sessionId)}/fork`,
+    { method: 'POST' },
+  )
+  return body.sessionId
 }

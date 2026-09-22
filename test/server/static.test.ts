@@ -214,7 +214,7 @@ describe('静态托管（真 HTTP）', () => {
     assert.match(res.headers.get('content-type') ?? '', /text\/html/)
   })
 
-  it('API 前缀不被静态托管截胡（/jobs、/chat 仍走鉴权路由）', async () => {
+  it('API 前缀不被静态托管截胡（/jobs、/chat、/sessions 仍走鉴权路由）', async () => {
     // 若静态托管抢先响应 /jobs，API 会被一个 HTML 页面顶掉 —— 必须排除
     const jobs = await fetch(`${ctx.baseUrl}/jobs/some-job-id`)
     assert.ok(jobs.status < 500, `不得 5xx（实得 ${jobs.status}）`)
@@ -226,6 +226,16 @@ describe('静态托管（真 HTTP）', () => {
 
     const chat = await fetch(`${ctx.baseUrl}/chat`, { method: 'POST' })
     assert.ok(chat.status < 500, `不得 5xx（实得 ${chat.status}）`)
+
+    // /sessions 是后加的：曾因静态守卫的排除名单漏登，`GET /sessions` 被 SPA
+    // fallback 当深链回 HTML（200 + text/html，且**绕过鉴权**）。这条钉死它。
+    const sessions = await fetch(`${ctx.baseUrl}/sessions`)
+    assert.ok(sessions.status < 500, `不得 5xx（实得 ${sessions.status}）`)
+    assert.doesNotMatch(
+      sessions.headers.get('content-type') ?? '',
+      /text\/html/,
+      '/sessions 不得被 SPA fallback 成 HTML',
+    )
   })
 
   it('【关键】缺失的资源（带扩展名）返回 404，**不回 index.html**', async () => {

@@ -52,6 +52,30 @@ export function App(): React.ReactElement {
     setSessionId(undefined)
   }, [])
 
+  /**
+   * 从左侧**会话栏**选中一个会话（第 1 档）。
+   *
+   * 与 `openJob` 的区别：这里用户明确"进入这个会话"，所以**预设 `sessionId`** ——
+   * 输入框随之变成"追问"（复用该会话上下文），这正是会话侧栏的意义。
+   */
+  const selectSession = useCallback((sid: string, latestJobId: string): void => {
+    setSessionId(sid)
+    setSelectedJobId(latestJobId)
+  }, [])
+
+  /**
+   * 分叉完成：切到新会话。
+   *
+   * 新会话**还没有 job**（fork 只复制历史），所以清空 `selectedJobId`、只设
+   * `sessionId` —— 用户在这里发第一句追问时会在新会话下建 job，随后就出现在左侧。
+   */
+  const handleForked = useCallback((newSessionId: string): void => {
+    setTab('console')
+    setSessionId(newSessionId)
+    setSelectedJobId(null)
+    setRefreshKey(k => k + 1)
+  }, [])
+
   return (
     <div className="app">
       <header className="topbar">
@@ -101,8 +125,9 @@ export function App(): React.ReactElement {
         {tab === 'console' ? (
           <>
             <SessionList
-              selectedId={selectedJobId}
-              onSelect={openJob}
+              selectedSessionId={sessionId ?? null}
+              onSelect={selectSession}
+              onForked={handleForked}
               refreshKey={refreshKey}
               onUnauthorized={handleUnauthorized}
             />
