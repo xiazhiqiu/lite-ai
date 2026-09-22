@@ -242,7 +242,14 @@ async function recordUsage(
   deps: JobExecutorDeps,
   job: Job,
   log: (level: 'info' | 'warn' | 'error', message: string) => void,
-  args: { modelName: string | null; durationMs: number; status: 'completed' | 'failed' },
+  args: {
+    modelName: string | null
+    durationMs: number
+    status: 'completed' | 'failed'
+    /** 本轮 LLM 调用的 token 累积（缺省 0 = provider 未回传 usage）。 */
+    inputTokens?: number
+    outputTokens?: number
+  },
 ): Promise<void> {
   if (deps.usage === undefined) return
   try {
@@ -254,11 +261,10 @@ async function recordUsage(
       // 的地方都能重算，不需要在 jobs 表加列、也不需要在这里生成再存。
       traceId: traceIdForJob(job.id),
       model: args.modelName,
-      // token 数暂记 0：本项目的 agent 栈当前未把 provider 的 usage 回传到
-      // 这一层（事件里也没有 token 字段）。**不编造数字** —— 字段留着，
-      // 等 T5 的 runner 把 usage 透传上来再填。
-      inputTokens: 0,
-      outputTokens: 0,
+      // token 来自本轮 onLlmCall 的累积（见 emitLlmCall）。provider 未回传
+      // usage 时保持 0 —— 仍然**不编造数字**。
+      inputTokens: args.inputTokens ?? 0,
+      outputTokens: args.outputTokens ?? 0,
       durationMs: args.durationMs,
       status: args.status,
     })
@@ -373,7 +379,19 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       push('progress', { content })
       traced(() => trace.event('progress', { content }))
     }
+    // ── 一轮 job 的用量累积（T-obs 尾差修复）──
+    // `onLlmCall` 每次调用都带回 provider 的 usage；这里累加成整轮总量，收尾时落进
+    // 审计账本（recordUsage）。此前账本硬编码 0，注释写着「等 runner 把 usage 透传
+    // 上来再填」—— T-obs 加的这个回调已经把它透出来了，只是没接上。
+    // 纪律不变：只有 provider **真给了数字**才累加，缺字段不强加（不编造）。
+    let llmInputTokens = 0
+    let llmOutputTokens = 0
+    let llmModel: string | null = null
     const emitLlmCall = (record: LlmCallEvent): void => {
+      if (typeof record.inputTokens === 'number') llmInputTokens += record.inputTokens
+      if (typeof record.outputTokens === 'number') llmOutputTokens += record.outputTokens
+      // 取最后一次调用的模型名：一轮内通常同一模型；若中途换了，记最终生效的那个。
+      if (typeof record.model === 'string' && record.model !== '') llmModel = record.model
       traced(() => trace.generation(record))
     }
 
@@ -419,9 +437,12 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
         await flush().catch(() => {})
         traced(() => trace.end({ status: 'error', error: reason }))
         await recordUsage(deps, job, log, {
-          modelName: null,
+          // 失败前若已发生过 LLM 调用，模型与 token 一样记（失败调查的用量同样要审计）。
+          modelName: llmModel,
           durationMs: Date.now() - startedAt,
           status: 'failed',
+          inputTokens: llmInputTokens,
+          outputTokens: llmOutputTokens,
         })
         throw error
       }
@@ -431,10 +452,14 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       await flush()
       traced(() => trace.end({ status: 'ok', output: { sessionId: diagnosedSessionId } }))
       await recordUsage(deps, job, log, {
-        // 模型由 runAlertDiagnosis 内部按运行时配置自建，执行器拿不到也不猜。
-        modelName: null,
+        // 模型由 runAlertDiagnosis 内部按运行时配置自建 —— 装配期拿不到，但诊断过程中
+        // 的 onLlmCall 会把它带回来，所以这里用实测的 llmModel（此前写死 null 是因为
+        // 「拿不到」，现在拿得到了）。
+        modelName: llmModel,
         durationMs: Date.now() - startedAt,
         status: 'completed',
+        inputTokens: llmInputTokens,
+        outputTokens: llmOutputTokens,
       })
       return
     }
@@ -461,12 +486,12 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
     const model =
       typeof deps.model === 'function' ? await deps.model({ tools }) : deps.model
 
-    // 实际生效的模型名：显式 `modelName` 优先，否则从 adapter 上探测
-    // （`adapter.model` 是可选约定）；都没有就是 null，不猜。
+    // 实际生效的模型名（审计 / 日志用）：由装配期显式给定（见 server/index.ts）。
+    // **刻意不从 adapter 探测** —— `ModelAdapter` 接口只有 `next()`，压根没有模型名
+    // 字段；原先那句 `(model as { model? }).model` 永远取到 undefined，是无效代码。
+    // 取不到就是 null，不猜（下游会用 `null` 而非 `'unknown'` 区分"未知"）。
     const effectiveModel =
-      deps.modelName !== undefined && deps.modelName !== ''
-        ? deps.modelName
-        : ((model as { model?: unknown }).model as string | undefined) ?? null
+      deps.modelName !== undefined && deps.modelName !== '' ? deps.modelName : null
 
     let finalMessages: ChatMessage[] = business
     try {
@@ -497,9 +522,12 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       // 失败同样是"发生过的调查"，也进账本（否则审计只记成功，
       // 而运维最想查的恰恰是失败那些）。
       await recordUsage(deps, job, log, {
-        modelName: effectiveModel,
+        // 实测模型优先；一次 LLM 都没调成（如装工具就炸）才回退到装配期探测值。
+        modelName: llmModel ?? effectiveModel,
         durationMs: Date.now() - startedAt,
         status: 'failed',
+        inputTokens: llmInputTokens,
+        outputTokens: llmOutputTokens,
       })
       throw error
     }
@@ -517,9 +545,11 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
     // 记账放在会话回写之后：若回写抛错，会走上面的 catch 路径记 failed，
     // 不会出现"同一轮记两条"（成功一条 + 失败一条）。
     await recordUsage(deps, job, log, {
-      modelName: effectiveModel,
+      modelName: llmModel ?? effectiveModel,
       durationMs: Date.now() - startedAt,
       status: 'completed',
+      inputTokens: llmInputTokens,
+      outputTokens: llmOutputTokens,
     })
   }
 }

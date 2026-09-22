@@ -177,6 +177,13 @@ async function defaultExecute(
   const { createJobExecutor } = await import('../jobs/exec.js')
   const { getSessionStore } = await import('../session.js')
 
+  // 模型名（审计账本用）：装配期解析一次。此前这里写死空串 `''`，导致 `/usage`
+  // 的 model 列恒为 null；而 exec 侧"从 adapter 探测模型名"是无根据的
+  // （`ModelAdapter` 接口只有 `next()`）。这里读的是与 adapter **同一份**配置，
+  // 不会漂移。
+  const modelName =
+    process.env.LITE_AI_MODEL_MODE === 'mock' ? 'mock' : await readConfiguredModelName()
+
   return createJobExecutor({
     jobStore: store,
     usage,
@@ -198,13 +205,33 @@ async function defaultExecute(
       const { AnthropicModelAdapter } = await import('../anthropic-adapter.js')
       return new AnthropicModelAdapter(tools, loadRuntimeConfig)
     },
-    modelName: process.env.LITE_AI_MODEL_MODE === 'mock' ? 'mock' : '',
+    modelName,
     log: (level, message) => {
       if (level === 'error') console.error(message)
       else if (level === 'warn') console.warn(message)
       else console.log(message)
     },
   })
+}
+
+/**
+ * 读「运行时配置里生效的模型名」，供审计账本使用。
+ *
+ * **为什么不从 adapter 拿**：`ModelAdapter` 接口只有 `next()`，没有模型名字段；
+ * adapter 内部是在 `next()` 里现读 `loadRuntimeConfig().model` 的，外层拿不到。
+ * 既然两边读的是同一份配置，这里读一次即等价，且不需要给 adapter 加接口。
+ *
+ * 读不到（无配置 / 解析失败）返回 `''` —— exec 侧会落 `null`，**不猜**模型名。
+ * 真正的配置错误会在 adapter 自己调用时报出来，落到那次 job 的 failed 上。
+ */
+async function readConfiguredModelName(): Promise<string> {
+  try {
+    const { loadRuntimeConfig } = await import('../config.js')
+    const runtime = await loadRuntimeConfig()
+    return typeof runtime.model === 'string' ? runtime.model : ''
+  } catch {
+    return ''
+  }
 }
 
 /**
