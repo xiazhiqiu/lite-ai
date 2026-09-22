@@ -26,15 +26,29 @@
  * ## 方向单向（纪律 1）
  *
  * 本模块**只出、不入**：没有任何读取 Langfuse 的 API。实时 UX 的真相源永远是
- * `job_events`（`job_events` 读端点延迟约 10 分钟、且无 SSE 订阅端点，不可作 UX 源）。
- * 这里连一个"查询"函数都不提供，从接口形状上杜绝反向依赖。
+ * `job_events`（PG 表 + `server/http.ts` 的 SSE 订阅端点）。反过来，
+ * **Langfuse 不可作实时 UX 源** —— 它走异步 OTLP 导出，可见性有分钟级延迟，
+ * 且本模块按规定不提供任何查询接口。
  *
- * ## 跨进程链路关联
+ * （此处原写作「`job_events` 读端点延迟约 10 分钟、且无 SSE 订阅端点，不可作 UX 源」
+ * ——那是把 Langfuse 的性质安到了 `job_events` 头上，与同段前半句自相矛盾，已更正。）
+ *
+ * ## 跨进程链路关联：本仓**并存两套 traceId**（刻意的，不是疏漏）
  *
  * OTel 的 `traceId` 是 32 位十六进制。lite-ai 的 `jobId`（`job-<uuid>`）不是合法
  * traceId，所以这里用 `deriveTraceId(jobId)` **确定性派生**（sha256 → 前 32 hex）：
  * 任何拿到 jobId 的地方（HTTP / Worker / exec / 审计回查）都能重算出同一个
- * traceId，**无需新增 schema 列**——与 T7 `trace.ts` 的 `traceIdForJob` 同一思路。
+ * traceId，**无需新增 schema 列**。
+ *
+ * ⚠️ 另一套在 `server/trace.ts:40 traceIdForJob` —— `tr-<jobId>`，**取值与本函数
+ * 不相等**（`tr-job-x` ≠ sha256 的 32 hex），别误以为两处指的是同一个东西。
+ * 并存是刻意的：
+ *   - **本函数（32 hex）**：OTel 规范强制该格式，且要与上游 `traceparent` 接得上；
+ *   - **`traceIdForJob`（`tr-` 前缀）**：① 日志里可 `grep 'tr-'` 一眼识别；
+ *     ② 能被 `jobIdFromTrace()` **反解**回 jobId（审计回查用）。
+ * 想"统一成一套"的两个方向都不划算：让 OTel 用 `tr-` 前缀违反规范；让审计账本
+ * 改用 32 hex 会**废掉反解能力**（`test/server/trace.test.ts` 与 3 个 e2e 都钉着它）。
+ * 跨轨对账请一律走 **jobId**（三轨都持有），别指望两个 traceId 能直接 join。
  *
  * 若上游 HTTP 请求带了 W3C `traceparent`（`00-<32hex>-<16hex>-<2hex>`），则沿用其
  * traceId（`parseTraceparent`），让 Langfuse 的树接到上游调用链上。

@@ -264,6 +264,51 @@ CREATE TABLE IF NOT EXISTS usage_events (
 
 CREATE INDEX IF NOT EXISTS usage_events_user_idx ON usage_events (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS usage_events_job_idx ON usage_events (job_id);
+-- 按会话 / 按链路对账用（T-obs 补）。缺这两个索引时，「某会话跑过哪些调查」
+-- 与「这条 trace 对应哪条记账」都会退化成 seq scan —— `jobs` 表早有
+-- `jobs_session_idx`，账本侧此前漏了。
+CREATE INDEX IF NOT EXISTS usage_events_session_idx ON usage_events (session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS usage_events_trace_idx ON usage_events (trace_id);
+
+-- ------------------------------------------------------------
+-- append-only 强制（T-obs 补）
+-- ------------------------------------------------------------
+--
+-- `usage/store.ts` 声称「不可篡改的落库」，但此前**只在接口层成立** ——
+-- `UsageStore` 只暴露 record / list / summarize，没有 update / delete，所以
+-- 应用代码改不了；可任何拿到 PG 连接的人仍能直接
+-- `UPDATE usage_events SET input_tokens = 0`。合规要求"不可篡改"在**数据层**
+-- 成立，故补 DB 级强制。
+--
+-- 为什么用 trigger 而不是 `REVOKE UPDATE, DELETE`：REVOKE 的作用域是"某个角色"，
+-- 换一个连接角色（或 superuser）即失效；trigger 与角色无关，且错误信息可读。
+--
+-- 为什么连 TRUNCATE 也拦：TRUNCATE 是"清空账本"最短的路径，与 UPDATE 同属篡改。
+-- （边界：`DROP TABLE` 仍能删掉整张表 —— 那是 DDL 权限层的问题，且动静远大于
+-- 偷改一行；本约束只守 DML。）
+--
+-- ⚠️ 触发器按"语句"（STATEMENT）而非"行"（ROW）拦截：append-only 的语义是
+-- "任何一条 UPDATE / DELETE / TRUNCATE 语句都不许执行"，与影响行数无关，
+-- 且 STATEMENT 级不产生逐行开销。
+CREATE OR REPLACE FUNCTION usage_events_forbid_mutation() RETURNS trigger AS $$
+BEGIN
+  RAISE EXCEPTION 'usage_events is append-only (audit ledger): % is not allowed', TG_OP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- 幂等：DROP 后重建（`CREATE TRIGGER` 没有 `IF NOT EXISTS`）。
+-- UPDATE/DELETE 与 TRUNCATE 分成两个触发器 —— PG 对 TRUNCATE 触发器只接受
+-- `FOR EACH STATEMENT`，分开声明可避开"多事件 + 单一等级"的解析歧义。
+DROP TRIGGER IF EXISTS usage_events_no_mutation ON usage_events;
+DROP TRIGGER IF EXISTS usage_events_no_truncate ON usage_events;
+
+CREATE TRIGGER usage_events_no_mutation
+  BEFORE UPDATE OR DELETE ON usage_events
+  FOR EACH STATEMENT EXECUTE FUNCTION usage_events_forbid_mutation();
+
+CREATE TRIGGER usage_events_no_truncate
+  BEFORE TRUNCATE ON usage_events
+  FOR EACH STATEMENT EXECUTE FUNCTION usage_events_forbid_mutation();
 
 -- ============================================================
 -- 原子 claim（`FOR UPDATE SKIP LOCKED`）

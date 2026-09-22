@@ -19,10 +19,11 @@ import { formatDuration, formatTime } from '../format.js'
  *    审计数字就有了两个口径。服务端 `summarize()` 与 `list()` 是分开的两次查询，
  *    正是为了让汇总永远是全量。见 `src/usage/store.ts` 的模块注释。
  *
- * 2. **token 列显示 0 是"真实的 0"，不是"未采集"**。当前执行链**尚未**把
- *    provider 返回的 usage 透传到记账层（`exec.ts:recordUsage` 里显式写了 0
- *    并注明原因）。所以页面上有一句显式说明 —— 不能让值班员把"采集缺口"
- *    误读成"这次调查确实没消耗 token"。
+ * 2. **token 列是执行链的实测值**（T-obs 尾差修复后）。`jobs/exec.ts` 的
+ *    `emitLlmCall` 把每次 `onLlmCall` 的 usage **累加**成整轮总量，收尾时交给
+ *    `recordUsage`；只有 provider 真返回数字才累加，缺字段保持 0（不编造）。
+ *    所以列里出现 0 的含义是「provider 未返回该字段」或「本次调用确实无消耗」，
+ *    **不再是"未采集"** —— 这句话此前是反的，已随采集接通更正。
  *
  * ## 404 的处理
  *
@@ -95,8 +96,8 @@ export function UsageView({
       ) : null}
 
       <div className="callout info">
-        token 列当前显示 <strong>0</strong>：执行链尚未把模型返回的 usage 透传到记账层
-        （字段已就位，采集待补）。<strong>这是采集缺口，不是"没有消耗"</strong>。
+        token 列为执行链<strong>实测值</strong>（累加每次模型调用的 usage）。
+        显示 <strong>0</strong> 表示 provider 未返回该字段，或本次调用确实无消耗。
       </div>
 
       <div className="filters" style={{ marginTop: 14 }}>
