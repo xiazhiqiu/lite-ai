@@ -113,6 +113,8 @@ export const EVENT_KINDS = {
   toolStart: 'tool_start',
   toolResult: 'tool_result',
   assistantMessage: 'assistant_message',
+  /** 【T55】上下文压缩（L1 snip / L2 collapse / L3 compact），由 exec.ts 透出。 */
+  contextCompacted: 'context_compacted',
 } as const
 
 /** 判断 job 是否处于可继续接收事件的活跃态。 */

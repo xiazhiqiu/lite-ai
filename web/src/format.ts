@@ -169,6 +169,25 @@ export function eventSummary(kind: string, payload: Record<string, unknown>): st
     if (typeof text === 'string') return truncate(text.replace(/\s+/g, ' '), 110)
     return '(回复)'
   }
+  // 【T55】上下文压缩（L1 snip / L2 collapse / L3 compact）—— 后端的
+  // `context_compacted` 事件。压缩是"静默偷走上下文"的操作，值日时若不显式提示，
+  // 运维会误判 agent 的记忆边界（"我讲了三遍它怎么还是忘了"）。
+  if (kind === 'context_compacted') {
+    const level = payload.level
+    const label =
+      level === 'snip' ? 'L1 snip' : level === 'collapse' ? 'L2 collapse' : 'L3 compact'
+    const removed =
+      typeof payload.removedCount === 'number' ? `（${payload.removedCount} 条）` : ''
+    const freed =
+      typeof payload.tokensFreed === 'number' ? `，释放 ~${payload.tokensFreed} tokens` : ''
+    const before = payload.tokensBefore
+    const after = payload.tokensAfter
+    const pct =
+      typeof before === 'number' && typeof after === 'number' && before > 0
+        ? ` −${Math.round((1 - after / before) * 100)}%`
+        : ''
+    return `上下文压缩 · ${label}${removed}${freed}${pct}`
+  }
   return truncate(formatPayload(payload), 110)
 }
 

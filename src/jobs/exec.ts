@@ -21,7 +21,9 @@
  *    这样 `diagnose` 落下的告警会话可以被人工直接接管续问（"机器先查、人接着问"）。
  */
 import { ToolRegistry } from '../tool.js'
-import type { ChatMessage, ModelAdapter } from '../types.js'
+import type { ChatMessage, CompressionResult, ModelAdapter } from '../types.js'
+import type { SnipCompactResult } from '../compact/snipCompact.js'
+import type { ContextCollapseResult } from '../compact/context-collapse.js'
 import type { JobStore } from './store.js'
 import type { Job } from './types.js'
 import type { SessionStore } from '../session/store.js'
@@ -61,6 +63,14 @@ export type TurnRunner = (args: {
   onProgressMessage?: (content: string) => void
   /** 【T-obs】LLM 调用用量回调（透传给 `runAgentTurn`）。 */
   onLlmCall?: (record: LlmCallEvent) => void
+  /**
+   * 【T55】上下文压缩可见性。TTY 形态早已展示（`tty-app.ts` 的三个同名回调），
+   * 服务端此前**一条都没接** —— 值班台只能看到 token 数在动，看不到"上下文被压缩"。
+   * 这三个回调把压缩事实透出成 `context_compacted` 事件（见 emitAutoCompact 等）。
+   */
+  onAutoCompact?: (result: CompressionResult) => void | Promise<void>
+  onSnipCompact?: (result: SnipCompactResult) => void | Promise<void>
+  onContextCollapse?: (result: ContextCollapseResult) => void | Promise<void>
   signal?: AbortSignal
 }) => Promise<ChatMessage[]>
 
@@ -395,6 +405,47 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       traced(() => trace.generation(record))
     }
 
+    // ── 【T55】上下文压缩可见性（L1 snip / L2 collapse / L3 compact） ──
+    // 与 T-obs 同一条纪律：**只落压缩器给出的事实**，不在此重算 token。
+    // 压缩是"静默偷走上下文"的操作：不透明化会让运维误判 agent 的记忆边界
+    // （"我明明讲了三遍，它怎么还是忘了" —— 因为 snip 把那几条摘掉了）。
+    const emitAutoCompact = (result: CompressionResult): void => {
+      push('context_compacted', {
+        level: 'compact',
+        removedCount: result.removedCount,
+        tokensBefore: result.tokensBefore,
+        tokensAfter: result.tokensAfter,
+      })
+    }
+    const emitSnipCompact = (result: SnipCompactResult): void => {
+      // 没真剪（didSnip=false）不报 —— 否则每次巡检都刷一条零信息噪音。
+      if (!result.didSnip) return
+      push('context_compacted', {
+        level: 'snip',
+        removedCount: result.removedMessageIds.length,
+        tokensFreed: Math.round(result.tokensFreed),
+        tokensBefore: result.tokensBefore,
+        tokensAfter: result.tokensAfter,
+      })
+    }
+    const emitContextCollapse = (result: ContextCollapseResult): void => {
+      // 同理：collapsed=false 是"检查过但没折"，不是一个发生过的动作。
+      if (!result.collapsed) return
+      // `ContextCollapseResult` 自身不带 token（只有 span 带）——取本次生效的那个。
+      const span = result.span ?? result.spans[result.spans.length - 1]
+      push('context_compacted', {
+        level: 'collapse',
+        ...(span === undefined
+          ? {}
+          : {
+              removedCount: span.messageIds.length,
+              tokensBefore: span.tokensBefore,
+              tokensAfter: span.tokensAfter,
+              reason: span.reason,
+            }),
+      })
+    }
+
     // ── G7：告警诊断分支（kind='alert'，由 IngestPipeline 入队） ──
     //
     // 关键差异：告警诊断走**既有的** `runAlertDiagnosis` 链路 —— 它自带
@@ -508,6 +559,10 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
         onAssistantMessage: emitAssistantMessage,
         onProgressMessage: emitProgress,
         onLlmCall: emitLlmCall,
+        // 【T55】压缩可见性：此前服务端完全没接，值班台看不到上下文被压缩。
+        onAutoCompact: emitAutoCompact,
+        onSnipCompact: emitSnipCompact,
+        onContextCollapse: emitContextCollapse,
       })
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
