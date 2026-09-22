@@ -25,6 +25,7 @@ import {
 import { createServerApp, MAX_BODY_BYTES } from './http.js'
 import type { Alert } from '../webhook/types.js'
 import type { IngestResult, IngestContext } from '../ingest/pipeline.js'
+import { createTracingSink, type TracingSink } from '../observability/tracing.js'
 
 export type ServeOptions = {
   /** 服务端工作区路径（plan G4），缺省 `process.cwd()`。 */
@@ -79,6 +80,11 @@ export type ServeOptions = {
    * 缺省按 `loadWebhookConfig()` 装配真实管道。
    */
   alertIngest?: (alerts: Alert[], ctx: IngestContext) => IngestResult
+  /**
+   * 【T-obs】可观测性 sink 覆盖（测试注入）。缺省按环境变量装配
+   * （`createTracingSink`：无凭据 / `LITE_AI_TRACING=0` → noop）。
+   */
+  tracing?: TracingSink
   /** 外部触发关闭。 */
   abortSignal?: AbortSignal
 }
@@ -166,6 +172,7 @@ async function defaultExecute(
   store: JobStore,
   cwd: string,
   usage: UsageStore,
+  tracing: TracingSink,
 ): Promise<(job: Job) => Promise<void>> {
   const { createJobExecutor } = await import('../jobs/exec.js')
   const { getSessionStore } = await import('../session.js')
@@ -173,6 +180,8 @@ async function defaultExecute(
   return createJobExecutor({
     jobStore: store,
     usage,
+    // T-obs：job 执行时扇出 OTel span 到此 sink（noop 时零开销）。
+    tracing,
     sessionStore: getSessionStore(),
     cwd,
     model: async ({ tools }) => {
@@ -243,6 +252,19 @@ export async function runServe(opts: ServeOptions): Promise<void> {
   const jobStoreIsPg = resolvePgConfigFromEnv(process.env) !== null
   const usage = selectUsage(opts, jobStoreIsPg)
 
+  // ── T-obs：可观测性 sink（OTel → Langfuse，B 轨）──
+  // 配置门控：无 LANGFUSE_* 凭据 / LITE_AI_TRACING=0 → noop，且**不加载 SDK**。
+  // 与上面的 usage 是两条独立轨道：usage 是合规账本（自己查），tracing 是分析 sink。
+  const tracing =
+    opts.tracing ??
+    (await createTracingSink({
+      log: (level, message) => {
+        if (level === 'error') console.error(message)
+        else if (level === 'warn') console.warn(message)
+        else console.log(message)
+      },
+    }))
+
   // T10：托管前端（若已构建）。缺失不是错误 —— 纯 API 部署照常工作。
   const webRoot = resolveWebRoot(opts.webRoot)
 
@@ -271,7 +293,7 @@ export async function runServe(opts: ServeOptions): Promise<void> {
   // ── Worker 装配（T4）+ 执行器接线（T5）──
   // 真实执行器 = `createJobExecutor`：组装 runAgentTurn（唯一一份调查逻辑）
   // 并把回调翻译成 job_events。测试/嵌入方可用 `opts.execute` 覆盖。
-  const execute = opts.execute ?? (await defaultExecute(store, opts.cwd, usage))
+  const execute = opts.execute ?? (await defaultExecute(store, opts.cwd, usage, tracing))
   const worker: Worker = createWorker({
     store,
     assignee: `${os.hostname()}-${process.pid}`,
@@ -291,6 +313,11 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       console.log('[serve]   GET  /jobs/:id         状态 + 事件增量（?after=<seq>）')
       console.log('[serve]   GET  /jobs/:id/stream  SSE 事件流')
       console.log('[serve]   GET  /usage           用量 / 审计账本（T7）')
+      console.log(
+        tracing.enabled
+          ? '[serve]   tracing             Langfuse 已启用（OTel span → OTLP）'
+          : `[serve]   tracing             未启用（${tracing.reason ?? 'noop'}）`,
+      )
       console.log('[serve]   GET  /healthz /readyz  健康/就绪（免鉴权）')
       if (alerts !== null) {
         console.log(
@@ -323,6 +350,9 @@ export async function runServe(opts: ServeOptions): Promise<void> {
       app.server.closeAllConnections?.()
       void worker
         .drained()
+        // T-obs 纪律 3：先把 Langfuse 缓冲 flush 出去再释放资源（否则最后一波 span 丢）。
+        // 必须早于 dispose（关 PG 池）—— shutdown 里可能还要用网络导出。
+        .then(() => tracing.shutdown())
         .then(() => dispose())
         .then(() => (alerts !== null ? alerts.dispose() : undefined))
         .then(() => resolve())

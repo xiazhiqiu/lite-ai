@@ -25,6 +25,7 @@ import {
 } from './compact/snipCompact.js'
 import { computeContextStats } from './utils/token-estimator.js'
 import { createTurnScope, type TurnScope } from './observability/metrics.js'
+import type { LlmCallEvent } from './observability/tracing.js'
 import {
   partitionToolCalls,
   isToolConcurrencyEnabled,
@@ -87,6 +88,16 @@ export async function runAgentTurn(args: {
   onToolResult?: (toolUseId: string, toolName: string, output: string, isError: boolean) => void
   onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
   onProgressMessage?: (content: string) => void
+  /**
+   * 【T-obs】每次 LLM 调用的用量事实。
+   *
+   * 之前 `next.usage` 只进本地 SQLite metrics（`scope.pushLlm`）—— 服务端做
+   * Langfuse 的 generation observation 时拿不到它。这个回调把同一份结构化用量
+   * **也**暴露出来（不替代 pushLlm，只是多一个出口）。
+   *
+   * 缺省 undefined → 零行为变化（CLI/旧调用方不受影响）；实现方不得抛错。
+   */
+  onLlmCall?: (record: LlmCallEvent) => void
   onAutoCompact?: (result: CompressionResult) => void | Promise<void>
   onSnipCompact?: (result: SnipCompactResult) => void | Promise<void>
   onContextCollapse?: (result: ContextCollapseResult) => void | Promise<void>
@@ -139,6 +150,8 @@ async function runAgentTurnCore(
     onToolResult?: (toolUseId: string, toolName: string, output: string, isError: boolean) => void
     onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
     onProgressMessage?: (content: string) => void
+    /** 【T-obs】LLM 调用用量回调（见 `runAgentTurn` 的同名参数）。 */
+    onLlmCall?: (record: LlmCallEvent) => void
     onAutoCompact?: (result: CompressionResult) => void | Promise<void>
     onSnipCompact?: (result: SnipCompactResult) => void | Promise<void>
     onContextCollapse?: (result: ContextCollapseResult) => void | Promise<void>
@@ -311,16 +324,33 @@ async function runAgentTurnCore(
         signal: args.signal,
       })
     } catch (error) {
+      const llmError = error instanceof Error ? error.message : String(error)
       scope.pushLlm({
         model: modelName,
         provider: undefined,
         latencyMs: Date.now() - llmStartedAt,
-        error: error instanceof Error ? error.message : String(error),
+        error: llmError,
+      })
+      // 失败的调用同样上报（Langfuse 里能看到「这一步模型爆了」），且**不吞原错**。
+      args.onLlmCall?.({
+        model: modelName,
+        latencyMs: Date.now() - llmStartedAt,
+        error: llmError,
       })
       throw error
     }
     const llmLatencyMs = Date.now() - llmStartedAt
     scope.pushLlm({
+      model: modelName,
+      provider: next.usage?.source,
+      inputTokens: next.usage?.inputTokens,
+      outputTokens: next.usage?.outputTokens,
+      totalTokens: next.usage?.totalTokens,
+      latencyMs: llmLatencyMs,
+      stopReason: next.diagnostics?.stopReason,
+    })
+    // 【T-obs】同一份用量事实再走一个出口 → exec.ts 扇出成 Langfuse generation。
+    args.onLlmCall?.({
       model: modelName,
       provider: next.usage?.source,
       inputTokens: next.usage?.inputTokens,

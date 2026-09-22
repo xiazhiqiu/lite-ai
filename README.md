@@ -311,6 +311,36 @@ node --import tsx src/index.ts --serve 8080
 >
 > **告警归属哪个人？** 告警 job 的 `userId` 取**投递告警时用的那把 key**。所以值班台要看到本系统的告警，投递用的 key 与值班员登录用的 key 必须是**同一个 `userId`**（例如都配 `alice`）；否则 per-user 隔离会把告警 job 正确地隔在值班员视野之外 —— 这是设计使然，不是 Bug。
 
+## 可观测性（OTel + Langfuse）
+
+服务端可把每次调查的**执行过程**同时导出到 Langfuse（用于成本 / 延迟 / 质量 / eval 分析）。这与 `GET /usage` 的审计账本是**两条独立轨道**：账本是合规记录（自己查、落 PG），Langfuse 是分析 sink（外部系统看）。**实时 UX 的真相源永远是 `job_events` + SSE**，不交给 Langfuse —— 它读端点延迟约 10 分钟，且只有 HTTP 轮询、无 SSE 订阅端点，把 UX 命脉交出去等于主动制造故障点。
+
+```
+exec.ts  onToolStart / onToolResult / onAssistantMessage / onProgressMessage / onLlmCall
+   ├─→ job_events (PG)  ──→ SSE ──→ 前端        （真相源，持久化 + 跨实例）
+   └─→ OTel span        ──→ OTLP ──→ Langfuse  （分析 sink，可延迟、可挂）
+```
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `LANGFUSE_PUBLIC_KEY` | Langfuse 公钥（**两个 key 要给齐**，缺一个即降级为 no-op） |
+| `LANGFUSE_SECRET_KEY` | Langfuse 私钥 |
+| `LANGFUSE_BASE_URL` | 自托管实例地址；缺省走 Langfuse 云（注意是 `BASE_URL`，带下划线） |
+| `LANGFUSE_TRACING_ENVIRONMENT` / `LANGFUSE_RELEASE` | 环境 / 版本标记（可选） |
+| `LITE_AI_TRACING=0` | 显式关闭（不必去删 key） |
+
+**默认不启用**：没配 key 时 sink 是 no-op，且**一行 SDK 代码都不会被加载**（动态 import）。启动日志会打印 `tracing  未启用（no-langfuse-credentials）`，不会让你误以为正在上报。
+
+映射关系：一次 job = 一条 **Trace**（`session.id` = 会话、`user.id` = 鉴权身份）；工具调用 = **Tool** span；LLM 调用 = **Generation**（带 `usageDetails`，token 用量结构化直传、免解析）；助手消息 / 进度 = **Event**。traceId 由 `jobId` **确定性派生**（sha256 前 128 bit），任何拿到 jobId 的地方都能重算同一个值；上游带 W3C `traceparent` 时则沿用其 traceId，接到上游调用链上。
+
+三条硬约束：
+
+1. **方向单向** —— 只写不读，绝不拿 Langfuse 当事件源（接口形状上就不提供任何查询方法）。
+2. **error-safe** —— 扇出全部包 catch；Langfuse 挂了调查照跑、`job_events` 一条不少（有测试钉死这一点）。
+3. **关停补 flush** —— SIGTERM 序列里 `tracing.shutdown()` 挂在释放资源**之前**，最后一波 span 不丢。
+
+> 需要 `@langfuse/tracing` / `@langfuse/otel` / `@opentelemetry/sdk-node` 三个运行时依赖（已入 `dependencies`）。这是本项目除 `pg` 外**唯一**突破「运行时零新增依赖」口径之处 —— 换来的是相对 HolmesGPT 的真实增强点（可观测性）。不想引入时，整条 B 轨不配 key 即天然关闭。
+
 ## 只读安全边界
 
 LiteAI 默认**只读优先**，放心用于生产排查：

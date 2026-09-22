@@ -17,6 +17,7 @@ import { saveSession } from '../session.js'
 import { createContentReplacementState } from '../utils/tool-result-storage.js'
 import { createContextCollapseState } from '../compact/context-collapse.js'
 import type { ChatMessage, ModelAdapter } from '../types.js'
+import type { LlmCallEvent } from '../observability/tracing.js'
 import type { ToolRegistry } from '../tool.js'
 import type { Alert, Incident } from './types.js'
 import { alertSessionId, normalizeIncidentMessage, normalizeToUserMessage } from './types.js'
@@ -46,6 +47,11 @@ export type DiagnoseDeps = {
   ) => void
   onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
   onProgressMessage?: (content: string) => void
+  /**
+   * 【T-obs】LLM 调用用量回调，原样透传给 `runAgentTurn`（与上面四个事件回调同范式）。
+   * 缺省 undefined → 行为与 T-obs 之前完全一致。
+   */
+  onLlmCall?: (record: LlmCallEvent) => void
 }
 
 export type DiagnosisResult = {
@@ -148,6 +154,7 @@ export async function runAlertDiagnosis(args: {
       onToolResult: deps.onToolResult,
       onAssistantMessage: deps.onAssistantMessage,
       onProgressMessage: deps.onProgressMessage,
+      onLlmCall: deps.onLlmCall,
     })
   } catch (error) {
     // 失败优雅降级：记录 failed + 尽力落可 resume 会话 + 失败通知，再抛给队列日志

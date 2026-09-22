@@ -29,6 +29,12 @@ import type { PermissionManager } from '../permissions.js'
 import type { UsageStore } from '../usage/index.js'
 import type { Alert, Incident } from '../webhook/types.js'
 import { traceIdForJob } from '../server/trace.js'
+import {
+  createNoopTracingSink,
+  type JobTrace,
+  type LlmCallEvent,
+  type TracingSink,
+} from '../observability/tracing.js'
 
 /**
  * 事件批量落库的窗口（毫秒）。窗口内累积的事件一次写库。
@@ -53,6 +59,8 @@ export type TurnRunner = (args: {
   onToolResult?: (toolUseId: string, toolName: string, output: string, isError: boolean) => void
   onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
   onProgressMessage?: (content: string) => void
+  /** 【T-obs】LLM 调用用量回调（透传给 `runAgentTurn`）。 */
+  onLlmCall?: (record: LlmCallEvent) => void
   signal?: AbortSignal
 }) => Promise<ChatMessage[]>
 
@@ -77,6 +85,8 @@ export type AlertDiagnoser = (args: {
     ) => void
     onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
     onProgressMessage?: (content: string) => void
+    /** 【T-obs】LLM 调用用量回调（透传给 `runAgentTurn`）。 */
+    onLlmCall?: (record: LlmCallEvent) => void
   }
 }) => Promise<{ sessionId: string; diagnosisSummary: string }>
 
@@ -123,6 +133,15 @@ export type JobExecutorDeps = {
   usage?: UsageStore
   /** 结构化日志。 */
   log?: (level: 'info' | 'warn' | 'error', message: string) => void
+  /**
+   * 【T-obs】可观测性 sink（OTel → Langfuse）。**不传 = 不导出 span**。
+   *
+   * 与 `usage`（T7 本地审计台账）是**两条独立轨道**：`usage` 是合规账本（自己查，
+   * 落 PG），`tracing` 是分析 sink（外部系统看成本/延迟/质量/eval）。互不替代。
+   *
+   * 扇出点就在本文件：`job_events` 与 span **同时** emit，方向单向（见 tracing.ts）。
+   */
+  tracing?: TracingSink
 }
 
 /** 执行器：给 Worker 直接当 `execute` 用。 */
@@ -313,6 +332,51 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
     }, flushMs)
     timer.unref?.()
 
+    // ── T-obs：可观测性扇出（B 轨）──
+    // 与上面的 `job_events`（A 轨，真相源）**并行** emit：A 轨给前端 SSE，
+    // B 轨给 Langfuse 分析。方向单向 —— 这里只写不读，绝不拿 Langfuse 当事件源（纪律 1）。
+    const trace: JobTrace = startJobTrace(deps, job)
+    // 所有 trace 调用再包一层 try/catch：实现侧已自带 error-safe，这里防的是
+    // 「注入的假 sink 不守约」或「将来换实现时退化」——观测失败绝不能让 job failed。
+    const traced = (fn: () => void): void => {
+      try {
+        fn()
+      } catch (error) {
+        log('warn', `[exec] ${job.id} tracing 扇出失败（不影响调查）: ${String(error)}`)
+      }
+    }
+    // 四个 emit helper = 「落 job_events」+「扇出 span」的单一实现。
+    // chat / alert 两条分支共用它们，避免将来加第三条分支时漏接一轨。
+    const emitToolStart = (toolUseId: string, toolName: string, input: unknown): void => {
+      push('tool_start', { toolUseId, toolName, input })
+      traced(() => trace.toolStart(toolUseId, toolName, input))
+    }
+    const emitToolResult = (
+      toolUseId: string,
+      toolName: string,
+      output: string,
+      isError: boolean,
+    ): void => {
+      push('tool_result', { toolUseId, toolName, output, isError })
+      traced(() => trace.toolEnd(toolUseId, toolName, output, isError))
+    }
+    const emitAssistantMessage = (content: string, metadata?: { final?: boolean }): void => {
+      push('assistant_message', { content, final: metadata?.final === true })
+      traced(() =>
+        trace.event('assistant_message', {
+          final: metadata?.final === true,
+          content: content.length > 2000 ? `${content.slice(0, 2000)}…` : content,
+        }),
+      )
+    }
+    const emitProgress = (content: string): void => {
+      push('progress', { content })
+      traced(() => trace.event('progress', { content }))
+    }
+    const emitLlmCall = (record: LlmCallEvent): void => {
+      traced(() => trace.generation(record))
+    }
+
     // ── G7：告警诊断分支（kind='alert'，由 IngestPipeline 入队） ──
     //
     // 关键差异：告警诊断走**既有的** `runAlertDiagnosis` 链路 —— 它自带
@@ -322,6 +386,8 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
     if (job.kind === 'alert') {
       const { alert, incident } = parseAlertPayload(job.payload)
       const diagnoser = deps.alertDiagnoser ?? (await resolveRealAlertDiagnoser())
+      // 提到 try 外：成功分支的 `trace.end` 需要 sessionId（走到那里必已赋值）。
+      let diagnosedSessionId: string | null = null
       try {
         const result = await diagnoser({
           cwd,
@@ -330,23 +396,15 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
           deps: {
             // 过程逐条落库：告警诊断第一次拥有"可见的调查过程" —— 值班台 SSE 能
             // 看到工具调用 / 证据 / 结论逐条冒出，失败也能被 stale sweep 重派。
-            onToolStart: (toolUseId, toolName, input) => {
-              push('tool_start', { toolUseId, toolName, input })
-            },
-            onToolResult: (toolUseId, toolName, output, isError) => {
-              push('tool_result', { toolUseId, toolName, output, isError })
-            },
-            onAssistantMessage: (content, metadata) => {
-              push('assistant_message', {
-                content,
-                final: metadata?.final === true,
-              })
-            },
-            onProgressMessage: content => {
-              push('progress', { content })
-            },
+            // 【T-obs】同一份事件再扇出到 Langfuse（双 sink，方向单向）。
+            onToolStart: emitToolStart,
+            onToolResult: emitToolResult,
+            onAssistantMessage: emitAssistantMessage,
+            onProgressMessage: emitProgress,
+            onLlmCall: emitLlmCall,
           },
         })
+        diagnosedSessionId = result.sessionId
         push('diagnosis', {
           sessionId: result.sessionId,
           summary: result.diagnosisSummary,
@@ -359,6 +417,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
         closed = true
         clearInterval(timer)
         await flush().catch(() => {})
+        traced(() => trace.end({ status: 'error', error: reason }))
         await recordUsage(deps, job, log, {
           modelName: null,
           durationMs: Date.now() - startedAt,
@@ -370,6 +429,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       closed = true
       clearInterval(timer)
       await flush()
+      traced(() => trace.end({ status: 'ok', output: { sessionId: diagnosedSessionId } }))
       await recordUsage(deps, job, log, {
         // 模型由 runAlertDiagnosis 内部按运行时配置自建，执行器拿不到也不猜。
         modelName: null,
@@ -418,18 +478,11 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
         permissions,
         maxSteps: deps.maxSteps ?? 200,
         modelName: deps.modelName ?? '',
-        onToolStart: (toolUseId, toolName, input) => {
-          push('tool_start', { toolUseId, toolName, input })
-        },
-        onToolResult: (toolUseId, toolName, output, isError) => {
-          push('tool_result', { toolUseId, toolName, output, isError })
-        },
-        onAssistantMessage: (content, metadata) => {
-          push('assistant_message', { content, final: metadata?.final === true })
-        },
-        onProgressMessage: content => {
-          push('progress', { content })
-        },
+        onToolStart: emitToolStart,
+        onToolResult: emitToolResult,
+        onAssistantMessage: emitAssistantMessage,
+        onProgressMessage: emitProgress,
+        onLlmCall: emitLlmCall,
       })
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
@@ -440,6 +493,7 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       closed = true
       clearInterval(timer)
       await flush().catch(() => {})
+      traced(() => trace.end({ status: 'error', error: reason }))
       // 失败同样是"发生过的调查"，也进账本（否则审计只记成功，
       // 而运维最想查的恰恰是失败那些）。
       await recordUsage(deps, job, log, {
@@ -454,6 +508,9 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
     clearInterval(timer)
     await flush()
 
+    // T-obs：正常收尾。sink 的 `end()` 会先关闭本 trace 内未配对的 span（防泄漏）。
+    traced(() => trace.end({ status: 'ok' }))
+
     // ── G2：回写同一 session（保留 append-only 语义） ──
     await persistSession(deps, cwd, job, finalMessages, log)
 
@@ -465,6 +522,52 @@ export function createJobExecutor(deps: JobExecutorDeps): JobExecutor {
       status: 'completed',
     })
   }
+}
+
+/** 缺省 sink：不导出任何 span（job 未接 tracing 或接入失败时使用）。 */
+const NOOP_SINK = createNoopTracingSink('exec-no-sink')
+
+/** 空的 job trace 信息（降级路径复用）。 */
+function noopTraceFor(job: Job): JobTrace {
+  return NOOP_SINK.startJobTrace({ jobId: job.id, kind: job.kind, sessionId: job.sessionId })
+}
+
+/**
+ * 【T-obs】为一次 job 开启 trace。
+ *
+ * 三件事：
+ * 1. 没传 sink / sink 未启用 → noop（零开销）。
+ * 2. 从 job payload 取上游 `traceparent`（入队时由 HTTP 层塞入），让 Langfuse 的树
+ *    接到上游调用链；缺省则由 sink 从 jobId **确定性派生** traceId。
+ * 3. **永不让开 trace 拖垮 job**：任何异常都降级为 noop 并记一条 warn。
+ *
+ * trace 级属性：`sessionId` = job.sessionId（告警 job = incidentId；chat = `sin-<uuid>`），
+ * `userId` = 鉴权身份。两者是 Langfuse 聚合（Sessions / Users 页）的依据。
+ */
+function startJobTrace(deps: JobExecutorDeps, job: Job): JobTrace {
+  const sink = deps.tracing
+  if (sink === undefined || !sink.enabled) return noopTraceFor(job)
+  try {
+    return sink.startJobTrace({
+      jobId: job.id,
+      kind: job.kind,
+      sessionId: job.sessionId,
+      userId: job.userId,
+      traceparent: traceparentFromJob(job),
+    })
+  } catch (error) {
+    deps.log?.(
+      'warn',
+      `[exec] ${job.id} 开启 trace 失败（继续不带 tracing 跑）: ${String(error)}`,
+    )
+    return noopTraceFor(job)
+  }
+}
+
+/** 从 job payload 读上游 W3C traceparent（缺失/非字符串 → null）。 */
+function traceparentFromJob(job: Job): string | null {
+  const raw = job.payload?.traceparent
+  return typeof raw === 'string' && raw.trim() !== '' ? raw : null
 }
 
 /** 懒加载真实 `runAgentTurn`（测试注入 runner 时完全不加载 agent 栈）。 */
