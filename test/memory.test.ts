@@ -19,6 +19,26 @@ function makeHomeDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'lite-ai-memory-home-'))
 }
 
+/**
+ * 符号链接是否**真的可用**（能解析）。
+ *
+ * 为什么需要探测：Windows 上 `fs.symlinkSync` 在缺少
+ * `SeCreateSymbolicLinkPrivilege`（管理员 / 开发者模式）时会**静默"成功"**，
+ * 但链接根本不存在 —— 实测 `readlink`/`realpath`/`lstat`/`readFile` 全部 ENOENT。
+ * 于是 `realpath()` 失败、走到 `not found` 分支，永远到不了 `out-of-root`，
+ * 用例会稳定地红在一个**本机根本无法构造的场景**上。
+ *
+ * 这里只探测"链接是否可解析"，不吞掉真实断言 —— 探测不过就 skip，
+ * 探测过了（Linux/macOS 及开了开发者模式的 Windows）断言照旧生效。
+ */
+function isUsableSymlink(link: string): boolean {
+  try {
+    return fs.lstatSync(link).isSymbolicLink() && fs.readlinkSync(link).length > 0
+  } catch {
+    return false
+  }
+}
+
 async function discoverTestFiles(cwd: string, homeDir = makeHomeDir()) {
   try {
     return await discoverInstructionFiles(cwd, homeDir, cwd)
@@ -47,7 +67,7 @@ function write(dir: string, name: string, content: string): string {
 }
 
 describe('discoverInstructionFiles', () => {
-  test('include 指向目录外符号链接时被跳过（防恶意/include 外泄）', async () => {
+  test('include 指向目录外符号链接时被跳过（防恶意/include 外泄）', async (t) => {
     const dir = makeTempDir() // scanRoot 与 home 同用
     try {
       const projectDir = path.join(dir, 'project')
@@ -56,7 +76,13 @@ describe('discoverInstructionFiles', () => {
       // 项目内 LITE.local.md 引用一个指向外部的符号链接
       write(projectDir, 'LITE.local.md', '正常指令行\n@escaped-link\n')
       // symlink: project/escaped-link -> outside/secret.txt
-      fs.symlinkSync(path.join(dir, 'outside', 'secret.txt'), path.join(projectDir, 'escaped-link'))
+      const link = path.join(projectDir, 'escaped-link')
+      fs.symlinkSync(path.join(dir, 'outside', 'secret.txt'), link)
+
+      if (!isUsableSymlink(link)) {
+        t.skip('本机无法创建可解析的符号链接（Windows 需开发者模式/管理员权限），该场景不可验证')
+        return
+      }
 
       const files = await discoverTestFiles(projectDir, dir)
       const mem = files
