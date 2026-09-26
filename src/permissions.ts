@@ -6,6 +6,7 @@ import { isEnoentError } from './utils/errors.js'
 export type PermissionDecision =
   | 'allow_once'
   | 'allow_always'
+  | 'allow_prefix'
   | 'allow_turn'
   | 'allow_all_turn'
   | 'deny_once'
@@ -43,6 +44,7 @@ type PermissionStore = {
   allowedDirectoryPrefixes?: string[]
   deniedDirectoryPrefixes?: string[]
   allowedCommandPatterns?: string[]
+  allowedCommandPrefixes?: string[]
   deniedCommandPatterns?: string[]
   allowedEditPatterns?: string[]
   deniedEditPatterns?: string[]
@@ -81,6 +83,62 @@ function matchesDirectoryPrefix(
 
 function formatCommandSignature(command: string, args: string[]): string {
   return [command, ...args].join(' ').trim()
+}
+
+/**
+ * 从命令签名提取可前缀化的前缀（command + 首个参数）。
+ * 任何旗标在场（-lc / -e / --force / -f）都不提供前缀选项（fail-closed）：
+ * - 旗标可能携带任意载荷：bash -lc <脚本>、node -e <代码> —— 前 2 词无区分度；
+ * - 旗标可能改变危险等级：git push --force —— 'git push' 前缀会连 force push 一起放行。
+ * 旗标自由的调用（kubectl logs app-1、node scripts/healthcheck.js）才可播种前缀。
+ * 返回 null 表示本次审批不出现"记住前缀"选项。
+ */
+export function extractCommandPrefix(
+  command: string,
+  args: string[],
+): string | null {
+  const trimmed = args.map(arg => arg.trim())
+  if (trimmed.some(arg => !arg || arg.startsWith('-'))) {
+    return null
+  }
+
+  const first = trimmed[0]
+  if (!first) {
+    return null
+  }
+  return `${command} ${first}`.trim()
+}
+
+/**
+ * 词边界前缀匹配：前缀与签名按空白逐词比较（而非字符串 startsWith），
+ * 防止 'kubectl get' 误命中 'kubectl getx pods'。
+ */
+export function matchesCommandPrefix(
+  signature: string,
+  prefixes: Iterable<string>,
+): boolean {
+  const tokens = signature.split(/\s+/).filter(Boolean)
+
+  for (const prefix of prefixes) {
+    const prefixTokens = prefix.split(/\s+/).filter(Boolean)
+    if (prefixTokens.length === 0 || prefixTokens.length > tokens.length) {
+      continue
+    }
+
+    let matched = true
+    for (let i = 0; i < prefixTokens.length; i++) {
+      if (tokens[i] !== prefixTokens[i]) {
+        matched = false
+        break
+      }
+    }
+
+    if (matched) {
+      return true
+    }
+  }
+
+  return false
 }
 
 export function classifyDangerousCommand(command: string, args: string[]): string | null {
@@ -228,9 +286,9 @@ function classifySreDangerousCommand(
   return null
 }
 
-async function readPermissionStore(): Promise<PermissionStore> {
+async function readPermissionStore(storePath: string): Promise<PermissionStore> {
   try {
-    const content = await readFile(PERMISSIONS_PATH, 'utf8')
+    const content = await readFile(storePath, 'utf8')
     return JSON.parse(content) as PermissionStore
   } catch (error) {
     if (isEnoentError(error)) {
@@ -241,9 +299,12 @@ async function readPermissionStore(): Promise<PermissionStore> {
   }
 }
 
-async function writePermissionStore(store: PermissionStore): Promise<void> {
-  await mkdir(LITE_AI_DIR, { recursive: true })
-  await writeFile(PERMISSIONS_PATH, `${JSON.stringify(store, null, 2)}\n`, 'utf8')
+async function writePermissionStore(
+  storePath: string,
+  store: PermissionStore,
+): Promise<void> {
+  await mkdir(path.dirname(storePath), { recursive: true })
+  await writeFile(storePath, `${JSON.stringify(store, null, 2)}\n`, 'utf8')
 }
 
 export class PermissionManager {
@@ -252,6 +313,7 @@ export class PermissionManager {
   private readonly sessionAllowedPaths = new Set<string>()
   private readonly sessionDeniedPaths = new Set<string>()
   private readonly allowedCommandPatterns = new Set<string>()
+  private readonly allowedCommandPrefixes = new Set<string>()
   private readonly deniedCommandPatterns = new Set<string>()
   private readonly sessionAllowedCommands = new Set<string>()
   private readonly sessionDeniedCommands = new Set<string>()
@@ -266,12 +328,13 @@ export class PermissionManager {
   constructor(
     private readonly workspaceRoot: string,
     private readonly prompt?: PermissionPromptHandler,
+    private readonly storePath: string = PERMISSIONS_PATH,
   ) {
     this.ready = this.initialize()
   }
 
   private async initialize(): Promise<void> {
-    const store = await readPermissionStore()
+    const store = await readPermissionStore(this.storePath)
 
     for (const directory of store.allowedDirectoryPrefixes ?? []) {
       this.allowedDirectoryPrefixes.add(normalizePath(directory))
@@ -283,6 +346,10 @@ export class PermissionManager {
 
     for (const pattern of store.allowedCommandPatterns ?? []) {
       this.allowedCommandPatterns.add(pattern)
+    }
+
+    for (const prefix of store.allowedCommandPrefixes ?? []) {
+      this.allowedCommandPrefixes.add(prefix)
     }
 
     for (const pattern of store.deniedCommandPatterns ?? []) {
@@ -331,6 +398,12 @@ export class PermissionManager {
       summary.push('dangerous allowlist: none')
     }
 
+    if (this.allowedCommandPrefixes.size > 0) {
+      summary.push(
+        `allowed command prefixes: ${[...this.allowedCommandPrefixes].slice(0, 4).join(', ')}`,
+      )
+    }
+
     if (this.allowedEditPatterns.size > 0) {
       summary.push(
         `trusted edit targets: ${[...this.allowedEditPatterns].slice(0, 2).join(', ')}`,
@@ -341,10 +414,11 @@ export class PermissionManager {
   }
 
   private async persist(): Promise<void> {
-    await writePermissionStore({
+    await writePermissionStore(this.storePath, {
       allowedDirectoryPrefixes: [...this.allowedDirectoryPrefixes],
       deniedDirectoryPrefixes: [...this.deniedDirectoryPrefixes],
       allowedCommandPatterns: [...this.allowedCommandPatterns],
+      allowedCommandPrefixes: [...this.allowedCommandPrefixes],
       deniedCommandPatterns: [...this.deniedCommandPatterns],
       allowedEditPatterns: [...this.allowedEditPatterns],
       deniedEditPatterns: [...this.deniedEditPatterns],
@@ -453,11 +527,35 @@ export class PermissionManager {
       return
     }
 
+    // 前缀放行（词边界匹配）：deny/精确 allow 之后、审批之前。
+    // 注意 secret 硬拦在命令闸（command-guard）上游已是 deny，永远不会走到这里，
+    // 因此前缀放行无法漂白 secret 读取。
+    if (matchesCommandPrefix(signature, this.allowedCommandPrefixes)) {
+      return
+    }
+
     if (!this.prompt) {
       throw new Error(
         `Command requires approval: ${signature}. Start lite-ai in TTY mode to approve it.`,
       )
     }
+
+    const commandPrefix = extractCommandPrefix(command, args)
+    const choices: PermissionChoice[] = [
+      { key: 'y', label: 'allow once', decision: 'allow_once' },
+      { key: 'a', label: 'always allow this command', decision: 'allow_always' },
+      ...(commandPrefix
+        ? [
+            {
+              key: 'p',
+              label: `always allow commands starting with '${commandPrefix}'`,
+              decision: 'allow_prefix' as const,
+            },
+          ]
+        : []),
+      { key: 'n', label: 'deny once', decision: 'deny_once' },
+      { key: 'd', label: 'always deny this command', decision: 'deny_always' },
+    ]
 
     const promptResult = await this.prompt({
       kind: 'command',
@@ -470,16 +568,17 @@ export class PermissionManager {
         `reason: ${reason}`,
       ],
       scope: signature,
-      choices: [
-        { key: 'y', label: 'allow once', decision: 'allow_once' },
-        { key: 'a', label: 'always allow this command', decision: 'allow_always' },
-        { key: 'n', label: 'deny once', decision: 'deny_once' },
-        { key: 'd', label: 'always deny this command', decision: 'deny_always' },
-      ],
+      choices,
     })
 
     if (promptResult.decision === 'allow_once') {
       this.sessionAllowedCommands.add(signature)
+      return
+    }
+
+    if (promptResult.decision === 'allow_prefix' && commandPrefix) {
+      this.allowedCommandPrefixes.add(commandPrefix)
+      await this.persist()
       return
     }
 
