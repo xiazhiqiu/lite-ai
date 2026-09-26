@@ -219,3 +219,73 @@ test('getSummary：存在前缀时输出 allowed command prefixes 行', async ()
   assert.ok(line)
   assert.match(line!, /kubectl logs/)
 })
+
+test('deny 从宽：deny_always 签名拦截以它开头的更长变体', async () => {
+  const denyWideStore = await writeStore('deny-wide.json', {
+    deniedCommandPatterns: ['kubectl delete pod a'],
+  })
+
+  const { manager } = newManager(null, denyWideStore)
+  // 更长变体（从未直接见过）——词边界前缀命中，拦下
+  await assert.rejects(
+    () =>
+      manager.ensureCommand('kubectl', ['delete', 'pod', 'a', '-n', 'prod'], tempRoot, {
+        forcePromptReason: 'guard pipeline',
+      }),
+    /Command denied/,
+  )
+})
+
+test('deny 从宽受词边界约束：不同词的兄弟签名不被拦', async () => {
+  const denyWideStore = await writeStore('deny-wide-boundary.json', {
+    deniedCommandPatterns: ['kubectl delete pod a'],
+  })
+
+  const { manager } = newManager(null, denyWideStore)
+  // 'pod b' 与 deny 签名逐词不同——不走 deny，转而走审批（无 prompt → requires approval）
+  await assert.rejects(
+    () =>
+      manager.ensureCommand('kubectl', ['delete', 'pod', 'b'], tempRoot, {
+        forcePromptReason: 'guard pipeline',
+      }),
+    /requires approval/,
+  )
+})
+
+test('deny 从宽压制前缀放行：更长的被拒变体不被 allow 前缀漂白', async () => {
+  const interplayStore = await writeStore('deny-vs-prefix.json', {
+    allowedCommandPrefixes: ['kubectl delete'],
+    deniedCommandPatterns: ['kubectl delete pod a'],
+  })
+
+  const { manager } = newManager(null, interplayStore)
+  // 'kubectl delete pod a -n prod' 同时命中 allow 前缀（'kubectl delete'）
+  // 与 deny 前缀（'kubectl delete pod a'）——deny 判定序在前，必须胜出
+  await assert.rejects(
+    () =>
+      manager.ensureCommand('kubectl', ['delete', 'pod', 'a', '-n', 'prod'], tempRoot, {
+        forcePromptReason: 'guard pipeline',
+      }),
+    /Command denied/,
+  )
+})
+
+test('session deny_once 保持精确：不扩大到更长变体', async () => {
+  const sessionStore = await writeStore('deny-session-exact.json', {})
+  const { calls, manager } = newManager(['deny_once', 'allow_once'], sessionStore)
+
+  // 第一次：拒绝一次（落 sessionDeniedCommands，精确签名）
+  await assert.rejects(
+    () =>
+      manager.ensureCommand('node', ['server.js'], tempRoot, {
+        forcePromptReason: 'guard pipeline',
+      }),
+    /Command denied/,
+  )
+
+  // 第二次：更长变体不被 session deny 扩大拦截——重新走审批并放行
+  await manager.ensureCommand('node', ['server.js', '--port', '2'], tempRoot, {
+    forcePromptReason: 'guard pipeline',
+  })
+  assert.equal(calls.length, 2)
+})

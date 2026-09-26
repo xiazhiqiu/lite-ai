@@ -513,9 +513,13 @@ export class PermissionManager {
     }
 
     const signature = formatCommandSignature(command, args)
+    // deny 检查（从宽）：持久层 deny_always 的签名按词边界前缀匹配——
+    // 拒绝过的命令连同以它开头的更长变体一起拦下（fail-closed 方向的从宽）。
+    // sessionDeniedCommands 保持精确匹配：deny_once 的语义只是同签名不再重复询问。
     if (
       this.sessionDeniedCommands.has(signature) ||
-      this.deniedCommandPatterns.has(signature)
+      this.deniedCommandPatterns.has(signature) ||
+      matchesCommandPrefix(signature, this.deniedCommandPatterns)
     ) {
       throw new Error(`Command denied: ${signature}`)
     }
