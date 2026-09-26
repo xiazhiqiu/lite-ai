@@ -9,7 +9,6 @@ import {
   evaluateCommandArgv,
   evaluateCommandSnippet,
   isReadOnlyCommandCall,
-  isSreReadOnlyCommand,
   splitCommandLine,
 } from './command-guard.js'
 
