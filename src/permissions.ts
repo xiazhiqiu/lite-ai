@@ -83,7 +83,7 @@ function formatCommandSignature(command: string, args: string[]): string {
   return [command, ...args].join(' ').trim()
 }
 
-function classifyDangerousCommand(command: string, args: string[]): string | null {
+export function classifyDangerousCommand(command: string, args: string[]): string | null {
   const normalizedArgs = args.map(arg => arg.trim()).filter(Boolean)
   const signature = formatCommandSignature(command, normalizedArgs)
 
