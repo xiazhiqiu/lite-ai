@@ -146,7 +146,6 @@ async function runAgentDiagnosis(
       {
         skills: tools.getSkills(),
         mcpServers: tools.getMcpServers(),
-        subAgents: { maxConcurrent: 2 },
       },
     )
 

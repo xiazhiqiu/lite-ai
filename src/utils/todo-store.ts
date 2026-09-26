@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { LITE_AI_TODOS_DIR } from '../config.js'
-import { MAX_SUB_AGENTS } from '../agents/types.js'
+const MAX_PARALLEL_TODOS = 3
 import { isEnoentError } from './errors.js'
 
 export const TODO_STATUSES = [
@@ -83,7 +83,7 @@ function countStatus(list: TodoList, status: TodoStatus): number {
   return list.todos.filter(item => item.status === status).length
 }
 
-/** 校验结构：字段类型、status 枚举、in_progress 有界并行（≤ MAX_SUB_AGENTS）。 */
+/** 校验结构：字段类型、status 枚举、in_progress 有界并行（≤ MAX_PARALLEL_TODOS）。 */
 export function validateTodoList(list: TodoList): string | null {
   for (const item of list.todos) {
     if (typeof item.id !== 'string' || item.id.length === 0) {
@@ -98,8 +98,8 @@ export function validateTodoList(list: TodoList): string | null {
   }
 
   const inProgress = countStatus(list, 'in_progress')
-  if (inProgress > MAX_SUB_AGENTS) {
-    return `Too many in_progress todos (${inProgress}). At most ${MAX_SUB_AGENTS} may be in_progress at once (parallel capacity). Mark others pending or completed first.`
+  if (inProgress > MAX_PARALLEL_TODOS) {
+    return `Too many in_progress todos (${inProgress}). At most ${MAX_PARALLEL_TODOS} may be in_progress at once (parallel capacity). Mark others pending or completed first.`
   }
 
   return null

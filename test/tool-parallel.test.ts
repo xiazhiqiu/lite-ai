@@ -1,7 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { ToolCall } from '../src/types.js'
-import { partitionToolCalls } from '../src/utils/tool-parallel.js'
+import {
+  partitionToolCalls,
+  mapWithConcurrency,
+  toolConcurrencyLimit,
+  DEFAULT_TOOL_CONCURRENCY_LIMIT,
+} from '../src/utils/tool-parallel.js'
 import { isReadOnlyCommandCall } from '../src/tools/run-command.js'
 
 function call(input: unknown, id = 'c'): ToolCall {
@@ -113,4 +118,63 @@ test('isReadOnlyCommandCall: 带 args 数组', () => {
 
 test('isReadOnlyCommandCall: 空命令 unsafe', () => {
   assert.equal(isReadOnlyCommandCall({ command: '   ' }), false)
+})
+
+const sleep = (ms: number) => new Promise<void>(r => { setTimeout(r, ms) })
+
+test('mapWithConcurrency: 输出按输入下标保序', async () => {
+  const order = [30, 10, 20]
+  const out = await mapWithConcurrency(order, 3, async ms => {
+    await sleep(ms)
+    return ms
+  })
+  assert.deepEqual(out, [30, 10, 20])
+})
+
+test('mapWithConcurrency: 同时在飞数不超过 limit', async () => {
+  let running = 0
+  let maxRunning = 0
+  const items = Array.from({ length: 9 }, (_, i) => i)
+  const out = await mapWithConcurrency(items, 3, async i => {
+    running += 1
+    maxRunning = Math.max(maxRunning, running)
+    await sleep(5)
+    running -= 1
+    return i * 2
+  })
+  assert.equal(maxRunning, 3)
+  assert.deepEqual(out, items.map(i => i * 2))
+})
+
+test('mapWithConcurrency: 空数组直接 resolve', async () => {
+  assert.deepEqual(await mapWithConcurrency([], 4, async () => 1), [])
+})
+
+test('mapWithConcurrency: 首个 reject 立刻外抛', async () => {
+  await assert.rejects(
+    () =>
+      mapWithConcurrency([1, 2, 3], 2, async i => {
+        await sleep(i === 2 ? 1 : 20)
+        if (i === 2) throw new Error('boom')
+        return i
+      }),
+    /boom/,
+  )
+})
+
+test('toolConcurrencyLimit: 非法值回退默认', () => {
+  const saved = process.env.LITE_AI_TOOL_CONCURRENCY_LIMIT
+  try {
+    delete process.env.LITE_AI_TOOL_CONCURRENCY_LIMIT
+    assert.equal(toolConcurrencyLimit(), DEFAULT_TOOL_CONCURRENCY_LIMIT)
+    process.env.LITE_AI_TOOL_CONCURRENCY_LIMIT = '0'
+    assert.equal(toolConcurrencyLimit(), DEFAULT_TOOL_CONCURRENCY_LIMIT)
+    process.env.LITE_AI_TOOL_CONCURRENCY_LIMIT = 'abc'
+    assert.equal(toolConcurrencyLimit(), DEFAULT_TOOL_CONCURRENCY_LIMIT)
+    process.env.LITE_AI_TOOL_CONCURRENCY_LIMIT = '4'
+    assert.equal(toolConcurrencyLimit(), 4)
+  } finally {
+    if (saved === undefined) delete process.env.LITE_AI_TOOL_CONCURRENCY_LIMIT
+    else process.env.LITE_AI_TOOL_CONCURRENCY_LIMIT = saved
+  }
 })

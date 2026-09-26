@@ -69,24 +69,6 @@ export class ToolRegistry {
     )
   }
 
-  /**
-   * 构建子 agent 可用的工具子集（动态白名单）。
-   * 收集规则（fail-closed）：
-   *   1. 内置只读工具白名单（list_files/grep_files/read_file/load_skill/web_fetch/web_search）
-   *   2. 所有 isReadOnly === true 的工具（含 MCP 只读工具）
-   *   3. run_command（其 isParallelSafe 已对只读命令做细粒度判定）
-   * 不含任何 isReadOnly 未声明或为 false 的工具。
-   */
-  subsetForSubAgent(builtinReadOnlyNames: readonly string[]): ToolRegistry {
-    const builtinSet = new Set(builtinReadOnlyNames)
-    const subAgentTools = this.toolsStore.filter(tool => {
-      if (builtinSet.has(tool.name)) return true
-      if (tool.isReadOnly === true) return true
-      return false
-    })
-    return new ToolRegistry(subAgentTools)
-  }
-
   getSkills(): SkillSummary[] {
     return this.metadataStore.skills ?? []
   }

@@ -24,16 +24,6 @@ import { tailLogsTool, followLogsTool, stopFollowTool } from './tail-logs.js'
 import { generatePostmortemTool } from './generate-postmortem.js'
 import { searchIncidentKbTool } from './search-incident-kb.js'
 
-export const SUB_AGENT_TOOL_NAMES = [
-  'list_files',
-  'grep_files',
-  'read_file',
-  'load_skill',
-  'web_fetch',
-  'web_search',
-  'run_command',
-] as const
-
 function summarizeServerEndpoint(config: McpServerConfig): string {
   const remoteUrl = config.url?.trim()
   if (remoteUrl) return remoteUrl

@@ -24,6 +24,8 @@ import { computeContextStats } from './utils/token-estimator.js'
 import {
   partitionToolCalls,
   isToolConcurrencyEnabled,
+  toolConcurrencyLimit,
+  mapWithConcurrency,
 } from './utils/tool-parallel.js'
 import {
   buildAgentStatusBar,
@@ -411,6 +413,8 @@ export async function runAgentTurn(args: {
     }> = []
 
     const isConcurrent = isToolConcurrencyEnabled()
+    // 并行批内同时在飞的上限；关闭并发时不生效
+    const concurrencyLimit = toolConcurrencyLimit()
     const groups = isConcurrent
       ? partitionToolCalls(next.calls, call => {
           // 未找到工具 / 未声明 isParallelSafe → false（fail-closed）
@@ -426,13 +430,14 @@ export async function runAgentTurn(args: {
         for (const call of group.calls) {
           args.onToolStart?.(call.id, call.toolName, call.input)
         }
-        const results = await Promise.all(
-          group.calls.map(call =>
+        const results = await mapWithConcurrency(
+          group.calls,
+          concurrencyLimit,
+          call =>
             args.tools.execute(call.toolName, call.input, {
               cwd: args.cwd,
               permissions: args.permissions,
             }),
-          ),
         )
         group.calls.forEach((call, i) => {
           const result = results[i]!

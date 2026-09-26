@@ -147,7 +147,6 @@ export async function runInstance(
       {
         skills: tools.getSkills(),
         mcpServers: tools.getMcpServers(),
-        subAgents: { maxConcurrent: 2 },
       },
     )
 

@@ -18,14 +18,12 @@ import { buildSystemPrompt } from './prompt.js'
 import {
   createDefaultToolRegistry,
   hydrateMcpTools,
-  SUB_AGENT_TOOL_NAMES,
 } from './tools/index.js'
-import { createSubAgentTools } from './tools/sub-agents.js'
-import { SubAgentManager } from './agents/manager.js'
 import type { ChatMessage } from './types.js'
 import { renderBanner } from './ui.js'
 import { runTtyApp } from './tty-app.js'
 import { runAgentTurn } from './agent-loop.js'
+import { runInspectionCommand } from './inspect.js'
 import {
   applyContextCollapseIfNeeded,
   createContextCollapseState,
@@ -64,6 +62,13 @@ async function main(): Promise<void> {
     return
   }
 
+  // 子命令：定时巡检（单人本地 RCA，无 server / 无 webhook / 无多用户交接）
+  if (argv[0] === 'inspect' || argv[0] === 'schedule') {
+    const subcommand = argv.shift()!
+    await runInspectionCommand(subcommand, cwd, argv)
+    return
+  }
+
   const isInteractiveTerminal = Boolean(process.stdin.isTTY && process.stdout.isTTY)
   let runtime = null
   try {
@@ -91,19 +96,12 @@ async function main(): Promise<void> {
       : runtime?.provider === 'openai'
         ? new OpenAIModelAdapter(tools, loadRuntimeConfig)
         : new AnthropicModelAdapter(tools, loadRuntimeConfig)
-  const subAgents = new SubAgentManager({
-    model,
-    tools: tools.subsetForSubAgent(SUB_AGENT_TOOL_NAMES),
-    cwd,
-  })
-  tools.addTools(createSubAgentTools(subAgents))
   let messages: ChatMessage[] = [
     {
       role: 'system',
       content: await buildSystemPrompt(cwd, permissions.getSummary(), {
         skills: tools.getSkills(),
         mcpServers: tools.getMcpServers(),
-        subAgents: { maxConcurrent: subAgents.maxConcurrent },
       }),
     },
   ]
@@ -116,7 +114,6 @@ async function main(): Promise<void> {
       content: await buildSystemPrompt(cwd, permissions.getSummary(), {
         skills: tools.getSkills(),
         mcpServers: tools.getMcpServers(),
-        subAgents: { maxConcurrent: subAgents.maxConcurrent },
       }),
     }
   }
@@ -140,7 +137,6 @@ async function main(): Promise<void> {
         runtime,
         tools,
         model,
-        subAgents,
         messages,
         cwd,
         permissions,
@@ -296,7 +292,6 @@ async function main(): Promise<void> {
       // Ignore double-close during EOF teardown.
     }
   } finally {
-    await subAgents.closeAll()
     await mcpHydration
     await tools.dispose()
   }

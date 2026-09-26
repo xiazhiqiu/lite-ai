@@ -419,8 +419,8 @@ export const runCommandTool: ToolDefinition<Input> = {
       ? ['-lc', backgroundShell ? stripTrailingBackgroundOperator(input.command) : input.command]
       : normalized.args
 
-    // 子 agent 无 permissions 时，强制只允许只读命令（fail-closed）。
-    // 防止子 agent 在无审批通道的情况下执行写操作。
+    // 无 permissions 上下文时，强制只允许只读命令（fail-closed）。
+    // 防止在无审批通道的情况下执行写操作。
     if (!context.permissions) {
       if (
         !isReadOnlyCommandCall({
@@ -430,7 +430,7 @@ export const runCommandTool: ToolDefinition<Input> = {
       ) {
         return {
           ok: false,
-          output: `Command not allowed without permission manager (sub-agent read-only mode): ${normalized.command}`,
+          output: `Command not allowed without permission manager (read-only mode): ${normalized.command}`,
         }
       }
     }

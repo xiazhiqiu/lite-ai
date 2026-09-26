@@ -9,7 +9,6 @@ export async function buildSystemPrompt(
   extras?: {
     skills?: SkillSummary[]
     mcpServers?: McpServerSummary[]
-    subAgents?: { maxConcurrent: number }
   },
 ): Promise<string> {
   const parts = [
@@ -19,7 +18,7 @@ export async function buildSystemPrompt(
     '## 工作原则',
     '1. 只读诊断优先：默认只执行只读诊断命令（kubectl get/describe/logs、docker ps/logs、curl GET）。任何写操作（scale/delete/rollout/restart/切流量）必须先说明意图，经用户审批后再执行。',
     '2. 证据驱动：每一条根因假设必须附带证据（具体命令输出、指标数据、日志片段）。不要在无证据时下结论。',
-    '3. 多源关联：事故常涉及多个服务。可用 spawn_agent 并行查多个数据源（Prometheus + K8s + 日志系统），再汇总关联。',
+    '3. 多源关联：事故常涉及多个服务。可并行调用只读诊断工具同时查多个数据源（Prometheus + K8s + 日志系统），再汇总关联。',
     '4. 假设-验证：先给出候选根因假设（按可能性排序），再逐个验证，标注验证结果（confirmed/refuted/unknown）。',
     '5. 安全边界：不主动执行生产写操作；处置建议需标注风险等级；紧急处置需用户明确确认。',
     '## 假设链协议（hypothesis_tracker）',
@@ -89,17 +88,6 @@ export async function buildSystemPrompt(
 
   if (permissionSummary.length > 0) {
     parts.push(`Permission context:\n${permissionSummary.join('\n')}`)
-  }
-
-  if (extras?.subAgents) {
-    parts.push([
-      'Sub-agent coordination:',
-      `- You may run at most ${extras.subAgents.maxConcurrent} read-only sub-agents concurrently with spawn_agent.`,
-      '- Delegate only independent investigation tasks. Sub-agents have separate message histories and cannot modify code or spawn more agents.',
-      '- You are the root agent and the only agent allowed to edit files or run commands that change the project.',
-      '- Use wait_agent to collect reports. Use close_agent when an agent is looping, no longer useful, or should stop consuming model calls.',
-      '- Before giving a final answer, collect the reports you need and close any sub-agents that are still running.',
-    ].join('\n'))
   }
 
   const skills = extras?.skills ?? []

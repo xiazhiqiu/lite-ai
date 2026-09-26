@@ -18,7 +18,7 @@ if (testFiles.length === 0) {
 
 const child = spawn(
   process.execPath,
-  ['--import', 'tsx', '--test', ...testFiles],
+  ['--import', 'tsx', '--test', '--test-force-exit', ...testFiles],
   { stdio: 'inherit' },
 )
 

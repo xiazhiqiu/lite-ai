@@ -115,7 +115,6 @@ test(
         {
           skills: tools.getSkills(),
           mcpServers: tools.getMcpServers(),
-          subAgents: { maxConcurrent: 2 },
         },
       )
 
