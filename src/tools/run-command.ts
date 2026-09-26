@@ -5,9 +5,9 @@ import { registerBackgroundShellTask } from '../background-tasks.js'
 import type { ToolDefinition } from '../tool.js'
 import { resolveToolPath } from '../workspace.js'
 import {
+  classifySecretAccess,
   evaluateCommandArgv,
-  isAllowedCommand,
-  isReadOnlyCommand,
+  evaluateCommandSnippet,
   isReadOnlyCommandCall,
   isSreReadOnlyCommand,
   splitCommandLine,
@@ -130,18 +130,19 @@ export const runCommandTool: ToolDefinition<Input> = {
 
     const useShell = looksLikeShellSnippet(input.command, input.args)
     const backgroundShell = isBackgroundShellSnippet(input.command, input.args)
-
-    const knownCommand = isAllowedCommand(normalized.command)
+    const executableSnippet = backgroundShell
+      ? stripTrailingBackgroundOperator(input.command)
+      : input.command
 
     const command = useShell ? 'bash' : normalized.command
-    const args = useShell
-      ? ['-lc', backgroundShell ? stripTrailingBackgroundOperator(input.command) : input.command]
-      : normalized.args
+    const args = useShell ? ['-lc', executableSnippet] : normalized.args
 
-    // 无 permissions 上下文时，强制只允许只读命令（fail-closed）。
-    // 防止在无审批通道的情况下执行写操作。
+    // 无 permissions 上下文时，强制只允许只读命令（fail-closed，沿用并发级严名单），
+    // 并叠加 secret 硬拦——防止无审批通道的巡检实例静默读取集群密钥。
     if (!context.permissions) {
+      const secret = classifySecretAccess(normalized.command, normalized.args)
       if (
+        secret ||
         !isReadOnlyCommandCall({
           command: normalized.command,
           args: normalized.args,
@@ -154,17 +155,25 @@ export const runCommandTool: ToolDefinition<Input> = {
       }
     }
 
-    const forcePromptReason =
-      !useShell && !knownCommand
-        ? `Unknown command '${normalized.command}' is not in the built-in read-only/development set`
-        : undefined
+    // 五级判定管线：拆段 → secret 硬拦 → 参数原语 → 段级白名单 → 汇总。
+    // deny：无审批出口直接拒（secret 暴露 / sudo 提权）；
+    // allow：全段过白名单，免审批执行（消掉 snippet 一刀切）；
+    // approval：转权限底座（三层名单 → 无回调硬拒 → 审批框）。
+    const guard = useShell
+      ? evaluateCommandSnippet(executableSnippet)
+      : evaluateCommandArgv(normalized.command, normalized.args)
 
-    if (forcePromptReason) {
+    if (guard.verdict === 'deny') {
+      return {
+        ok: false,
+        output: `Command denied by command guard: ${guard.reason ?? 'policy violation'}`,
+      }
+    }
+
+    if (guard.verdict === 'approval') {
       await context.permissions?.ensureCommand(command, args, effectiveCwd, {
-        forcePromptReason,
+        forcePromptReason: guard.reason,
       })
-    } else if (useShell || !isReadOnlyCommand(normalized.command)) {
-      await context.permissions?.ensureCommand(command, args, effectiveCwd)
     }
 
     if (useShell && backgroundShell) {
