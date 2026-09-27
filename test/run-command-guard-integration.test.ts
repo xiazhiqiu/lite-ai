@@ -11,6 +11,8 @@ type EnsureCall = {
   command: string
   args: string[]
   forcePromptReason?: string
+  prefixCandidates?: string[]
+  prefixSignature?: string
 }
 
 function makePermissions(options?: { reject?: boolean }) {
@@ -20,12 +22,18 @@ function makePermissions(options?: { reject?: boolean }) {
       command: string,
       args: string[],
       _cwd: string,
-      opts?: { forcePromptReason?: string },
+      opts?: {
+        forcePromptReason?: string
+        prefixCandidates?: string[]
+        prefixSignature?: string
+      },
     ) => {
       calls.push({
         command,
         args,
         forcePromptReason: opts?.forcePromptReason,
+        prefixCandidates: opts?.prefixCandidates,
+        prefixSignature: opts?.prefixSignature,
       })
       if (options?.reject) {
         throw new Error(`Command denied: ${command}`)
@@ -42,7 +50,7 @@ describe('bash × command-guard 接线', () => {
   test('deny：kubectl get secrets 直接拒，不触发审批', async () => {
     const { calls, permissions } = makePermissions()
     const result = await bashTool.run(
-      { command: 'kubectl get secrets' },
+      { command: 'kubectl get secrets', suggested_prefixes: ['kubectl get'] },
       { cwd, permissions },
     )
     assert.equal(result.ok, false)
@@ -53,7 +61,10 @@ describe('bash × command-guard 接线', () => {
   test('deny：snippet 中读 secrets 带重定向也拒（deny 优先于 approval）', async () => {
     const { calls, permissions } = makePermissions()
     const result = await bashTool.run(
-      { command: 'kubectl get secrets > out.yaml' },
+      {
+        command: 'kubectl get secrets > out.yaml',
+        suggested_prefixes: ['kubectl get'],
+      },
       { cwd, permissions },
     )
     assert.equal(result.ok, false)
@@ -61,11 +72,39 @@ describe('bash × command-guard 接线', () => {
     assert.equal(calls.length, 0)
   })
 
+  test('deny：suggested_prefixes 与命令不一致（幻觉前缀）直接拒', async () => {
+    const { calls, permissions } = makePermissions()
+    const result = await bashTool.run(
+      { command: 'kubectl get pods', suggested_prefixes: ['kubectl delete'] },
+      { cwd, permissions },
+    )
+    assert.equal(result.ok, false)
+    assert.match(result.output, /does not appear in the command/)
+    assert.equal(calls.length, 0)
+  })
+
+  test('deny：段数与前缀数不匹配直接拒（每段一个前缀）', async () => {
+    const { calls, permissions } = makePermissions()
+    const result = await bashTool.run(
+      {
+        command: 'kubectl get pods | grep app',
+        suggested_prefixes: ['kubectl get'],
+      },
+      { cwd, permissions },
+    )
+    assert.equal(result.ok, false)
+    assert.match(result.output, /one prefix per command segment/)
+    assert.equal(calls.length, 0)
+  })
+
   test('allow：全段只读管道免审批（不触发 ensureCommand）', async () => {
     const { calls, permissions } = makePermissions()
     try {
       const result = await bashTool.run(
-        { command: 'echo hello | grep hello' },
+        {
+          command: 'echo hello | grep hello',
+          suggested_prefixes: ['echo', 'grep'],
+        },
         { cwd, permissions },
       )
       assert.equal(result.ok, true)
@@ -75,10 +114,13 @@ describe('bash × command-guard 接线', () => {
     assert.equal(calls.length, 0)
   })
 
-  test('approval：未知第二段转审批（ensureCommand 收到 bash -lc 整条 + 管线 reason）', async () => {
+  test('approval：未知第二段转审批（ensureCommand 收到 bash -lc 整条 + 管线 reason + 前缀候选）', async () => {
     const { calls, permissions } = makePermissions()
     try {
-      await bashTool.run({ command: 'ls | zig build' }, { cwd, permissions })
+      await bashTool.run(
+        { command: 'ls | zig build', suggested_prefixes: ['ls', 'zig build'] },
+        { cwd, permissions },
+      )
     } catch {
       // 审批后的真实执行在无 bash/无 zig 环境会失败——与本测试无关
     }
@@ -86,13 +128,18 @@ describe('bash × command-guard 接线', () => {
     assert.equal(calls[0]!.command, 'bash')
     assert.deepEqual(calls[0]!.args, ['-lc', 'ls | zig build'])
     assert.match(calls[0]!.forcePromptReason ?? '', /unknown command 'zig'/)
+    assert.deepEqual(calls[0]!.prefixCandidates, ['ls', 'zig build'])
+    assert.equal(calls[0]!.prefixSignature, 'ls | zig build')
   })
 
   test('approval：find -delete 转审批且带原语 reason', async () => {
     const { calls, permissions } = makePermissions()
     try {
       await bashTool.run(
-        { command: 'find . -name zz-guard-none -delete' },
+        {
+          command: 'find . -name zz-guard-none -delete',
+          suggested_prefixes: ['find'],
+        },
         { cwd, permissions },
       )
     } catch {
@@ -109,7 +156,7 @@ describe('bash × command-guard 接线', () => {
     await assert.rejects(
       () =>
         bashTool.run(
-          { command: 'find . -name x -delete' },
+          { command: 'find . -name x -delete', suggested_prefixes: ['find'] },
           { cwd, permissions },
         ),
       /Command denied/,
@@ -117,7 +164,10 @@ describe('bash × command-guard 接线', () => {
   })
 
   test('无 permissions：kubectl get secrets 被 secret 硬拦（强制只读模式）', async () => {
-    const result = await bashTool.run({ command: 'kubectl get secrets' }, { cwd })
+    const result = await bashTool.run(
+      { command: 'kubectl get secrets', suggested_prefixes: ['kubectl get'] },
+      { cwd },
+    )
     assert.equal(result.ok, false)
     assert.match(result.output, /read-only mode/)
   })
@@ -130,7 +180,10 @@ describe('bash × command-guard 接线', () => {
     // （Windows PATH 上无 uname → ENOENT；沙箱可能拦 spawn → EPERM），
     // 唯一断言：失败不得来自判定层的 read-only 拒绝。
     try {
-      const result = await bashTool.run({ command: 'uname' }, { cwd })
+      const result = await bashTool.run(
+        { command: 'uname', suggested_prefixes: ['uname'] },
+        { cwd },
+      )
       if (!result.ok) {
         assert.doesNotMatch(result.output, /read-only mode/)
       }
@@ -141,7 +194,10 @@ describe('bash × command-guard 接线', () => {
   })
 
   test('无 permissions：命令替换保持 fail-closed 拒绝', async () => {
-    const result = await bashTool.run({ command: 'echo $(pwd)' }, { cwd })
+    const result = await bashTool.run(
+      { command: 'echo $(pwd)', suggested_prefixes: ['echo'] },
+      { cwd },
+    )
     assert.equal(result.ok, false)
     assert.match(result.output, /read-only mode/)
   })

@@ -640,3 +640,101 @@ export function evaluateCommandSnippet(command: string): GuardResult {
 
   return worst
 }
+
+// ---------------------------------------------------------------------------
+// suggested_prefixes（对齐 HolmesGPT bash toolset：bash_toolset.py:123 /
+// validation.py validate_command / tool_calling_llm.py 持久化闭环）
+// ---------------------------------------------------------------------------
+
+/** 词级连续子序列匹配：prefixTokens 须作为 tokens 的连续片段出现。 */
+function containsConsecutiveTokens(
+  tokens: string[],
+  prefixTokens: string[],
+): boolean {
+  if (prefixTokens.length === 0 || prefixTokens.length > tokens.length) {
+    return false
+  }
+  outer: for (let i = 0; i <= tokens.length - prefixTokens.length; i++) {
+    for (let j = 0; j < prefixTokens.length; j++) {
+      if (tokens[i + j] !== prefixTokens[j]) continue outer
+    }
+    return true
+  }
+  return false
+}
+
+/**
+ * 前缀一致性校验（对齐 HG validation.py 的 PREFIX_NOT_IN_COMMAND，:571）：
+ * 模型声明的每个前缀必须词级出现在命令里，且段数一致（每段一个前缀）。
+ * 返回 null 表示一致；否则返回 deny 理由——前缀是"用户按 don't ask again 时
+ * 会被记住的东西"，必须锚定在实际执行的命令上，不允许声明无关作用域。
+ */
+export function validateSuggestedPrefixes(
+  command: string,
+  prefixes: string[],
+): string | null {
+  if (prefixes.length === 0) {
+    return "The 'suggested_prefixes' parameter is required. Provide one prefix per command segment (segments are separated by |, &&, ||, ;)."
+  }
+
+  // 解析失败（命令替换/未闭合引号/独立后台符）时跳过段数校验：
+  // 该命令随后必然因 snippet 拆段失败转审批，无需在此重复拦截。
+  const segments = splitShellSegments(command)
+  if (segments && segments.length !== prefixes.length) {
+    return `suggested_prefixes must contain one prefix per command segment: command has ${segments.length} segment(s), got ${prefixes.length} prefix(es)`
+  }
+
+  const tokens = splitCommandLine(command)
+  for (const prefix of prefixes) {
+    const prefixTokens = prefix.trim().split(/\s+/).filter(Boolean)
+    if (prefixTokens.length === 0) {
+      return 'suggested prefix must not be empty'
+    }
+    if (!containsConsecutiveTokens(tokens, prefixTokens)) {
+      return `suggested prefix '${prefix}' does not appear in the command`
+    }
+  }
+
+  return null
+}
+
+/**
+ * 从命令推导建议前缀（每段取前两个词，供 /cmd 快捷方式与 mock 模型兜底；
+ * 真实模型应自行声明）。解析失败时退化为整条命令的首词。
+ */
+export function deriveSuggestedPrefixes(command: string): string[] {
+  const trimmed = command.trim()
+  if (!trimmed) return []
+
+  const segments = splitShellSegments(trimmed)
+  if (!segments) {
+    const first = splitCommandLine(trimmed)[0]
+    return first ? [first] : []
+  }
+
+  return segments
+    .map(segment => {
+      const tokens = splitCommandLine(segment)
+      return tokens.slice(0, 2).join(' ') || segment
+    })
+    .filter(Boolean)
+}
+
+/**
+ * bash 工具专用判定入口：先做前缀一致性校验（deny 优先，对齐 HG
+ * validate_command 把 PREFIX_NOT_IN_COMMAND 放在最前——即使命令本身
+ * 可免审批，声明与命令不符也整条拒绝），再走通用 snippet 五级管线。
+ */
+export function evaluateBashCommand(
+  command: string,
+  suggestedPrefixes: string[],
+): GuardResult {
+  const prefixViolation = validateSuggestedPrefixes(
+    command.trim(),
+    suggestedPrefixes,
+  )
+  if (prefixViolation) {
+    return { verdict: 'deny', reason: prefixViolation }
+  }
+  return evaluateCommandSnippet(command)
+}

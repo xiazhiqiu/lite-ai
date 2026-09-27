@@ -1,3 +1,5 @@
+import { deriveSuggestedPrefixes } from './tools/command-guard.js'
+
 export type LocalToolShortcut =
   | { toolName: 'list_files'; input: { path?: string } }
   | { toolName: 'grep_files'; input: { pattern: string; path?: string } }
@@ -12,7 +14,10 @@ export type LocalToolShortcut =
         replacements: Array<{ search: string; replace: string; replaceAll?: boolean }>
       }
     }
-  | { toolName: 'bash'; input: { command: string; cwd?: string } }
+  | {
+      toolName: 'bash'
+      input: { command: string; suggested_prefixes: string[]; cwd?: string }
+    }
 
 export function parseLocalToolShortcut(input: string): LocalToolShortcut | null {
   if (input === '/ls' || input.startsWith('/ls ')) {
@@ -100,7 +105,11 @@ export function parseLocalToolShortcut(input: string): LocalToolShortcut | null 
     if (!commandText) return null
     return {
       toolName: 'bash',
-      input: { command: commandText, cwd: commandCwd || undefined },
+      input: {
+        command: commandText,
+        suggested_prefixes: deriveSuggestedPrefixes(commandText),
+        cwd: commandCwd || undefined,
+      },
     }
   }
 

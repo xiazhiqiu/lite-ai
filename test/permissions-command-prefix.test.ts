@@ -289,3 +289,91 @@ test('session deny_once 保持精确：不扩大到更长变体', async () => {
   })
   assert.equal(calls.length, 2)
 })
+
+// ---------------------------------------------------------------------------
+// prefixCandidates / prefixSignature（bash 工具 × suggested_prefixes 对齐 HG）
+// ---------------------------------------------------------------------------
+
+test('审批框：prefixCandidates 提供 p 档（bash snippet 域），allow_prefix 落盘', async () => {
+  const candidatesStore = await writeStore('prefix-candidates.json', {})
+  const { calls, manager } = newManager(['allow_prefix'], candidatesStore)
+  await manager.ensureCommand('bash', ['-lc', 'curl example.com'], tempRoot, {
+    forcePromptReason: 'guard pipeline',
+    prefixCandidates: ['curl'],
+    prefixSignature: 'curl example.com',
+  })
+
+  assert.equal(calls.length, 1)
+  const p = calls[0]!.choices.find(choice => choice.key === 'p')
+  assert.ok(p, '候选起始命中时应提供 p 档')
+  assert.match(p!.label, /'curl'/)
+
+  const store = JSON.parse(await readFile(candidatesStore, 'utf8'))
+  assert.deepEqual(store.allowedCommandPrefixes, ['curl'])
+})
+
+test('bash 前缀跨调用放行：prefixSignature 词域起始匹配；非起始命中不放行', async () => {
+  const prefixStore = await writeStore('prefix-bash-domain.json', {
+    allowedCommandPrefixes: ['kubectl get'],
+  })
+  const { manager } = newManager(null, prefixStore)
+
+  // snippet 以 'kubectl get' 开头 → 前缀放行，静默通过（无 prompt 实例不抛错）
+  await manager.ensureCommand('bash', ['-lc', 'kubectl get pods -n prod'], tempRoot, {
+    forcePromptReason: 'guard pipeline',
+    prefixCandidates: ['kubectl get'],
+    prefixSignature: 'kubectl get pods -n prod',
+  })
+
+  // 前缀出现在管道后段（非起始）→ 不放行，仍走审批 → 无 prompt 抛错
+  await assert.rejects(
+    () =>
+      manager.ensureCommand('bash', ['-lc', 'ls | kubectl get pods'], tempRoot, {
+        forcePromptReason: 'guard pipeline',
+        prefixCandidates: ['kubectl get'],
+        prefixSignature: 'ls | kubectl get pods',
+      }),
+    /requires approval/,
+  )
+})
+
+test('审批框：候选均与 snippet 起始不匹配 → 不提供 p 档（fail-closed）', async () => {
+  const { calls, manager } = newManager(['allow_once'])
+  await manager.ensureCommand('bash', ['-lc', 'ls | zig build'], tempRoot, {
+    forcePromptReason: 'guard pipeline',
+    prefixCandidates: ['zig build'],
+    prefixSignature: 'ls | zig build',
+  })
+
+  assert.equal(calls.length, 1)
+  assert.equal(
+    calls[0]!.choices.find(choice => choice.key === 'p'),
+    undefined,
+  )
+})
+
+test('审批框：多个候选起始命中时取最具体（词数最多，最小授权默认）', async () => {
+  const { calls, manager } = newManager(['allow_once'])
+  await manager.ensureCommand('bash', ['-lc', 'kubectl get pods'], tempRoot, {
+    forcePromptReason: 'guard pipeline',
+    prefixCandidates: ['kubectl', 'kubectl get'],
+    prefixSignature: 'kubectl get pods',
+  })
+
+  const p = calls[0]!.choices.find(choice => choice.key === 'p')
+  assert.ok(p)
+  assert.match(p!.label, /'kubectl get'/)
+})
+
+test('审批框：不带 prefixCandidates 的调用保持旧行为（bash -lc 无 p 档）', async () => {
+  const { calls, manager } = newManager(['allow_once'])
+  await manager.ensureCommand('bash', ['-lc', 'ls'], tempRoot, {
+    forcePromptReason: 'guard pipeline',
+  })
+
+  assert.equal(calls.length, 1)
+  assert.equal(
+    calls[0]!.choices.find(choice => choice.key === 'p'),
+    undefined,
+  )
+})

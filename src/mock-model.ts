@@ -1,4 +1,5 @@
 import type { AgentStep, ChatMessage, ModelAdapter } from './types.js'
+import { deriveSuggestedPrefixes } from './tools/command-guard.js'
 
 function lastUserMessage(messages: ChatMessage[]): string {
   const last = [...messages].reverse().find(message => message.role === 'user')
@@ -108,7 +109,7 @@ export class MockModelAdapter implements ModelAdapter {
         calls: [{
           id: `mock-${Date.now()}`,
           toolName: 'bash',
-          input: { command },
+          input: { command, suggested_prefixes: deriveSuggestedPrefixes(command) },
         }],
       }
     }

@@ -26,6 +26,14 @@ export type PermissionPromptResult = {
 
 type EnsureCommandOptions = {
   forcePromptReason?: string
+  /**
+   * bash 工具专用：模型声明的 suggested_prefixes 候选（对齐 HolmesGPT）。
+   * 提供时 p 档只从候选中出（snippet 词边界起始匹配、取最具体），
+   * 不再走 extractCommandPrefix——bash -lc 形态下后者恒为 null。
+   */
+  prefixCandidates?: string[]
+  /** bash 工具专用：前缀匹配域（snippet 本体），缺省用 command+args 签名。 */
+  prefixSignature?: string
 }
 
 export type PermissionRequest = {
@@ -139,6 +147,28 @@ export function matchesCommandPrefix(
   }
 
   return false
+}
+
+/**
+ * 从模型声明的候选中挑 p 档前缀：仅接受与目标串词边界【起始】匹配的候选
+ * （前缀放行语义 = 未来以它开头的命令免审批，起始锚定是保守方向）；
+ * 多个命中时取最具体（词数最多）——最小授权默认。
+ */
+function pickPrefixCandidate(
+  candidates: string[],
+  target: string,
+): string | null {
+  let best: string | null = null
+  let bestTokens = 0
+  for (const candidate of candidates) {
+    if (!matchesCommandPrefix(target, [candidate])) continue
+    const tokenCount = candidate.trim().split(/\s+/).filter(Boolean).length
+    if (tokenCount > bestTokens) {
+      best = candidate
+      bestTokens = tokenCount
+    }
+  }
+  return best
 }
 
 export function classifyDangerousCommand(command: string, args: string[]): string | null {
@@ -532,9 +562,17 @@ export class PermissionManager {
     }
 
     // 前缀放行（词边界匹配）：deny/精确 allow 之后、审批之前。
+    // bash 工具传 prefixSignature（snippet 本体）作为匹配域——签名
+    // 'bash -lc <cmd>' 与模型声明的前缀（如 'kubectl get'）词域不同，
+    // 必须在 snippet 词域上比对，否则 bash 前缀永远匹配不上。
     // 注意 secret 硬拦在命令闸（command-guard）上游已是 deny，永远不会走到这里，
     // 因此前缀放行无法漂白 secret 读取。
-    if (matchesCommandPrefix(signature, this.allowedCommandPrefixes)) {
+    if (
+      matchesCommandPrefix(
+        options?.prefixSignature ?? signature,
+        this.allowedCommandPrefixes,
+      )
+    ) {
       return
     }
 
@@ -544,7 +582,15 @@ export class PermissionManager {
       )
     }
 
-    const commandPrefix = extractCommandPrefix(command, args)
+    // p 档前缀来源：调用方显式给了 prefixCandidates（bash 工具，模型声明）
+    // → 只从候选里挑；否则走 extractCommandPrefix 既有路径（kubectl 等非旗标形态）。
+    const commandPrefix =
+      options?.prefixCandidates && options.prefixCandidates.length > 0
+        ? pickPrefixCandidate(
+            options.prefixCandidates,
+            options.prefixSignature ?? signature,
+          )
+        : extractCommandPrefix(command, args)
     const choices: PermissionChoice[] = [
       { key: 'y', label: 'allow once', decision: 'allow_once' },
       { key: 'a', label: 'always allow this command', decision: 'allow_always' },

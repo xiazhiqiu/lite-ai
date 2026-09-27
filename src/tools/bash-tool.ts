@@ -6,7 +6,7 @@ import type { ToolDefinition } from '../tool.js'
 import { resolveToolPath } from '../workspace.js'
 import {
   classifySecretAccess,
-  evaluateCommandSnippet,
+  evaluateBashCommand,
   isReadOnlyCommandCall,
   splitCommandLine,
 } from './command-guard.js'
@@ -15,6 +15,7 @@ const execFileAsync = promisify(execFile)
 
 type Input = {
   command: string
+  suggested_prefixes: string[]
   cwd?: string
 }
 
@@ -24,22 +25,38 @@ type Input = {
  * 安全判定走 command-guard 五级管线（拆段 → secret 硬拦 → 参数原语 →
  * 段级白名单 → 三态汇总），无 permissions 上下文时强制只读白名单
  * （fail-closed，供无人值守巡检使用）。
+ *
+ * suggested_prefixes（必填，对齐 HG bash_toolset.py:123）：模型为每个命令段
+ * 声明一个前缀，用于 (1) 一致性校验——声明的前缀必须出现在命令里，否则
+ * deny（HG validation.py:571）；(2) 审批框 p 档候选——用户"记住前缀"时
+ * 只持久化模型声明过、人批过的前缀（HG tool_calling_llm.py:461-503）。
  */
 export const bashTool: ToolDefinition<Input> = {
   name: 'bash',
   description:
     'Execute a bash command and return its output. Supports single commands, pipes (|), &&, || and ;. ' +
-    'Loops, conditionals and subshells require user approval. Read-only commands run without approval.',
+    'Loops, conditionals and subshells require user approval. Read-only commands run without approval. ' +
+    'Provide suggested_prefixes: exactly one prefix per command segment ' +
+    '(segments are separated by |, &&, ||, ;), e.g. command "kubectl get pods | grep app" ' +
+    '-> suggested_prefixes ["kubectl get", "grep"]. Prefixes must appear in the command; ' +
+    'inconsistent suggestions are denied.',
   inputSchema: {
     type: 'object',
     properties: {
       command: { type: 'string' },
+      suggested_prefixes: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'One prefix per command segment, e.g. ["kubectl get", "grep"].',
+      },
       cwd: { type: 'string' },
     },
-    required: ['command'],
+    required: ['command', 'suggested_prefixes'],
   },
   schema: z.object({
     command: z.string(),
+    suggested_prefixes: z.array(z.string()),
     cwd: z.string().optional(),
   }),
   async run(input, context) {
@@ -68,11 +85,11 @@ export const bashTool: ToolDefinition<Input> = {
       }
     }
 
-    // 五级判定管线（纯 shell 形态统一走 snippet 入口）：
-    // deny：无审批出口直接拒（secret 暴露 / sudo 提权）；
+    // bash 专用判定入口：前缀一致性校验（deny 优先）→ 五级管线。
+    // deny：无审批出口直接拒（secret 暴露 / sudo 提权 / 前缀与命令不符）；
     // approval：转权限底座（三层名单 → 无回调硬拒 → 审批框）；
     // allow：全段过白名单，免审批执行。
-    const guard = evaluateCommandSnippet(command)
+    const guard = evaluateBashCommand(command, input.suggested_prefixes)
 
     if (guard.verdict === 'deny') {
       return {
@@ -84,6 +101,8 @@ export const bashTool: ToolDefinition<Input> = {
     if (guard.verdict === 'approval') {
       await context.permissions?.ensureCommand('bash', ['-lc', command], effectiveCwd, {
         forcePromptReason: guard.reason,
+        prefixCandidates: input.suggested_prefixes,
+        prefixSignature: command,
       })
     }
 
