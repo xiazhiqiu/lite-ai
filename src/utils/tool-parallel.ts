@@ -7,9 +7,9 @@ export type CallGroup = {
 
 export type IsParallelSafe = (call: ToolCall) => boolean
 
-/** env 开关，默认关闭。置 LITE_AI_TOOL_CONCURRENCY=1 启用工具并发。 */
+/** env 开关，默认开启工具并发；置 LITE_AI_TOOL_CONCURRENCY=0 可关闭（回到全串行）。 */
 export function isToolConcurrencyEnabled(): boolean {
-  return process.env.LITE_AI_TOOL_CONCURRENCY === '1'
+  return process.env.LITE_AI_TOOL_CONCURRENCY !== '0'
 }
 
 /** 并行批内同时在飞的工具数上限。 */

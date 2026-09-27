@@ -128,7 +128,6 @@ async function main(): Promise<void> {
           repeat: r,
           cwd,
           maxSteps: args.maxSteps,
-          quiet: args.quiet,
         },
         { quiet: args.quiet },
       )

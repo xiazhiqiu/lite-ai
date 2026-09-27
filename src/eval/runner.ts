@@ -129,7 +129,7 @@ export async function runInstance(
 
     const runtime = await mods.loadRuntimeConfig()
     const fullTools = await mods.createDefaultToolRegistry({ cwd: input.cwd, runtime })
-    await mods.hydrateMcpTools({ cwd: input.cwd, runtime, fullTools }).catch(() => {})
+    await mods.hydrateMcpTools({ cwd: input.cwd, runtime, tools: fullTools }).catch(() => {})
 
     const allowedNames = filterReadOnly(fullTools.list().map(t => t.name), filterReadFile)
     const tools = fullTools.subset(allowedNames)
