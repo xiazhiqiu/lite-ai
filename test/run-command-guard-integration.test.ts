@@ -193,13 +193,26 @@ describe('bash × command-guard 接线', () => {
     }
   })
 
-  test('无 permissions：命令替换保持 fail-closed 拒绝', async () => {
+  test('无 permissions：内嵌非只读命令的命令替换保持 fail-closed 拒绝', async () => {
+    // AST 升级后命令替换内嵌各成段逐段判定：内嵌 rm 非白名单 → 守护栏拒（read-only mode）
+    const result = await bashTool.run(
+      { command: 'echo $(rm -rf /tmp/x)', suggested_prefixes: ['echo'] },
+      { cwd },
+    )
+    assert.equal(result.ok, false)
+    assert.match(result.output, /read-only mode/)
+  })
+
+  test('无 permissions：全段只读的内嵌命令放行进管线（误杀修复）', async () => {
+    // AST 升级核心收益：echo $(pwd) 两段全在白名单 → 不再被守护栏整体误杀；
+    // 仍会进五级管线被前缀申报校验拒（申报 1 段 vs 实际 2 段）——deny 关卡后移但 fail-closed 不变。
     const result = await bashTool.run(
       { command: 'echo $(pwd)', suggested_prefixes: ['echo'] },
       { cwd },
     )
     assert.equal(result.ok, false)
-    assert.match(result.output, /read-only mode/)
+    assert.doesNotMatch(result.output, /read-only mode/)
+    assert.match(result.output, /suggested_prefixes/)
   })
 
   test('kubectl 工具：只读子命令免审批直行', async () => {

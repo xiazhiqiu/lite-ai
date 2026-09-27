@@ -8,6 +8,10 @@ import {
   DEFAULT_TOOL_CONCURRENCY_LIMIT,
 } from '../src/utils/tool-parallel.js'
 import { isReadOnlyCommandCall } from '../src/tools/command-guard.js'
+import {
+  parseBashSegments,
+  __setBashSegmentParserForTests,
+} from '../src/tools/bash-parser.js'
 
 function call(input: unknown, id = 'c'): ToolCall {
   return { id, toolName: 'x', input }
@@ -84,8 +88,7 @@ test('isReadOnlyCommandCall: 重定向 unsafe', () => {
   assert.equal(isReadOnlyCommandCall({ command: 'ls >> out.log' }), false)
 })
 
-test('isReadOnlyCommandCall: 命令替换/后台 unsafe', () => {
-  assert.equal(isReadOnlyCommandCall({ command: 'echo $(pwd)' }), false)
+test('isReadOnlyCommandCall: 后台符 unsafe（AST 与回退路径一致）', () => {
   assert.equal(isReadOnlyCommandCall({ command: 'ls &' }), false)
   assert.equal(isReadOnlyCommandCall({ command: 'tail -f log &' }), false)
 })
@@ -157,5 +160,106 @@ test('toolConcurrencyLimit: 非法值回退默认', () => {
   } finally {
     if (saved === undefined) delete process.env.LITE_AI_TOOL_CONCURRENCY_LIMIT
     else process.env.LITE_AI_TOOL_CONCURRENCY_LIMIT = saved
+  }
+})
+
+// ---------------------------------------------------------------------------
+// isReadOnlyCommandCall AST 判定：tree-sitter 段提取，$(...) 内嵌各成段后
+// 逐段判定（白名单 + 重定向扫描 + 危险原语），替代「见危险符整体拒」。
+// ---------------------------------------------------------------------------
+
+/** 确保 tree-sitter 解析器就绪，使同步快照路径（parseBashSegmentsSync）生效。 */
+async function ensureBashParserReady(): Promise<void> {
+  await parseBashSegments('true')
+}
+
+test('isReadOnlyCommandCall: AST——命令替换内嵌各成段，白名单内嵌放行', async () => {
+  await ensureBashParserReady()
+  // 升级核心收益：内嵌 pwd 是白名单只读段 → 整体放行（原正则路径见 $( 一律拒）
+  assert.equal(isReadOnlyCommandCall({ command: 'echo $(pwd)' }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'cat $(ls /etc) | grep x' }), true)
+})
+
+test('isReadOnlyCommandCall: AST——内嵌非白名单命令仍拒（fail-closed）', async () => {
+  await ensureBashParserReady()
+  assert.equal(isReadOnlyCommandCall({ command: 'echo $(rm -rf /tmp/x)' }), false)
+  // 内嵌段自身带写重定向 → 拒
+  assert.equal(
+    isReadOnlyCommandCall({ command: 'echo $(cat /etc/hostname > /tmp/out)' }),
+    false,
+  )
+})
+
+test('isReadOnlyCommandCall: AST——2>&1 fd 复制与良性目标放行', async () => {
+  await ensureBashParserReady()
+  assert.equal(isReadOnlyCommandCall({ command: 'kubectl get pods 2>&1' }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'ls 2>/dev/null' }), true)
+})
+
+test('isReadOnlyCommandCall: AST——find 写原语堵漏（-delete 不可并行）', async () => {
+  await ensureBashParserReady()
+  // 现状漏洞：find 在白名单、无危险符号，`find . -delete` 会被判可并行；
+  // AST 路径段级跑 findDangerousArgvPrimitive 堵上。
+  assert.equal(isReadOnlyCommandCall({ command: 'find . -name x -delete' }), false)
+  assert.equal(isReadOnlyCommandCall({ command: 'find . -name x' }), true)
+})
+
+test('isReadOnlyCommandCall: AST——git/SRE/白名单语义不变', async () => {
+  await ensureBashParserReady()
+  assert.equal(isReadOnlyCommandCall({ command: 'git status' }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'git push' }), false)
+  assert.equal(isReadOnlyCommandCall({ command: 'kubectl get pods' }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'python x.py' }), false)
+})
+
+test('isReadOnlyCommandCall: AST——env/date 参数级堵漏', async () => {
+  await ensureBashParserReady()
+  // env 可执行任意命令：仅全 NAME=value 赋值（含裸 env）只读
+  assert.equal(isReadOnlyCommandCall({ command: 'env' }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'env FOO=bar' }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'env rm -rf /tmp/x' }), false)
+  // GNU date -s 修改系统时钟
+  assert.equal(isReadOnlyCommandCall({ command: 'date' }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'date -s "2026-01-01"' }), false)
+})
+
+test('isReadOnlyCommandCall: 解析器不可用回退手写拆段（fail-closed 不变）', () => {
+  __setBashSegmentParserForTests(null)
+  try {
+    // 回退路径维持原判：见 $( / 重定向 一律拒
+    assert.equal(isReadOnlyCommandCall({ command: 'echo $(pwd)' }), false)
+    assert.equal(isReadOnlyCommandCall({ command: 'ls -la' }), true)
+    assert.equal(isReadOnlyCommandCall({ command: 'cat a > b.txt' }), false)
+  } finally {
+    __setBashSegmentParserForTests(undefined)
+  }
+})
+
+test('isReadOnlyCommandCall: 注入 AST 段——重定向/危险原语单元级验证', () => {
+  __setBashSegmentParserForTests(() => [
+    { text: 'cat a', argv0: 'cat', redirectText: 'cat a > /etc/passwd' },
+  ])
+  try {
+    assert.equal(isReadOnlyCommandCall({ command: 'cat a > /etc/passwd' }), false)
+  } finally {
+    __setBashSegmentParserForTests(undefined)
+  }
+
+  __setBashSegmentParserForTests(() => [
+    { text: 'find . -delete', argv0: 'find', redirectText: null },
+  ])
+  try {
+    assert.equal(isReadOnlyCommandCall({ command: 'find . -delete' }), false)
+  } finally {
+    __setBashSegmentParserForTests(undefined)
+  }
+
+  __setBashSegmentParserForTests(() => [
+    { text: 'echo hi', argv0: 'echo', redirectText: 'echo hi 2>&1' },
+  ])
+  try {
+    assert.equal(isReadOnlyCommandCall({ command: 'echo hi 2>&1' }), true)
+  } finally {
+    __setBashSegmentParserForTests(undefined)
   }
 })

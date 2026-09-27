@@ -15,7 +15,7 @@
  */
 
 import { classifyDangerousCommand } from '../permissions.js'
-import { parseBashSegments } from './bash-parser.js'
+import { parseBashSegments, parseBashSegmentsSync } from './bash-parser.js'
 import type { ParsedBashSegment } from './bash-parser.js'
 
 // ---------------------------------------------------------------------------
@@ -193,7 +193,14 @@ function hasDangerousToken(token: string): boolean {
 /**
  * 判定一次 bash 调用实例是否可并发执行（只读）。
  * fail-closed：任何无法 100% 确认只读的情况都返回 false。
- * 按 shell 分隔符拆段，逐段校验 argv0 与危险符号。
+ *
+ * AST 优先（消费方式对齐 evaluateBashCommand）：tree-sitter 把 `$(...)`
+ * 内嵌命令各成段后逐段判定——白名单内嵌（echo $(pwd)）放行，非白名单
+ * 内嵌（echo $(rm ...)）仍拒；重定向走 findFileRedirect 语义（2>&1 与
+ * 良性目标放行、写文件拒）；段级跑 findDangerousArgvPrimitive（堵
+ * `find . -delete` 这类「白名单命令 + 写原语参数」的并行漏洞）。
+ * 解析器未就绪/解析失败 → null → 回退手写拆段（见 $( 与危险符一律拒），
+ * fail-closed 语义与升级前一致。
  * 绝不复用 isReadOnlyCommand（其白名单含 sed）。
  */
 export function isReadOnlyCommandCall(input: {
@@ -202,7 +209,94 @@ export function isReadOnlyCommandCall(input: {
   const trimmed = input.command.trim()
   if (!trimmed) return false
 
+  // 引号外裸 &（后台执行）：等待语义被破坏，保守拒（&& 逻辑符不算）。
+  if (hasBareBackgroundAmpersand(trimmed)) return false
+
+  const segments = parseBashSegmentsSync(trimmed)
+  if (segments) {
+    return segments.every(isReadOnlyAstSegment)
+  }
   return isReadOnlySnippet(trimmed)
+}
+
+/** 引号外裸 &（非 &&）扫描：引号/转义感知，风格对齐 splitCommandLine。 */
+function hasBareBackgroundAmpersand(command: string): boolean {
+  let quote: '"' | "'" | null = null
+  let escaping = false
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]!
+    if (escaping) {
+      escaping = false
+      continue
+    }
+    if (char === '\\' && quote !== "'") {
+      escaping = true
+      continue
+    }
+    if (quote) {
+      if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (char !== '&') continue
+    if (command[i + 1] === '&') {
+      i++ // && 逻辑符：跳过第二个 &
+      continue
+    }
+    // `2>&1`（fd 复制，& 紧跟 >）与 `&>`（bash 双流重定向）里的 & 不是后台符：
+    // 前者无副作用放行，后者由段级 findFileRedirect 按目标良性与否判定。
+    if (command[i - 1] === '>' || command[i + 1] === '>') continue
+    return true
+  }
+  return false
+}
+
+/** AST 段级只读判定（argv 提取对齐 evaluateBashCommand:1013-1026）。 */
+function isReadOnlyAstSegment(segment: ParsedBashSegment): boolean {
+  // 重定向：fd 复制（2>&1）与良性目标（/dev/null 等）放行，写文件/输入重定向拒。
+  if (segment.redirectText && findFileRedirect(segment.redirectText)) {
+    return false
+  }
+
+  const tokens = splitCommandLine(segment.text)
+  let argv0 = segment.argv0
+  let args: string[]
+  const argv0Index = argv0 ? tokens.indexOf(argv0) : -1
+  if (argv0 && argv0Index >= 0) {
+    args = tokens.slice(argv0Index + 1)
+  } else {
+    argv0 = tokens[0] ?? ''
+    args = tokens.slice(1)
+  }
+  if (!argv0) return false
+
+  // 白名单命令也可能被参数赋予写副作用/执行原语（find -delete、sort -o 等）。
+  if (findDangerousArgvPrimitive(argv0, args)) return false
+
+  // env 会执行任意命令：仅当参数全是 NAME=value 赋值（含裸 env）才只读。
+  if (argv0 === 'env') {
+    return args.every(arg => /^[A-Za-z_][A-Za-z0-9_]*=/.test(arg))
+  }
+
+  // GNU date -s / --set 修改系统时钟，非只读。
+  if (argv0 === 'date') {
+    return !args.some(
+      arg => arg === '-s' || arg === '--set' || arg.startsWith('--set='),
+    )
+  }
+
+  if (argv0 === 'git') {
+    const sub = args[0]
+    return sub !== undefined && CONCURRENT_READONLY_GIT_SUBCOMMANDS.has(sub)
+  }
+
+  // SRE 只读诊断命令
+  if (isSreReadOnlyCommand(argv0, args)) return true
+
+  return CONCURRENT_READONLY_COMMANDS.has(argv0)
 }
 
 function isReadOnlySnippet(command: string): boolean {

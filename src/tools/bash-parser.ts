@@ -69,6 +69,8 @@ function subtreeHasDynamicArg(node: SyntaxNode): boolean {
 
 let parserPromise: Promise<Parser | null> | null = null
 let testParserOverride: BashSegmentParser | null | undefined = undefined
+/** 就绪后的解析器快照：同步路径（parseBashSegmentsSync）用它做零等待解析。 */
+let readyParser: Parser | null = null
 
 async function loadParser(): Promise<Parser | null> {
   try {
@@ -78,6 +80,7 @@ async function loadParser(): Promise<Parser | null> {
     const language = await Language.load(wasmPath)
     const parser = new Parser()
     parser.setLanguage(language)
+    readyParser = parser
     return parser
   } catch (error) {
     console.warn(
@@ -103,20 +106,11 @@ export function __setBashSegmentParserForTests(
   testParserOverride = override
 }
 
-/**
- * 把命令解析为按文档序的命令段列表。返回 null 表示「解析器不可用或无法
- * 给出可信分段」，调用方必须回退到手写拆段路径（fail-closed）。
- */
-export async function parseBashSegments(
+/** 解析主体（同步）：tree-sitter 的 parse 本身是同步调用，仅供已就绪的解析器使用。 */
+function extractSegments(
+  parser: Parser,
   command: string,
-): Promise<ParsedBashSegment[] | null> {
-  if (testParserOverride !== undefined) {
-    return testParserOverride ? testParserOverride(command) : null
-  }
-
-  const parser = await getParser()
-  if (!parser) return null
-
+): ParsedBashSegment[] | null {
   try {
     const tree = parser.parse(command)
     if (!tree) return null
@@ -162,3 +156,37 @@ export async function parseBashSegments(
     return null
   }
 }
+
+/**
+ * 把命令解析为按文档序的命令段列表。返回 null 表示「解析器不可用或无法
+ * 给出可信分段」，调用方必须回退到手写拆段路径（fail-closed）。
+ */
+export async function parseBashSegments(
+  command: string,
+): Promise<ParsedBashSegment[] | null> {
+  if (testParserOverride !== undefined) {
+    return testParserOverride ? testParserOverride(command) : null
+  }
+
+  const parser = await getParser()
+  if (!parser) return null
+  return extractSegments(parser, command)
+}
+
+/**
+ * 同步快照解析：解析器已就绪时零等待返回段列表；未就绪（异步加载中）
+ * 返回 null，由调用方回退手写拆段（fail-closed）。供同步判定入口
+ * （isReadOnlyCommandCall → isParallelSafe 并发谓词 / 无人值守护栏）使用。
+ */
+export function parseBashSegmentsSync(
+  command: string,
+): ParsedBashSegment[] | null {
+  if (testParserOverride !== undefined) {
+    return testParserOverride ? testParserOverride(command) : null
+  }
+  return readyParser ? extractSegments(readyParser, command) : null
+}
+
+// 模块加载即启动解析器初始化（fire-and-forget）：让同步快照路径在进程起来后
+// 尽快可用；就绪前的同步调用拿到 null 走回退路径，行为与未引入前一致。
+void getParser()
