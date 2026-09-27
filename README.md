@@ -20,9 +20,11 @@ LiteAI 是一个轻量级终端编码助手，提供了类似 Claude Code 的编
 - 全屏终端 UI，支持输入历史、会话滚动、slash 命令菜单与审批流程
 - 按项目持久化会话，支持 resume / rename / fork / compact
 - 基于 provider usage 的上下文统计，配套自动压缩、context collapse 与 snip compact
-- 内置文件、搜索、编辑、命令执行、网页抓取/搜索等工具
+- 内置文件、搜索、编辑、网页抓取/搜索等工具；命令执行拆为 `bash`（纯 shell）与 `kubectl`（只读子命令免审批、写子命令转审批）两个工具
+- 只读数据源工具集（`toolsets` 配置驱动）：Prometheus / Elasticsearch / Loki / Tempo / kubernetes / database / GitLab，缺配置则不产生工具（详见 `src/tools/data-sources/README.md`）
 - 通过 `SKILL.md` 发现本地技能，支持 MCP 工具/资源/prompt（stdio 或远程 HTTP）
-- 写文件前先审阅 diff，并做路径与命令权限校验
+- 写文件前先审阅 diff，并做路径与命令权限校验：命令走 command-guard 五级判定管线（拆段 → secret 硬拦 → 参数原语 → 段级白名单 → 三态汇总），无审批通道时强制只读（fail-closed）
+- 工具并发默认开启：只读命令/只读工具并行执行（上限 8），写类工具强制串行；设 `LITE_AI_TOOL_CONCURRENCY=0` 退回全串行
 
 ## 安装
 
@@ -64,6 +66,21 @@ LITE_AI_MODEL_MODE=mock npm run dev
 - `/compact` 手动压缩上下文
 
 管理命令包括 `lite-ai mcp ...` 与 `lite-ai skills ...`。
+
+## 数据源工具集（可选）
+
+在 `settings.json` 的 `toolsets` 字段按需启用只读数据源工具，密钥用 `{{ env.NAME }}` 占位在运行时注入、不落盘；未配置或缺必填项的 toolset 不会产生任何工具：
+
+```json
+{
+  "toolsets": {
+    "prometheus": { "type": "prometheus", "config": { "prometheus_url": "{{ env.PROMETHEUS_URL }}" } },
+    "gitlab": { "type": "gitlab", "config": { "gitlab_url": "{{ env.GITLAB_URL }}", "gitlab_token": "{{ env.GITLAB_TOKEN }}" } }
+  }
+}
+```
+
+内置 7 类：`prometheus` / `elasticsearch` / `loki` / `tempo` / `kubernetes` / `database` / `gitlab`。配置示例与各 toolset 必填项见 `src/tools/data-sources/README.md`。
 
 ## 开发
 
