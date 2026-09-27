@@ -402,9 +402,23 @@ export function splitShellSegments(command: string): string[] | null {
   return segments.length > 0 ? segments : null
 }
 
+/** 非真实文件的重定向/输出目标：null 池、标准流、终端与 fd 别名（对齐 HG argv_utils.py:12）。 */
+const BENIGN_REDIRECT_TARGETS = new Set([
+  '/dev/null',
+  '/dev/stdout',
+  '/dev/stderr',
+  '/dev/tty',
+])
+
+export function isBenignRedirectTarget(target: string): boolean {
+  return BENIGN_REDIRECT_TARGETS.has(target) || target.startsWith('/dev/fd/')
+}
+
 /**
  * 段内引号外的文件重定向扫描。`2>&1` / `>&2` 这类 fd 复制放行；
  * `>` `>>`（写/追加文件）与 `<` `<<`（输入/heredoc，保守）返回描述。
+ * 良性目标（/dev/null、/dev/stdout 等）不是真实文件写，放行——
+ * 对齐 HG argv_utils.py 的 BENIGN_REDIRECT_TARGETS。
  */
 export function findFileRedirect(segment: string): string | null {
   let quote: '"' | "'" | null = null
@@ -431,14 +445,25 @@ export function findFileRedirect(segment: string): string | null {
     }
 
     if (char === '>') {
-      if (segment[i + 1] === '>') return 'append redirection (>>)'
-      let j = i + 1
+      const isAppend = segment[i + 1] === '>'
+      let j = isAppend ? i + 2 : i + 1
       while (j < segment.length && segment[j] === ' ') j++
       if (segment[j] === '&' && /\d/.test(segment[j + 1] ?? '')) {
         i = j + 1
         continue
       }
-      return 'output redirection (>) writes to a file'
+      let wordEnd = j
+      while (wordEnd < segment.length && !/\s/.test(segment[wordEnd]!)) wordEnd++
+      const target = segment
+        .slice(j, wordEnd)
+        .replace(/^["']+|["']+$/g, '')
+      if (!isBenignRedirectTarget(target)) {
+        return isAppend
+          ? 'append redirection (>>)'
+          : 'output redirection (>) writes to a file'
+      }
+      i = Math.max(wordEnd - 1, i)
+      continue
     }
     if (char === '<') {
       return 'input redirection (<)'
@@ -506,6 +531,12 @@ export function classifySecretAccess(
   return null
 }
 
+// ---------------------------------------------------------------------------
+// 参数原语判定（阶段三，对齐 HG command_arg_rules.py + argv_utils.py）：
+// 白名单只看命令名不看参数，少数命令的参数能把「只读工具」变成任意执行/
+// 文件写/删除。这些原语命中一律转审批，白名单成员与既往授权都越不过。
+// ---------------------------------------------------------------------------
+
 const FIND_DANGEROUS_FLAGS = new Set([
   '-delete',
   '-exec',
@@ -518,9 +549,96 @@ const FIND_DANGEROUS_FLAGS = new Set([
   '-fprintf',
 ])
 
+/** GNU getopt_long 接受无歧义长选项缩写：`--out` 视同 `--output`（对齐 HG argv_utils.abbreviates，从宽匹配）。 */
+function abbreviatesLongOption(
+  opt: string,
+  targets: ReadonlySet<string>,
+): boolean {
+  if (opt.length <= 2 || !opt.startsWith('--')) return false
+  for (const target of targets) {
+    if (target.startsWith(opt)) return true
+  }
+  return false
+}
+
+/**
+ * minimal getopt 解析（对齐 HG argv_utils.parse_argv）：只建模两件
+ * 「只看名字的检查」会漏的事——短选项聚簇（`-ro` == `-r -o`）与取值选项
+ * （值是簇内余下字符或下一 token）。只需精确到「哪些旗标在场 + 位置参数
+ * 列表」，不是完整 getopt。
+ */
+function parseArgvOptions(
+  args: string[],
+  valueShortChars: string,
+  valueLongOpts: ReadonlySet<string>,
+): { options: Set<string>; positionals: string[] } {
+  const options = new Set<string>()
+  const positionals: string[] = []
+  let endOfOptions = false
+  let i = 0
+  while (i < args.length) {
+    const arg = args[i]!
+    if (endOfOptions || arg === '-' || !arg.startsWith('-')) {
+      positionals.push(arg) // '-'（stdin）按位置参数计
+      i++
+      continue
+    }
+    if (arg === '--') {
+      endOfOptions = true
+      i++
+      continue
+    }
+    if (arg.startsWith('--')) {
+      const eq = arg.indexOf('=')
+      const name = eq === -1 ? arg : arg.slice(0, eq)
+      options.add(name)
+      // 必填值长选项吞下一 token，除非值已内联（--name=value）。
+      i += eq === -1 && abbreviatesLongOption(name, valueLongOpts) ? 2 : 1
+      continue
+    }
+    // 短选项聚簇，如 -c、-cf、-ro、-ofile。
+    let consumesNext = false
+    for (let pos = 1; pos < arg.length; pos++) {
+      const ch = arg[pos]!
+      options.add('-' + ch)
+      if (valueShortChars.includes(ch)) {
+        // 值是簇内余下字符（-ofile 的 "file"）或下一 token；簇到此为止。
+        consumesNext = pos === arg.length - 1
+        break
+      }
+    }
+    i += consumesNext ? 2 : 1
+  }
+  return { options, positionals }
+}
+
+/** sort 取值短选项：`-to` 的 o 是 -t 的值，不是输出旗标（对齐 HG SORT_VALUE_SHORT_CHARS）。 */
+const SORT_VALUE_SHORT_CHARS = 'ktSTo'
+const SORT_VALUE_LONG_OPTS = new Set([
+  '--output',
+  '--compress-program',
+  '--buffer-size',
+  '--key',
+  '--field-separator',
+  '--temporary-directory',
+  '--batch-size',
+  '--files0-from',
+  '--random-source',
+])
+const SORT_EXEC_LONG_OPTS = new Set(['--compress-program'])
+const SORT_WRITE_LONG_OPTS = new Set(['--output'])
+
+const UNIQ_VALUE_SHORT_CHARS = 'fsw'
+const UNIQ_VALUE_LONG_OPTS = new Set([
+  '--skip-fields',
+  '--skip-chars',
+  '--check-chars',
+])
+
 /**
  * argv 级危险原语检查：免审批白名单只看命令名不看参数的补丁层。
- * find -delete/-exec、sed -i、sort -o 等参数会让「只读命令」产生写副作用。
+ * find -delete/-exec、sed -i、sort -o/-–compress-program、uniq 输出文件等
+ * 参数会让「只读命令」产生写副作用或执行程序。
  */
 export function findDangerousArgvPrimitive(
   argv0: string,
@@ -549,15 +667,87 @@ export function findDangerousArgvPrimitive(
   }
 
   if (argv0 === 'sort') {
-    for (const arg of args) {
-      if (arg === '-o' || /^-o[^-]/.test(arg) || arg.startsWith('--output')) {
-        return `sort ${arg} writes to a file`
-      }
+    // 长选项按 GNU 缩写匹配（--out 视同 --output），短选项经聚簇解析
+    // （-ro 的 o 是输出旗标）；对齐 HG command_arg_rules._sort_reason。
+    const { options } = parseArgvOptions(
+      args,
+      SORT_VALUE_SHORT_CHARS,
+      SORT_VALUE_LONG_OPTS,
+    )
+    const longOpts = [...options].filter(opt => opt.startsWith('--'))
+    if (longOpts.some(opt => abbreviatesLongOption(opt, SORT_EXEC_LONG_OPTS))) {
+      return "'sort --compress-program' can execute an arbitrary program"
+    }
+    if (
+      options.has('-o') ||
+      longOpts.some(opt => abbreviatesLongOption(opt, SORT_WRITE_LONG_OPTS))
+    ) {
+      return "'sort' output-file option writes to the filesystem"
+    }
+    return null
+  }
+
+  if (argv0 === 'uniq') {
+    // `uniq [OPTION]... [INPUT [OUTPUT]]`：第 2 个位置参数是输出文件，
+    // 除非是 '-'（stdout）或良性目标；对齐 HG command_arg_rules._uniq_reason。
+    const { positionals } = parseArgvOptions(
+      args,
+      UNIQ_VALUE_SHORT_CHARS,
+      UNIQ_VALUE_LONG_OPTS,
+    )
+    const second = positionals[1]
+    if (
+      positionals.length >= 2 &&
+      second !== undefined &&
+      second !== '-' &&
+      !isBenignRedirectTarget(second)
+    ) {
+      return "'uniq' output-file argument writes to the filesystem"
     }
     return null
   }
 
   return null
+}
+
+/**
+ * 参数含运行时展开时无法静态校验其值——展开结果可能正是上面拦的原语
+ * （如 $FLAGS 展开成 -i/-o/-delete）。对 find/sed/sort/uniq 这类
+ * argv-checked 命令转审批；对齐 HG validation.py:219-231 的
+ * shell-expansion gate（HG 集合为 find/sort/uniq，本仓 sed 在白名单故并入）。
+ */
+const ARGV_CHECKED_COMMANDS = new Set(['find', 'sed', 'sort', 'uniq'])
+
+export function isArgvCheckedCommand(name: string): boolean {
+  return ARGV_CHECKED_COMMANDS.has(name)
+}
+
+function commandBasename(argv0: string): string {
+  const idx = argv0.lastIndexOf('/')
+  return idx >= 0 ? argv0.slice(idx + 1) : argv0
+}
+
+function dynamicArgReason(argv0: string): string {
+  return `'${argv0}' builds an argument via shell expansion, which cannot be verified as read-only and requires approval`
+}
+
+/** AST 路径动态闸：段解析器已给出 hasDynamicArgs（单引号字面量不算，不误报）。 */
+function astDynamicArgGate(segment: ParsedBashSegment, argv0: string): string | null {
+  if (!segment.hasDynamicArgs) return null
+  if (!isArgvCheckedCommand(commandBasename(argv0))) return null
+  return dynamicArgReason(argv0)
+}
+
+/**
+ * 手写回退路径动态闸：没有 AST，文本级保守判定（参数 token 含 $ 或反引号
+ * 即视为动态）。回退路径本就是 AST 不可用时的兜底，宁可多转审批
+ * （如 sed 's/$/x/' 的单引号 $ 会被误报，人批一次即可）；对齐 HG
+ * 解析失败路径 check_unsafe_args_in_raw_command「errs toward flagging」。
+ */
+function fallbackDynamicArgGate(argv0: string, args: string[]): string | null {
+  if (!isArgvCheckedCommand(commandBasename(argv0))) return null
+  if (!args.some(arg => /[$`]/.test(arg))) return null
+  return dynamicArgReason(argv0)
 }
 
 /**
@@ -636,6 +826,14 @@ export function evaluateCommandSnippet(command: string): GuardResult {
       segmentResult = escalate(segmentResult, {
         verdict: 'approval',
         reason: redirect,
+      })
+    }
+
+    const dynamic = fallbackDynamicArgGate(argv0 ?? '', args)
+    if (dynamic) {
+      segmentResult = escalate(segmentResult, {
+        verdict: 'approval',
+        reason: dynamic,
       })
     }
 
@@ -830,6 +1028,14 @@ export async function evaluateBashCommand(
       segmentResult = escalate(segmentResult, {
         verdict: 'approval',
         reason: redirect,
+      })
+    }
+
+    const dynamic = astDynamicArgGate(segment, argv0)
+    if (dynamic) {
+      segmentResult = escalate(segmentResult, {
+        verdict: 'approval',
+        reason: dynamic,
       })
     }
 

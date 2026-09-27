@@ -18,6 +18,11 @@
  * 重定向挂在 redirected_statement 上（`cmd > f` 的 `> f` 不在 command
  * 节点文本里），因此每段携带最近外层 redirected_statement 的文本供
  * 调用方做重定向扫描（2>&1 放行、写文件转审批，语义同 findFileRedirect）。
+ *
+ * hasDynamicArgs（阶段三，对齐 HG shell_parser._Visitor.is_dynamic）：
+ * 参数子树是否含运行时展开（$VAR / ${...} / $(...) / 反引号 / <(...)），
+ * 供判定层做「动态参数闸」——argv 级规则无法静态校验展开后的运行时值。
+ * 单引号（raw_string）与 $'...'（ansi_c_string）是纯字面量，不算动态。
  */
 
 import { createRequire } from 'node:module'
@@ -31,9 +36,36 @@ export interface ParsedBashSegment {
   argv0: string | null
   /** 最近外层 redirected_statement 的文本；无外层重定向时为 null。 */
   redirectText: string | null
+  /**
+   * 参数子树（argv0 之外）是否含运行时展开节点。AST 不可用的回退场景
+   * 下由调用方自行做文本级保守判定，因此 DI 注入的假段可省略此字段。
+   */
+  hasDynamicArgs?: boolean
 }
 
 export type BashSegmentParser = (command: string) => ParsedBashSegment[] | null
+
+/** 运行时展开节点类型（对齐 HG shell_parser.py:41 _DYNAMIC）。 */
+const DYNAMIC_ARGV_NODE_TYPES = new Set([
+  'simple_expansion',
+  'expansion',
+  'command_substitution',
+  'process_substitution',
+])
+
+/** 纯字面量叶子：内部文本不经展开（对齐 HG shell_parser.py:50 _LITERAL_LEAVES）。 */
+const LITERAL_ARGV_NODE_TYPES = new Set(['raw_string', 'ansi_c_string'])
+
+/** 参数子树是否含运行时展开（对齐 HG _Visitor.is_dynamic 的递归口径）。 */
+function subtreeHasDynamicArg(node: SyntaxNode): boolean {
+  if (DYNAMIC_ARGV_NODE_TYPES.has(node.type)) return true
+  if (LITERAL_ARGV_NODE_TYPES.has(node.type)) return false
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i)
+    if (child && subtreeHasDynamicArg(child)) return true
+  }
+  return false
+}
 
 let parserPromise: Promise<Parser | null> | null = null
 let testParserOverride: BashSegmentParser | null | undefined = undefined
@@ -96,14 +128,22 @@ export async function parseBashSegments(
       const walk = (node: SyntaxNode, redirectText: string | null): void => {
         if (node.type === 'command') {
           let argv0: string | null = null
+          let argv0Seen = false
+          let hasDynamicArgs = false
           for (let i = 0; i < node.childCount; i++) {
             const child = node.child(i)
-            if (child?.type === 'command_name') {
+            if (!child) continue
+            // 首个 command_name 是 argv0，不计入参数动态性（对齐 HG 只查 words[1:]）。
+            if (child.type === 'command_name' && !argv0Seen) {
               argv0 = child.text
-              break
+              argv0Seen = true
+              continue
+            }
+            if (!hasDynamicArgs && subtreeHasDynamicArg(child)) {
+              hasDynamicArgs = true
             }
           }
-          segments.push({ text: node.text, argv0, redirectText })
+          segments.push({ text: node.text, argv0, redirectText, hasDynamicArgs })
         }
         const nextRedirect =
           node.type === 'redirected_statement' ? node.text : redirectText

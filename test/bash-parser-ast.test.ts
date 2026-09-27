@@ -74,6 +74,30 @@ describe('parseBashSegments（真实 wasm 解析器）', () => {
   it('解析 ERROR（未闭合引号）→ null', async () => {
     assert.equal(await parseBashSegments('echo "unclosed'), null)
   })
+
+  it('hasDynamicArgs：参数含 $VAR 简单展开 → true', async () => {
+    const segments = await parseBashSegments('find . -name $PAT')
+    assert.ok(segments)
+    assert.equal(segments[0]!.hasDynamicArgs, true)
+  })
+
+  it('hasDynamicArgs：双引号内的命令替换 → true', async () => {
+    const segments = await parseBashSegments('find . -name "$(cat x)"')
+    assert.ok(segments)
+    assert.equal(segments[0]!.hasDynamicArgs, true)
+  })
+
+  it('hasDynamicArgs：单引号是纯字面量 → false（对齐 HG is_dynamic）', async () => {
+    const segments = await parseBashSegments("find . -name '$(x)'")
+    assert.ok(segments)
+    assert.equal(segments[0]!.hasDynamicArgs, false)
+  })
+
+  it('hasDynamicArgs：字面量参数 → false', async () => {
+    const segments = await parseBashSegments("find . -name '*.log'")
+    assert.ok(segments)
+    assert.equal(segments[0]!.hasDynamicArgs, false)
+  })
 })
 
 describe('evaluateBashCommand AST 路径', () => {
@@ -105,6 +129,48 @@ describe('evaluateBashCommand AST 路径', () => {
   it('2>&1 放行（fd 复制语义保持）', async () => {
     const result = await evaluateBashCommand('git status 2>&1', ['git status'])
     assert.equal(result.verdict, 'allow')
+  })
+
+  it('动态参数闸：find 参数含 $VAR → approval（展开值不可静态校验）', async () => {
+    const result = await evaluateBashCommand('find . -name $PAT', ['find'])
+    assert.equal(result.verdict, 'approval')
+    assert.match(result.reason!, /shell expansion/)
+  })
+
+  it('动态参数闸：双引号内命令替换 → approval', async () => {
+    const result = await evaluateBashCommand('find . -name "$(cat x)"', ['find', 'cat'])
+    assert.equal(result.verdict, 'approval')
+  })
+
+  it('动态参数闸：单引号字面量不误报 → allow', async () => {
+    const result = await evaluateBashCommand("find . -name '$(x)'", ['find'])
+    assert.equal(result.verdict, 'allow')
+  })
+
+  it('动态参数闸：sed 参数含 $VAR → approval', async () => {
+    const result = await evaluateBashCommand('sed $FLAGS f.txt', ['sed'])
+    assert.equal(result.verdict, 'approval')
+  })
+
+  it('动态参数闸只针对 argv-checked 命令：grep $PAT 放行', async () => {
+    const result = await evaluateBashCommand('grep $PAT f.txt', ['grep'])
+    assert.equal(result.verdict, 'allow')
+  })
+
+  it('良性重定向目标全链路放行：echo hi > /dev/null', async () => {
+    const result = await evaluateBashCommand('echo hi > /dev/null', ['echo'])
+    assert.equal(result.verdict, 'allow')
+  })
+
+  it('手写回退路径动态闸（DI null）：find . $PAT → approval', async () => {
+    __setBashSegmentParserForTests(null)
+    try {
+      const result = await evaluateBashCommand('find . $PAT', ['find'])
+      assert.equal(result.verdict, 'approval')
+      assert.match(result.reason!, /shell expansion/)
+    } finally {
+      __setBashSegmentParserForTests(undefined)
+    }
   })
 
   it('未闭合引号 → AST null → 回退手写 → approval', async () => {

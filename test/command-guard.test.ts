@@ -65,6 +65,16 @@ describe('findFileRedirect 段内重定向', () => {
     assert.ok(findFileRedirect('wc -l < file'))
   })
 
+  test('良性目标豁免：/dev/null、/dev/stdout 不是文件写', () => {
+    assert.equal(findFileRedirect('echo hi > /dev/null'), null)
+    assert.equal(findFileRedirect('echo hi >> /dev/null'), null)
+    assert.equal(findFileRedirect('sort in.txt > /dev/stdout'), null)
+  })
+
+  test('良性目标精确匹配：/dev/nullx 不豁免', () => {
+    assert.ok(findFileRedirect('echo hi > /dev/nullx'))
+  })
+
   test('引号内的重定向字符不算', () => {
     assert.equal(findFileRedirect('echo "a > b"'), null)
   })
@@ -93,6 +103,39 @@ describe('findDangerousArgvPrimitive 参数原语', () => {
   test('sort -o 命中', () => {
     assert.ok(findDangerousArgvPrimitive('sort', ['-o', 'out.txt', 'in.txt']))
     assert.ok(findDangerousArgvPrimitive('sort', ['--output=out.txt', 'in.txt']))
+  })
+
+  test('sort 短选项聚簇 -ro 命中（o 为输出旗标，下一 token 是其值）', () => {
+    assert.ok(findDangerousArgvPrimitive('sort', ['-ro', 'out.txt', 'in.txt']))
+    assert.ok(findDangerousArgvPrimitive('sort', ['-rk2,3', '-o', 'out.txt']))
+  })
+
+  test('sort 长选项缩写命中（GNU getopt_long 接受无歧义缩写）', () => {
+    assert.ok(findDangerousArgvPrimitive('sort', ['--out', 'out.txt']))
+    assert.ok(findDangerousArgvPrimitive('sort', ['--compr', 'gzip', 'in.txt']))
+  })
+
+  test('sort --compress-program 执行原语命中', () => {
+    assert.ok(findDangerousArgvPrimitive('sort', ['--compress-program', 'gzip', 'in.txt']))
+    assert.ok(findDangerousArgvPrimitive('sort', ['--compress-program=gzip']))
+  })
+
+  test('sort 值选项吞掉的 token 不误报（-t o 的 o 不是 -o）', () => {
+    assert.equal(findDangerousArgvPrimitive('sort', ['-t', 'o', 'in.txt']), null)
+    assert.equal(findDangerousArgvPrimitive('sort', ['-k2,3', 'in.txt']), null)
+    assert.equal(findDangerousArgvPrimitive('sort', ['--', '-o']), null)
+  })
+
+  test('uniq 第二个位置参数是输出文件', () => {
+    assert.ok(findDangerousArgvPrimitive('uniq', ['a.txt', 'b.txt']))
+    assert.ok(findDangerousArgvPrimitive('uniq', ['-f2', 'a.txt', 'b.txt']))
+    assert.ok(findDangerousArgvPrimitive('uniq', ['--skip-fields', '2', 'a.txt', 'b.txt']))
+  })
+
+  test('uniq 无输出文件或良性目标放行', () => {
+    assert.equal(findDangerousArgvPrimitive('uniq', ['a.txt']), null)
+    assert.equal(findDangerousArgvPrimitive('uniq', ['a.txt', '-']), null)
+    assert.equal(findDangerousArgvPrimitive('uniq', ['a.txt', '/dev/null']), null)
   })
 
   test('非目标命令不检查', () => {
