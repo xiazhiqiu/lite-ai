@@ -308,8 +308,9 @@ function hasToolUseBlocks(blocks: Map<number, SseBlockState>): boolean {
 async function consumeAnthropicSseStream(
   response: Response,
   callbacks: {
-    onToolCallReady: (call: ToolCall) => void
+    onToolCallReady?: (call: ToolCall) => void
     onTextDelta?: (text: string) => void
+    onThinkingDelta?: (text: string) => void
   },
 ): Promise<AgentStep> {
   if (!response.body) {
@@ -324,7 +325,6 @@ async function consumeAnthropicSseStream(
   let buffer = ''
   let stopReason: string | undefined
   let usage: AnthropicUsage | undefined
-  let toolCallEmitted = false
   let messageStopSeen = false
 
   const handleEvent = (data: Record<string, unknown>) => {
@@ -359,6 +359,7 @@ async function consumeAnthropicSseStream(
         state.toolJson = (state.toolJson ?? '') + delta.partial_json
       } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
         state.thinking = (state.thinking ?? '') + delta.thinking
+        callbacks.onThinkingDelta?.(delta.thinking)
       } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') {
         state.signature = (state.signature ?? '') + delta.signature
       }
@@ -376,8 +377,7 @@ async function consumeAnthropicSseStream(
           // 参数 JSON 损坏：保留调用但置空输入，让 schema 校验拒绝并回写错误结果（防孤儿 tool_use）
           state.toolInput = {}
         }
-        toolCallEmitted = true
-        callbacks.onToolCallReady({
+        callbacks.onToolCallReady?.({
           id: state.toolId ?? '',
           toolName: state.toolName ?? '',
           input: state.toolInput,
@@ -563,7 +563,10 @@ export class AnthropicModelAdapter implements ModelAdapter {
       headers['x-api-key'] = runtime.apiKey
     }
 
-    const streaming = options.onToolCallReady != null
+    // 流式判定 = 任一流式回调在场（onToolCallReady 边生成边执行 / onTextDelta·onThinkingDelta 纯预览）；
+    // 仅声明预览回调时也发 stream 请求，否则文本/思考增量在批处理模式下丢失。
+    const streaming =
+      options.onToolCallReady != null || options.onTextDelta != null || options.onThinkingDelta != null
     const requestBody = {
       model: runtime.model,
       system: payload.system,
@@ -611,13 +614,15 @@ export class AnthropicModelAdapter implements ModelAdapter {
     }
 
     // 流式分支：SSE 边生成边回调（重试已在 fetch 阶段完成；流中途失败不重试，见 consumeAnthropicSseStream）。
+    // 准入 = 任一流式回调在场：onToolCallReady（执行器边生成边执行）或 onTextDelta/onThinkingDelta（纯预览）。
     // 防御：兼容网关可能无视 stream 参数直接返回 JSON —— content-type 非 event-stream 时降级非流式解析。
-    if (streaming && options.onToolCallReady) {
+    if (streaming && (options.onToolCallReady || options.onTextDelta || options.onThinkingDelta)) {
       const contentType = response.headers.get('content-type') ?? ''
       if (contentType.includes('text/event-stream')) {
         return consumeAnthropicSseStream(response, {
           onToolCallReady: options.onToolCallReady,
           onTextDelta: options.onTextDelta,
+          onThinkingDelta: options.onThinkingDelta,
         })
       }
     }

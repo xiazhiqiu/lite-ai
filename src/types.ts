@@ -101,6 +101,8 @@ export type ModelRequestOptions = {
   onToolCallReady?: (call: ToolCall) => void
   /** 流式：assistant 文本增量（TUI 渲染用；adapter 可选实现）。 */
   onTextDelta?: (text: string) => void
+  /** 流式：thinking 增量（Anthropic thinking_delta / DeepSeek reasoning_content；adapter 可选实现）。 */
+  onThinkingDelta?: (text: string) => void
 }
 
 export interface ModelAdapter {

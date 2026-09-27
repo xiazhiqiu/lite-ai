@@ -192,6 +192,43 @@ test('Anthropic SSE: thinking + signature 增量保留进 thinkingBlocks', async
   ])
 })
 
+test('Anthropic SSE: thinking 增量透传 onThinkingDelta', async () => {
+  const thinkingDeltas: string[] = []
+  const { adapter } = makeAdapter()
+
+  globalThis.fetch = (async () =>
+    sseResponse([
+      frame('content_block_start', {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: 'thinking' },
+      }),
+      frame('content_block_delta', {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: '思' },
+      }),
+      frame('content_block_delta', {
+        type: 'content_block_delta',
+        index: 0,
+        delta: { type: 'thinking_delta', thinking: '考中' },
+      }),
+      frame('content_block_stop', { type: 'content_block_stop', index: 0 }),
+      frame('message_delta', {
+        type: 'message_delta',
+        delta: { stop_reason: 'end_turn' },
+        usage: { output_tokens: 2 },
+      }),
+      frame('message_stop', { type: 'message_stop' }),
+    ])) as typeof fetch
+
+  await adapter.next(MESSAGES, {
+    onThinkingDelta: text => thinkingDeltas.push(text),
+  })
+
+  assert.deepEqual(thinkingDeltas, ['思', '考中'])
+})
+
 test('Anthropic SSE: 断流且已触发工具回调 → 部分步骤返回不抛（防孤儿 tool_use）', async () => {
   const readyCalls: ToolCall[] = []
   const { adapter } = makeAdapter()

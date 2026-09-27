@@ -151,6 +151,7 @@ type TranscriptEntryDraft =
   | Omit<Extract<TranscriptEntry, { kind: 'user' }>, 'id'>
   | Omit<Extract<TranscriptEntry, { kind: 'assistant' }>, 'id'>
   | Omit<Extract<TranscriptEntry, { kind: 'progress' }>, 'id'>
+  | Omit<Extract<TranscriptEntry, { kind: 'thinking' }>, 'id'>
   | Omit<Extract<TranscriptEntry, { kind: 'tool' }>, 'id'>
 
 export const WELCOME_CHEW_FRAMES = [
@@ -603,6 +604,70 @@ export function sealStreamingPreviewAsProgress(
     kind: 'progress',
     body: renderStreamingPreviewBody(text, false),
   })
+}
+
+function updateThinkingEntryBody(
+  state: ScreenState,
+  entryId: number,
+  body: string,
+): void {
+  const entry = state.transcript.find(
+    item => item.id === entryId && item.kind === 'thinking',
+  )
+  if (!entry || entry.kind !== 'thinking') {
+    return
+  }
+  entry.body = body
+}
+
+/** thinking 增量并入预览：首增量建 thinking 条目（带光标），后续原地更新 */
+export function appendThinkingPreview(
+  state: ScreenState,
+  streaming: StreamingPreviewState,
+  delta: string,
+): void {
+  if (!delta) return
+  streaming.text += delta
+  const body = renderStreamingPreviewBody(streaming.text, true)
+  if (streaming.entryId === null) {
+    streaming.entryId = pushTranscriptEntry(state, {
+      kind: 'thinking',
+      body,
+    })
+  } else {
+    updateThinkingEntryBody(state, streaming.entryId, body)
+  }
+}
+
+/** 步终结：去光标保留为常驻记录，状态清零（下一步开新条目） */
+export function sealThinkingPreview(
+  state: ScreenState,
+  streaming: StreamingPreviewState,
+): void {
+  if (streaming.entryId === null) return
+  const entry = state.transcript.find(
+    item => item.id === streaming.entryId && item.kind === 'thinking',
+  )
+  if (entry && entry.kind === 'thinking') {
+    entry.body = renderStreamingPreviewBody(streaming.text, false)
+  }
+  streaming.entryId = null
+  streaming.text = ''
+}
+
+/** 错误/中止路径：移除 thinking 预览 */
+export function dropThinkingPreview(
+  state: ScreenState,
+  streaming: StreamingPreviewState,
+): void {
+  if (streaming.entryId !== null) {
+    const index = state.transcript.findIndex(
+      item => item.id === streaming.entryId,
+    )
+    if (index !== -1) state.transcript.splice(index, 1)
+  }
+  streaming.entryId = null
+  streaming.text = ''
 }
 
 export function pushWelcomeAnimation(state: ScreenState): void {
@@ -1459,6 +1524,7 @@ async function handleInput(
   const aggregatedEditByEntryId = new Map<number, AggregatedEditProgress>()
   const turnStartedAt = Date.now()
   const streamingPreview = createStreamingPreviewState()
+  const thinkingPreview = createStreamingPreviewState()
 
   args.permissions.beginTurn()
   try {
@@ -1528,6 +1594,7 @@ async function handleInput(
         }, 5000)
       },
       onAssistantMessage(content, metadata) {
+        sealThinkingPreview(state, thinkingPreview)
         dropStreamingPreview(state, streamingPreview)
         const workedForSeconds = metadata?.final
           ? Math.max(0, Math.floor((Date.now() - turnStartedAt) / 1000))
@@ -1541,6 +1608,8 @@ async function handleInput(
         rerender()
       },
       onProgressMessage(content) {
+        sealThinkingPreview(state, thinkingPreview)
+        dropStreamingPreview(state, streamingPreview)
         pushTranscriptEntry(state, {
           kind: 'progress',
           body: content,
@@ -1548,7 +1617,16 @@ async function handleInput(
         state.transcriptScrollOffset = 0
         rerender()
       },
+      onTextDelta(delta) {
+        appendStreamingPreview(state, streamingPreview, delta)
+        rerender()
+      },
+      onThinkingDelta(delta) {
+        appendThinkingPreview(state, thinkingPreview, delta)
+        rerender()
+      },
       onToolStart(toolUseId, toolName, toolInput) {
+        sealThinkingPreview(state, thinkingPreview)
         sealStreamingPreviewAsProgress(state, streamingPreview)
         setStatus(state, `Running ${toolName}...`)
         state.activeTool = toolName
@@ -1678,6 +1756,7 @@ async function handleInput(
     await saveSession(args.cwd, args.sessionId, args.messages, args.alreadySavedCount)
     args.alreadySavedCount = args.messages.length - 1
   } catch (error) {
+    dropThinkingPreview(state, thinkingPreview)
     dropStreamingPreview(state, streamingPreview)
     const message = error instanceof Error ? error.message : String(error)
     args.messages.push({
@@ -1690,6 +1769,7 @@ async function handleInput(
     })
     state.transcriptScrollOffset = 0
   } finally {
+    dropThinkingPreview(state, thinkingPreview)
     dropStreamingPreview(state, streamingPreview)
     args.permissions.endTurn()
     state.isBusy = false

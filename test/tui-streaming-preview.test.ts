@@ -3,9 +3,12 @@ import assert from 'node:assert/strict'
 import {
   STREAMING_CURSOR,
   appendStreamingPreview,
+  appendThinkingPreview,
   createStreamingPreviewState,
   dropStreamingPreview,
+  dropThinkingPreview,
   sealStreamingPreviewAsProgress,
+  sealThinkingPreview,
 } from '../src/tty-app.ts'
 
 function makeState() {
@@ -119,5 +122,91 @@ describe('streaming preview', () => {
     assert.equal(state.transcript.length, 2)
     assert.equal(state.transcript[1].kind, 'assistant')
     assert.equal(state.transcript[1].body, `第二步旁白${STREAMING_CURSOR}`)
+  })
+})
+
+describe('thinking preview', () => {
+  it('首个 thinking 增量创建 thinking 条目（带光标）', () => {
+    const state = makeState()
+    const thinking = createStreamingPreviewState()
+
+    appendThinkingPreview(state, thinking, '正在分析')
+
+    assert.equal(state.transcript.length, 1)
+    assert.equal(state.transcript[0].kind, 'thinking')
+    assert.equal(state.transcript[0].body, `正在分析${STREAMING_CURSOR}`)
+    assert.equal(thinking.entryId, state.transcript[0].id)
+  })
+
+  it('后续 thinking 增量原地更新，不新增条目', () => {
+    const state = makeState()
+    const thinking = createStreamingPreviewState()
+    appendThinkingPreview(state, thinking, 'A')
+    const entryId = thinking.entryId
+    appendThinkingPreview(state, thinking, 'B')
+
+    assert.equal(state.transcript.length, 1)
+    assert.equal(thinking.entryId, entryId)
+    assert.equal(state.transcript[0].body, `AB${STREAMING_CURSOR}`)
+  })
+
+  it('seal 去光标并保留条目，状态清零（下一步开新条目）', () => {
+    const state = makeState()
+    const thinking = createStreamingPreviewState()
+    appendThinkingPreview(state, thinking, '第一步思考')
+    const entryId = thinking.entryId
+
+    sealThinkingPreview(state, thinking)
+
+    assert.equal(state.transcript.length, 1)
+    assert.equal(state.transcript[0].id, entryId)
+    assert.equal(state.transcript[0].kind, 'thinking')
+    assert.equal(state.transcript[0].body, '第一步思考')
+    assert.equal(thinking.entryId, null)
+    assert.equal(thinking.text, '')
+
+    appendThinkingPreview(state, thinking, '第二步思考')
+    assert.equal(state.transcript.length, 2)
+    assert.equal(state.transcript[1].kind, 'thinking')
+  })
+
+  it('drop 移除条目并清零状态（错误路径）', () => {
+    const state = makeState()
+    const thinking = createStreamingPreviewState()
+    appendThinkingPreview(state, thinking, '会被丢弃')
+
+    dropThinkingPreview(state, thinking)
+
+    assert.equal(state.transcript.length, 0)
+    assert.equal(thinking.entryId, null)
+    assert.equal(thinking.text, '')
+  })
+
+  it('空增量 no-op；未开始 seal/drop 安全空操作', () => {
+    const state = makeState()
+    const thinking = createStreamingPreviewState()
+
+    appendThinkingPreview(state, thinking, '')
+    sealThinkingPreview(state, thinking)
+    dropThinkingPreview(state, thinking)
+
+    assert.equal(state.transcript.length, 0)
+    assert.equal(thinking.entryId, null)
+    assert.equal(thinking.text, '')
+  })
+
+  it('thinking 与 text 预览互不干扰，各自独立条目', () => {
+    const state = makeState()
+    const thinking = createStreamingPreviewState()
+    const streaming = createStreamingPreviewState()
+
+    appendThinkingPreview(state, thinking, '想想')
+    appendStreamingPreview(state, streaming, '答答')
+
+    assert.equal(state.transcript.length, 2)
+    assert.equal(state.transcript[0].kind, 'thinking')
+    assert.equal(state.transcript[1].kind, 'assistant')
+    assert.equal(state.transcript[0].body, `想想${STREAMING_CURSOR}`)
+    assert.equal(state.transcript[1].body, `答答${STREAMING_CURSOR}`)
   })
 })

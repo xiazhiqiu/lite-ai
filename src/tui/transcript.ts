@@ -179,6 +179,12 @@ function renderTranscriptEntry(entry: TranscriptEntry): string {
     )}`
   }
 
+  if (entry.kind === 'thinking') {
+    return `${DIM}${BOLD}thinking${RESET}\n${DIM}${indentBlock(
+      renderMarkdownish(entry.body),
+    )}${RESET}`
+  }
+
   const status =
     entry.status === 'running'
       ? `${YELLOW}running${RESET}`

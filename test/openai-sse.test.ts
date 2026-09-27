@@ -160,6 +160,26 @@ test('OpenAI SSE: reasoning_content 增量累积为 thinking 块（DeepSeek）',
   assert.deepEqual(step.thinkingBlocks, [{ type: 'thinking', text: '推理第一段' }])
 })
 
+test('OpenAI SSE: reasoning_content 增量透传 onThinkingDelta', async () => {
+  const thinkingDeltas: string[] = []
+  const { adapter } = makeAdapter()
+
+  globalThis.fetch = (async () =>
+    sseResponse([
+      chunk({ choices: [{ index: 0, delta: { reasoning_content: '推理' } }] }),
+      chunk({ choices: [{ index: 0, delta: { reasoning_content: '第二段' } }] }),
+      chunk({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }),
+      'data: [DONE]\n\n',
+    ])) as typeof fetch
+
+  const step = await adapter.next(MESSAGES, {
+    onThinkingDelta: text => thinkingDeltas.push(text),
+  })
+
+  assert.deepEqual(thinkingDeltas, ['推理', '第二段'])
+  assert.equal(step.type, 'assistant')
+})
+
 test('OpenAI SSE: 截断且已触发工具回调 → 部分步骤返回不抛', async () => {
   const readyCalls: ToolCall[] = []
   const { adapter } = makeAdapter()
