@@ -11,9 +11,11 @@ dist/
 # Trae editor workspace
 .trae/
 
-# LiteAI local artifacts
-.lite-ai/settings.local.json
-.lite-ai/sessions/
+# LiteAI local artifacts (runtime data + local project skills)
+.lite-ai/
+
+# Resume / interview deliverables (kept local, not uploaded)
+resume-deliverables/
 
 # Auxiliary / generated documentation (kept local, not uploaded)
 aux-docs/
