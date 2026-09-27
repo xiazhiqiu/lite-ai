@@ -183,13 +183,6 @@ const CONCURRENT_READONLY_GIT_SUBCOMMANDS = new Set([
   'branch',
 ])
 
-// 若命令含这些字符，判定为可能写盘/副作用，不得并行。
-const DANGEROUS_PATTERN = /[><&$`|;]/
-
-function hasDangerousToken(token: string): boolean {
-  return DANGEROUS_PATTERN.test(token)
-}
-
 /**
  * 判定一次 bash 调用实例是否可并发执行（只读）。
  * fail-closed：任何无法 100% 确认只读的情况都返回 false。
@@ -199,8 +192,8 @@ function hasDangerousToken(token: string): boolean {
  * 内嵌（echo $(rm ...)）仍拒；重定向走 findFileRedirect 语义（2>&1 与
  * 良性目标放行、写文件拒）；段级跑 findDangerousArgvPrimitive（堵
  * `find . -delete` 这类「白名单命令 + 写原语参数」的并行漏洞）。
- * 解析器未就绪/解析失败 → null → 回退手写拆段（见 $( 与危险符一律拒），
- * fail-closed 语义与升级前一致。
+ * 解析器未就绪/解析失败 → null → 直接 fail-closed 返回 false（不再回退手写拆段）：
+ * AST 是唯一判定路径，解析不可信时一律按「不可并行 / 不可放行」处理。
  * 绝不复用 isReadOnlyCommand（其白名单含 sed）。
  */
 export function isReadOnlyCommandCall(input: {
@@ -213,10 +206,8 @@ export function isReadOnlyCommandCall(input: {
   if (hasBareBackgroundAmpersand(trimmed)) return false
 
   const segments = parseBashSegmentsSync(trimmed)
-  if (segments) {
-    return segments.every(isReadOnlyAstSegment)
-  }
-  return isReadOnlySnippet(trimmed)
+  if (!segments) return false // 解析器不可用 / 无法可信分段 → fail-closed
+  return segments.every(isReadOnlyAstSegment)
 }
 
 /** 引号外裸 &（非 &&）扫描：引号/转义感知，风格对齐 splitCommandLine。 */
@@ -295,42 +286,6 @@ function isReadOnlyAstSegment(segment: ParsedBashSegment): boolean {
 
   // SRE 只读诊断命令
   if (isSreReadOnlyCommand(argv0, args)) return true
-
-  return CONCURRENT_READONLY_COMMANDS.has(argv0)
-}
-
-function isReadOnlySnippet(command: string): boolean {
-  // 拆成 shell 段（| & && || ; 各自成段），但若是命令替换/重定向等，直接拒。
-  const segments = command
-    .split(/(&&|\|\||[|;])/g)
-    .map(segment => segment.trim())
-    .filter(Boolean)
-
-  for (const segment of segments) {
-    if (segment === '&&' || segment === '||' || segment === '|' || segment === ';') {
-      continue
-    }
-    if (!isReadOnlySegment(segment)) {
-      return false
-    }
-  }
-  return true
-}
-
-function isReadOnlySegment(segment: string): boolean {
-  // 重定向 / 命令替换 / 后台符 / 子 shell —— 一律非只读
-  if (hasDangerousToken(segment)) return false
-
-  const [argv0, ...argv] = splitCommandLine(segment)
-  if (!argv0) return false
-
-  if (argv0 === 'git') {
-    const sub = argv[0]
-    return sub !== undefined && CONCURRENT_READONLY_GIT_SUBCOMMANDS.has(sub)
-  }
-
-  // SRE 只读诊断命令
-  if (isSreReadOnlyCommand(argv0, argv)) return true
 
   return CONCURRENT_READONLY_COMMANDS.has(argv0)
 }

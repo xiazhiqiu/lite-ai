@@ -4,6 +4,7 @@ import {
   isReadOnlyCommandCall,
   isSreReadOnlyCommand,
 } from '../src/tools/command-guard.js'
+import { parseBashSegments } from '../src/tools/bash-parser.js'
 
 test('isSreReadOnlyCommand: kubectl 只读子命令放行', () => {
   assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'pods']), true)
@@ -63,7 +64,8 @@ test('isSreReadOnlyCommand: 非 SRE 命令返回 false', () => {
   assert.equal(isSreReadOnlyCommand('npm', ['install']), false)
 })
 
-test('isReadOnlyCommandCall: kubectl 只读命令可并发', () => {
+test('isReadOnlyCommandCall: kubectl 只读命令可并发', async () => {
+  await parseBashSegments('true') // 确保 tree-sitter 解析器就绪（同步快照路径生效）
   assert.equal(isReadOnlyCommandCall({ command: 'kubectl get pods' }), true)
   assert.equal(
     isReadOnlyCommandCall({ command: 'kubectl describe pod nginx' }),
@@ -75,7 +77,8 @@ test('isReadOnlyCommandCall: kubectl 只读命令可并发', () => {
   )
 })
 
-test('isReadOnlyCommandCall: kubectl 写命令不可并发', () => {
+test('isReadOnlyCommandCall: kubectl 写命令不可并发', async () => {
+  await parseBashSegments('true')
   assert.equal(
     isReadOnlyCommandCall({ command: 'kubectl scale deploy --replicas=3' }),
     false,
@@ -83,12 +86,14 @@ test('isReadOnlyCommandCall: kubectl 写命令不可并发', () => {
   assert.equal(isReadOnlyCommandCall({ command: 'kubectl delete pod nginx' }), false)
 })
 
-test('isReadOnlyCommandCall: docker 只读命令可并发', () => {
+test('isReadOnlyCommandCall: docker 只读命令可并发', async () => {
+  await parseBashSegments('true')
   assert.equal(isReadOnlyCommandCall({ command: 'docker ps' }), true)
   assert.equal(isReadOnlyCommandCall({ command: 'docker logs container-xxx' }), true)
 })
 
-test('isReadOnlyCommandCall: curl GET 可并发，POST 不可', () => {
+test('isReadOnlyCommandCall: curl GET 可并发，POST 不可', async () => {
+  await parseBashSegments('true')
   assert.equal(isReadOnlyCommandCall({ command: 'curl http://host/health' }), true)
   assert.equal(
     isReadOnlyCommandCall({ command: 'curl -X POST http://host/api' }),
@@ -96,7 +101,8 @@ test('isReadOnlyCommandCall: curl GET 可并发，POST 不可', () => {
   )
 })
 
-test('isReadOnlyCommandCall: 多段命令含 SRE 只读可并发', () => {
+test('isReadOnlyCommandCall: 多段命令含 SRE 只读可并发', async () => {
+  await parseBashSegments('true')
   assert.equal(
     isReadOnlyCommandCall({ command: 'kubectl get pods && kubectl get svc' }),
     true,

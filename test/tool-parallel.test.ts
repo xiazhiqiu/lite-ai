@@ -66,7 +66,8 @@ test('partitionToolCalls: isSafe 抛异常 → 该调用串行（fail-closed）'
   assert.ok(groups.every(g => g.parallel === false))
 })
 
-test('isReadOnlyCommandCall: 白名单命令 safe', () => {
+test('isReadOnlyCommandCall: 白名单命令 safe', async () => {
+  await ensureBashParserReady()
   assert.equal(isReadOnlyCommandCall({ command: 'ls -la' }), true)
   assert.equal(isReadOnlyCommandCall({ command: 'cat a.txt' }), true)
   assert.equal(isReadOnlyCommandCall({ command: 'grep foo' }), true)
@@ -79,7 +80,8 @@ test('isReadOnlyCommandCall: 写命令 unsafe', () => {
   assert.equal(isReadOnlyCommandCall({ command: 'mkdir newdir' }), false)
 })
 
-test('isReadOnlyCommandCall: 管道各段都在白名单 → safe', () => {
+test('isReadOnlyCommandCall: 管道各段都在白名单 → safe', async () => {
+  await ensureBashParserReady()
   assert.equal(isReadOnlyCommandCall({ command: 'ls | grep x' }), true)
 })
 
@@ -88,12 +90,13 @@ test('isReadOnlyCommandCall: 重定向 unsafe', () => {
   assert.equal(isReadOnlyCommandCall({ command: 'ls >> out.log' }), false)
 })
 
-test('isReadOnlyCommandCall: 后台符 unsafe（AST 与回退路径一致）', () => {
+test('isReadOnlyCommandCall: 后台符 unsafe（AST 之前单独扫描引号外裸 &）', () => {
   assert.equal(isReadOnlyCommandCall({ command: 'ls &' }), false)
   assert.equal(isReadOnlyCommandCall({ command: 'tail -f log &' }), false)
 })
 
-test('isReadOnlyCommandCall: git 只读子命令 safe，写子命令 unsafe', () => {
+test('isReadOnlyCommandCall: git 只读子命令 safe，写子命令 unsafe', async () => {
+  await ensureBashParserReady()
   assert.equal(isReadOnlyCommandCall({ command: 'git status' }), true)
   assert.equal(isReadOnlyCommandCall({ command: 'git diff' }), true)
   assert.equal(isReadOnlyCommandCall({ command: 'git push' }), false)
@@ -223,13 +226,15 @@ test('isReadOnlyCommandCall: AST——env/date 参数级堵漏', async () => {
   assert.equal(isReadOnlyCommandCall({ command: 'date -s "2026-01-01"' }), false)
 })
 
-test('isReadOnlyCommandCall: 解析器不可用回退手写拆段（fail-closed 不变）', () => {
+test('isReadOnlyCommandCall: 解析器不可用 → 一律 fail-closed false（无手写回退）', () => {
   __setBashSegmentParserForTests(null)
   try {
-    // 回退路径维持原判：见 $( / 重定向 一律拒
+    // AST 是唯一判定路径；解析器不可用（wasm 缺失 / 加载中）时不再回退手写拆段，
+    // 而是直接 fail-closed：连 ls -la 这类简单只读命令也判不可并行 / 不可放行。
     assert.equal(isReadOnlyCommandCall({ command: 'echo $(pwd)' }), false)
-    assert.equal(isReadOnlyCommandCall({ command: 'ls -la' }), true)
+    assert.equal(isReadOnlyCommandCall({ command: 'ls -la' }), false)
     assert.equal(isReadOnlyCommandCall({ command: 'cat a > b.txt' }), false)
+    assert.equal(isReadOnlyCommandCall({ command: 'kubectl get pods' }), false)
   } finally {
     __setBashSegmentParserForTests(undefined)
   }

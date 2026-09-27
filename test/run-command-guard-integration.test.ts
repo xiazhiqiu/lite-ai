@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { isReadOnlyCommandCall } from '../src/tools/command-guard.js'
+import { parseBashSegments } from '../src/tools/bash-parser.js'
 import { bashTool } from '../src/tools/bash-tool.js'
 import { kubectlTool } from '../src/tools/kubectl-tool.js'
 import type { PermissionManager } from '../src/permissions.js'
@@ -175,6 +176,7 @@ describe('bash × command-guard 接线', () => {
   test('无 permissions：只读白名单命令不被强制只读闸拦截', async () => {
     // 判定层（与环境无关）：白名单命令通过无 permissions 分支使用的同一闸门
     // （bash-tool.ts 强制只读分支即调用 isReadOnlyCommandCall）
+    await parseBashSegments('true') // 确保 tree-sitter 解析器就绪（同步快照路径生效）
     assert.equal(isReadOnlyCommandCall({ command: 'uname' }), true)
     // 端到端：判定层放行后才会走到真实 spawn。执行层结果与本测试无关
     // （Windows PATH 上无 uname → ENOENT；沙箱可能拦 spawn → EPERM），
