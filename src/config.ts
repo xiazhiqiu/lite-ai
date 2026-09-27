@@ -30,6 +30,8 @@ export type LiteAISettings = {
   model?: string
   provider?: ProviderName
   maxOutputTokens?: number
+  /** thinking 模型回传 assistant 消息的 reasoning_content（DeepSeek thinking 模式服务端硬要求；默认关，兼容 chat 模型） */
+  passBackReasoning?: boolean
   mcpServers?: Record<string, McpServerConfig>
   /** 内置/可扩展 toolset 启用配置。name → 配置；见 LLMToolSetConfig。 */
   toolsets?: Record<string, LLMToolSetConfig>
@@ -55,6 +57,8 @@ export type RuntimeConfig = {
   authToken?: string
   apiKey?: string
   maxOutputTokens?: number
+  /** thinking 模型回传 reasoning_content（DeepSeek thinking 模式服务端硬要求；默认关） */
+  passBackReasoning?: boolean
   mcpServers: Record<string, McpServerConfig>
   sourceSummary: string
 }
@@ -357,6 +361,7 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     authToken,
     apiKey,
     maxOutputTokens,
+    passBackReasoning: effectiveSettings.passBackReasoning === true,
     mcpServers: effectiveSettings.mcpServers ?? {},
     sourceSummary: `config: ${LITE_AI_SETTINGS_PATH} > ${CLAUDE_SETTINGS_PATH} > process.env (provider=${provider})`,
   }

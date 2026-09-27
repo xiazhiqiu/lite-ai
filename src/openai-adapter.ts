@@ -22,7 +22,7 @@ const MAX_RETRY_DELAY_MS = 8_000
 type OpenAIMessage =
   | { role: 'system'; content: string }
   | { role: 'user'; content: string }
-  | { role: 'assistant'; content: string | null; tool_calls?: OpenAIToolCall[] }
+  | { role: 'assistant'; content: string | null; reasoning_content?: string | null; tool_calls?: OpenAIToolCall[] }
   | { role: 'tool'; tool_call_id: string; content: string }
 
 type OpenAIToolCall = {
@@ -143,15 +143,42 @@ function toOpenAIToolCall(call: Extract<ChatMessage, { role: 'assistant_tool_cal
   }
 }
 
-function toOpenAIMessages(messages: ChatMessage[]): OpenAIMessage[] {
+/** 从 thinking blocks 提取回传文本（redacted_thinking 无明文，跳过）。 */
+function thinkingTextFromBlocks(blocks: ProviderThinkingBlock[]): string {
+  const parts: string[] = []
+  for (const block of blocks) {
+    if (block.type === 'thinking' && typeof block.text === 'string') {
+      parts.push(block.text)
+    }
+  }
+  return parts.join('\n')
+}
+
+function toOpenAIMessages(
+  messages: ChatMessage[],
+  passBackReasoning: boolean,
+): OpenAIMessage[] {
   const converted: OpenAIMessage[] = []
   let pendingToolCalls: Extract<ChatMessage, { role: 'assistant_tool_call' }>[] = []
+  // DeepSeek thinking 模式：服务端要求 assistant 消息回传 reasoning_content
+  // （判据 = 字段在场，空串也算）。缓存最近一条 assistant_thinking 的文本，
+  // 附到下一个 assistant 消息（tool_calls 组或纯 content）上。
+  let pendingReasoning: string | undefined = undefined
+
+  const takeReasoning = (): string | undefined => {
+    if (!passBackReasoning) return undefined
+    const value = pendingReasoning ?? ''
+    pendingReasoning = undefined
+    return value
+  }
 
   const flushToolCalls = (): void => {
     if (pendingToolCalls.length === 0) return
+    const reasoning = takeReasoning()
     converted.push({
       role: 'assistant',
       content: null,
+      ...(reasoning !== undefined ? { reasoning_content: reasoning } : {}),
       tool_calls: pendingToolCalls.map(toOpenAIToolCall),
     })
     pendingToolCalls = []
@@ -172,17 +199,28 @@ function toOpenAIMessages(messages: ChatMessage[]): OpenAIMessage[] {
     flushToolCalls()
 
     if (message.role === 'user') {
+      // user 消息开启新一轮：未消费的 thinking 缓存作废
+      pendingReasoning = undefined
       converted.push({ role: 'user', content: message.content })
       continue
     }
 
-    // assistant_thinking 为内部推理，按最小改动不回传
+    // assistant_thinking 为内部推理：默认不回传；passBackReasoning 时缓存文本
+    // 附到同轮 assistant 消息的 reasoning_content（DeepSeek thinking 硬要求）
     if (message.role === 'assistant_thinking') {
+      if (passBackReasoning) {
+        pendingReasoning = thinkingTextFromBlocks(message.blocks)
+      }
       continue
     }
 
     if (message.role === 'assistant' || message.role === 'assistant_progress') {
-      converted.push({ role: 'assistant', content: message.content })
+      const reasoning = takeReasoning()
+      converted.push({
+        role: 'assistant',
+        content: message.content,
+        ...(reasoning !== undefined ? { reasoning_content: reasoning } : {}),
+      })
       continue
     }
 
@@ -479,7 +517,7 @@ export class OpenAIModelAdapter implements ModelAdapter {
       options.onToolCallReady != null || options.onTextDelta != null || options.onThinkingDelta != null
     const requestBody = {
       model: runtime.model,
-      messages: toOpenAIMessages(messages),
+      messages: toOpenAIMessages(messages, runtime.passBackReasoning === true),
       tools: (options.tools ?? this.tools.list()).map(tool => ({
         type: 'function' as const,
         function: {

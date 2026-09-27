@@ -196,4 +196,81 @@ describe('OpenAI model adapter', () => {
     await assert.rejects(request, /fetch aborted/)
     assert.equal(fetchSignal, controller.signal)
   })
+
+  it('passBackReasoning=true: assistant 消息回传 reasoning_content（DeepSeek thinking 服务端硬要求）', async () => {
+    const captured = captureFetch()
+    const rt = { ...runtime(), passBackReasoning: true }
+    const a = new OpenAIModelAdapter(new ToolRegistry([]), async () => rt)
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'go' },
+      {
+        role: 'assistant_thinking',
+        blocks: [{ type: 'thinking', text: 'let me check the file' }],
+      },
+      {
+        role: 'assistant_tool_call',
+        toolUseId: 'call-1',
+        toolName: 'read_file',
+        input: { path: 'a' },
+      },
+      {
+        role: 'tool_result',
+        toolUseId: 'call-1',
+        toolName: 'read_file',
+        content: 'file body',
+      },
+      { role: 'assistant', content: 'done' },
+    ]
+
+    await a.next(messages)
+
+    const body = captured.body as {
+      messages: Array<{ role: string; content?: unknown; reasoning_content?: string; tool_calls?: unknown }>
+    }
+    const toolCallMsg = body.messages.find(m => m.role === 'assistant' && m.tool_calls)
+    assert.ok(toolCallMsg, 'tool_calls assistant message should exist')
+    assert.equal(toolCallMsg.reasoning_content, 'let me check the file')
+    const plainMsg = body.messages.find(
+      m => m.role === 'assistant' && !m.tool_calls,
+    )
+    assert.ok(plainMsg, 'plain assistant message should exist')
+    // 字段在场即可（DeepSeek 判据 = 字段存在；无 thinking 时空串）
+    assert.equal(plainMsg.reasoning_content, '')
+  })
+
+  it('passBackReasoning 缺省: 不携带 reasoning_content 字段（兼容 chat 模型）', async () => {
+    const captured = captureFetch()
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'go' },
+      {
+        role: 'assistant_thinking',
+        blocks: [{ type: 'thinking', text: 'internal' }],
+      },
+      {
+        role: 'assistant_tool_call',
+        toolUseId: 'call-1',
+        toolName: 'read_file',
+        input: { path: 'a' },
+      },
+      {
+        role: 'tool_result',
+        toolUseId: 'call-1',
+        toolName: 'read_file',
+        content: 'file body',
+      },
+    ]
+
+    await adapter().next(messages)
+
+    const body = captured.body as {
+      messages: Array<{ role: string; reasoning_content?: string; tool_calls?: unknown }>
+    }
+    for (const m of body.messages) {
+      assert.equal(
+        'reasoning_content' in m,
+        false,
+        `message role=${m.role} should not carry reasoning_content`,
+      )
+    }
+  })
 })
