@@ -20,6 +20,8 @@
     "better-sqlite3": "^13.0.3",
     "diff": "^8.0.4",
     "sqlite-vec": "^0.1.9",
+    "tree-sitter-bash": "^0.25.1",
+    "web-tree-sitter": "^0.27.0",
     "zod": "^4.1.5"
   },
   "devDependencies": {

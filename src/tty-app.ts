@@ -1418,7 +1418,7 @@ async function handleInput(
     return false
   }
 
-  const toolShortcut = parseLocalToolShortcut(input)
+  const toolShortcut = await parseLocalToolShortcut(input)
   if (toolShortcut) {
     await executeToolShortcut(
       args,

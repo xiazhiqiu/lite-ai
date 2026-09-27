@@ -1,5 +1,5 @@
 /**
- * command-guard：bash / kubectl 工具免审批/审批/硬拒的三态判定管线（纯函数，无 IO）。
+ * command-guard：bash / kubectl 工具免审批/审批/硬拒的三态判定管线。
  *
  * 分层职责（对齐 HolmesGPT：通用底座 + 命令域判定器）：
  * - 本模块只做「命令字符串 → 三态判定」：allow（免审批）/ approval（转审批）/ deny（硬拒）。
@@ -7,11 +7,16 @@
  * - 并发只读判定（isReadOnlyCommandCall）自 run-command.ts 迁入：同属命令字符串判定，
  *   且复用同一套白名单集合，避免两处名单漂移。
  *
- * fail-closed 原则：任何无法 100% 确认安全的输入（未闭合引号、子 shell、命令替换、
- * 未知命令）一律不给 allow——宁可多一次审批，不可漏放一次。
+ * fail-closed 原则：任何无法 100% 确认安全的输入一律不给 allow——宁可多一次审批，
+ * 不可漏放一次。bash 路径优先用 tree-sitter AST 分段（对齐 HolmesGPT 的
+ * tree-sitter-bash，见 bash-parser.ts）：能解析时逐段（含 `$(...)` 内嵌命令）
+ * 判定；解析器不可用/解析失败时回退手写拆段器，未闭合引号、子 shell、
+ * 命令替换在该回退路径下一律转审批。
  */
 
 import { classifyDangerousCommand } from '../permissions.js'
+import { parseBashSegments } from './bash-parser.js'
+import type { ParsedBashSegment } from './bash-parser.js'
 
 // ---------------------------------------------------------------------------
 // 白名单集合（自 run-command.ts 迁入，语义不变）
@@ -699,12 +704,29 @@ export function validateSuggestedPrefixes(
 }
 
 /**
- * 从命令推导建议前缀（每段取前两个词，供 /cmd 快捷方式与 mock 模型兜底；
- * 真实模型应自行声明）。解析失败时退化为整条命令的首词。
+ * 从命令推导建议前缀（每段取命令名 + 首个参数，供 /cmd 快捷方式与 mock
+ * 模型兜底；真实模型应自行声明）。
+ *
+ * AST 优先：parseBashSegments 成功时按 AST 段推导，保证与
+ * evaluateBashCommand 的段数校验天然一致（否则 `$(...)` 这类手写拆段器
+ * 拆不了的命令会推导出错误段数，被误 deny）。解析器不可用/解析失败时
+ * 回退到手写拆段（行为同阶段一：退化为整条命令的首词）。
  */
-export function deriveSuggestedPrefixes(command: string): string[] {
+export async function deriveSuggestedPrefixes(command: string): Promise<string[]> {
   const trimmed = command.trim()
   if (!trimmed) return []
+
+  const parsed = await parseBashSegments(trimmed)
+  if (parsed) {
+    return parsed
+      .map(segment => {
+        const tokens = splitCommandLine(segment.text)
+        const start = segment.argv0 ? Math.max(tokens.indexOf(segment.argv0), 0) : 0
+        const prefixTokens = tokens.slice(start, start + 2)
+        return prefixTokens.join(' ') || segment.text
+      })
+      .filter(Boolean)
+  }
 
   const segments = splitShellSegments(trimmed)
   if (!segments) {
@@ -721,20 +743,99 @@ export function deriveSuggestedPrefixes(command: string): string[] {
 }
 
 /**
- * bash 工具专用判定入口：先做前缀一致性校验（deny 优先，对齐 HG
- * validate_command 把 PREFIX_NOT_IN_COMMAND 放在最前——即使命令本身
- * 可免审批，声明与命令不符也整条拒绝），再走通用 snippet 五级管线。
+ * AST 段的前缀一致性校验：段数一致，且 prefix i 必须词级连续出现在
+ * segment i 内（模型按序为每段声明一个前缀，对齐 HG 的 commands ↔
+ * prefixes 逐项对应）。消息格式与 validateSuggestedPrefixes 保持一致，
+ * 供模型自纠循环复用。
  */
-export function evaluateBashCommand(
+function validateAstSuggestedPrefixes(
+  segments: ParsedBashSegment[],
+  prefixes: string[],
+): string | null {
+  if (prefixes.length === 0) {
+    return "The 'suggested_prefixes' parameter is required. Provide one prefix per command segment (segments are separated by |, &&, ||, ;)."
+  }
+
+  if (segments.length !== prefixes.length) {
+    return `suggested_prefixes must contain one prefix per command segment: command has ${segments.length} segment(s), got ${prefixes.length} prefix(es)`
+  }
+
+  for (let i = 0; i < prefixes.length; i++) {
+    const prefix = prefixes[i]!.trim()
+    const prefixTokens = prefix.split(/\s+/).filter(Boolean)
+    if (prefixTokens.length === 0) {
+      return 'suggested prefix must not be empty'
+    }
+    const segmentTokens = splitCommandLine(segments[i]!.text)
+    if (!containsConsecutiveTokens(segmentTokens, prefixTokens)) {
+      return `suggested prefix '${prefixes[i]}' does not appear in the command`
+    }
+  }
+
+  return null
+}
+
+/**
+ * bash 工具专用判定入口（阶段二：AST 优先，对齐 HolmesGPT 的
+ * tree-sitter-bash 解析栈）：
+ *
+ * - AST 可用：段 = 文档序的所有 command 节点（含 `$(...)` 内嵌命令）。
+ *   先做前缀一致性校验（deny 优先，对齐 HG validate_command 把
+ *   PREFIX_NOT_IN_COMMAND 放在最前——即使命令本身可免审批，声明与命令
+ *   不符也整条拒绝），再逐段走 secret 硬拦 → 参数原语 → 段级白名单，
+ *   重定向（写文件/输入重定向）按段附带的外层 redirected_statement 判定。
+ * - AST 不可用（wasm 加载失败 / 解析 ERROR / 零命令节点）：回退阶段一
+ *   的手写拆段管线，语义不变（无法安全拆段 → approval，fail-closed）。
+ */
+export async function evaluateBashCommand(
   command: string,
   suggestedPrefixes: string[],
-): GuardResult {
-  const prefixViolation = validateSuggestedPrefixes(
-    command.trim(),
-    suggestedPrefixes,
-  )
+): Promise<GuardResult> {
+  const trimmed = command.trim()
+  if (!trimmed) return { verdict: 'deny', reason: 'empty command' }
+
+  const parsed = await parseBashSegments(trimmed)
+  if (parsed === null) {
+    const prefixViolation = validateSuggestedPrefixes(
+      trimmed,
+      suggestedPrefixes,
+    )
+    if (prefixViolation) {
+      return { verdict: 'deny', reason: prefixViolation }
+    }
+    return evaluateCommandSnippet(command)
+  }
+
+  const prefixViolation = validateAstSuggestedPrefixes(parsed, suggestedPrefixes)
   if (prefixViolation) {
     return { verdict: 'deny', reason: prefixViolation }
   }
-  return evaluateCommandSnippet(command)
+
+  let worst: GuardResult = { verdict: 'allow' }
+  for (const segment of parsed) {
+    const tokens = splitCommandLine(segment.text)
+    let argv0 = segment.argv0
+    let args: string[]
+    const argv0Index = argv0 ? tokens.indexOf(argv0) : -1
+    if (argv0 && argv0Index >= 0) {
+      args = tokens.slice(argv0Index + 1)
+    } else {
+      argv0 = tokens[0] ?? ''
+      args = tokens.slice(1)
+    }
+    let segmentResult = evaluateCommandArgv(argv0, args)
+
+    const redirect = findFileRedirect(segment.redirectText ?? segment.text)
+    if (redirect) {
+      segmentResult = escalate(segmentResult, {
+        verdict: 'approval',
+        reason: redirect,
+      })
+    }
+
+    worst = escalate(worst, segmentResult)
+    if (worst.verdict === 'deny') return worst
+  }
+
+  return worst
 }

@@ -85,11 +85,12 @@ export const bashTool: ToolDefinition<Input> = {
       }
     }
 
-    // bash 专用判定入口：前缀一致性校验（deny 优先）→ 五级管线。
+    // bash 专用判定入口（AST 优先，回退手写拆段）：前缀一致性校验
+    // （deny 优先）→ 五级管线。
     // deny：无审批出口直接拒（secret 暴露 / sudo 提权 / 前缀与命令不符）；
     // approval：转权限底座（三层名单 → 无回调硬拒 → 审批框）；
     // allow：全段过白名单，免审批执行。
-    const guard = evaluateBashCommand(command, input.suggested_prefixes)
+    const guard = await evaluateBashCommand(command, input.suggested_prefixes)
 
     if (guard.verdict === 'deny') {
       return {

@@ -109,7 +109,7 @@ export class MockModelAdapter implements ModelAdapter {
         calls: [{
           id: `mock-${Date.now()}`,
           toolName: 'bash',
-          input: { command, suggested_prefixes: deriveSuggestedPrefixes(command) },
+          input: { command, suggested_prefixes: await deriveSuggestedPrefixes(command) },
         }],
       }
     }

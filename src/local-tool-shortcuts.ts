@@ -19,7 +19,7 @@ export type LocalToolShortcut =
       input: { command: string; suggested_prefixes: string[]; cwd?: string }
     }
 
-export function parseLocalToolShortcut(input: string): LocalToolShortcut | null {
+export async function parseLocalToolShortcut(input: string): Promise<LocalToolShortcut | null> {
   if (input === '/ls' || input.startsWith('/ls ')) {
     const dir = input.slice('/ls'.length).trim()
     return {
@@ -107,7 +107,7 @@ export function parseLocalToolShortcut(input: string): LocalToolShortcut | null 
       toolName: 'bash',
       input: {
         command: commandText,
-        suggested_prefixes: deriveSuggestedPrefixes(commandText),
+        suggested_prefixes: await deriveSuggestedPrefixes(commandText),
         cwd: commandCwd || undefined,
       },
     }

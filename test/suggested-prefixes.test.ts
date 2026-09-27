@@ -81,43 +81,46 @@ describe('validateSuggestedPrefixes 前缀一致性校验', () => {
 })
 
 describe('deriveSuggestedPrefixes（/cmd 快捷方式与 mock 模型的兜底推导）', () => {
-  test('每段取前两个词', () => {
-    assert.deepEqual(deriveSuggestedPrefixes('kubectl get pods | grep app'), [
+  test('每段取前两个词', async () => {
+    assert.deepEqual(await deriveSuggestedPrefixes('kubectl get pods | grep app'), [
       'kubectl get',
       'grep app',
     ])
   })
 
-  test('单段单词', () => {
-    assert.deepEqual(deriveSuggestedPrefixes('ls'), ['ls'])
+  test('单段单词', async () => {
+    assert.deepEqual(await deriveSuggestedPrefixes('ls'), ['ls'])
   })
 
-  test('解析失败退化为整条命令首词', () => {
-    assert.deepEqual(deriveSuggestedPrefixes('echo $(pwd)'), ['echo'])
+  test('命令替换按 AST 拆段：内嵌命令单独成段（各取命令名+首参）', async () => {
+    assert.deepEqual(await deriveSuggestedPrefixes('echo $(pwd)'), [
+      'echo $(pwd)',
+      'pwd',
+    ])
   })
 })
 
 describe('evaluateBashCommand：前缀 deny 优先于白名单 allow（对齐 HG validate_command 顺序）', () => {
-  test('命令本身可免审批，但前缀不一致仍整条 deny', () => {
-    const result = evaluateBashCommand('kubectl get pods', ['kubectl delete'])
+  test('命令本身可免审批，但前缀不一致仍整条 deny', async () => {
+    const result = await evaluateBashCommand('kubectl get pods', ['kubectl delete'])
     assert.equal(result.verdict, 'deny')
     assert.match(result.reason!, /does not appear/)
   })
 
-  test('一致 + 全段白名单 → allow', () => {
+  test('一致 + 全段白名单 → allow', async () => {
     assert.equal(
-      evaluateBashCommand('kubectl get pods', ['kubectl get']).verdict,
+      (await evaluateBashCommand('kubectl get pods', ['kubectl get'])).verdict,
       'allow',
     )
   })
 
-  test('一致 + 未知命令 → approval', () => {
-    const result = evaluateBashCommand('zig build', ['zig build'])
+  test('一致 + 未知命令 → approval', async () => {
+    const result = await evaluateBashCommand('zig build', ['zig build'])
     assert.equal(result.verdict, 'approval')
   })
 
-  test('一致 + secret 段 → deny（secret 硬拦不受前缀影响）', () => {
-    const result = evaluateBashCommand('kubectl get secrets', ['kubectl get'])
+  test('一致 + secret 段 → deny（secret 硬拦不受前缀影响）', async () => {
+    const result = await evaluateBashCommand('kubectl get secrets', ['kubectl get'])
     assert.equal(result.verdict, 'deny')
     assert.match(result.reason!, /secrets/)
   })
