@@ -139,6 +139,7 @@ export async function runAgentTurn(args: {
   onToolResult?: (toolUseId: string, toolName: string, output: string, isError: boolean) => void
   onAssistantMessage?: (content: string, metadata?: { final?: boolean }) => void
   onProgressMessage?: (content: string) => void
+  onTextDelta?: (text: string) => void
   onAutoCompact?: (result: CompressionResult) => void | Promise<void>
   onSnipCompact?: (result: SnipCompactResult) => void | Promise<void>
   onContextCollapse?: (result: ContextCollapseResult) => void | Promise<void>
@@ -300,6 +301,8 @@ export async function runAgentTurn(args: {
     const next = await args.model.next(nextInput, {
       tools: args.tools.list(),
       signal: args.signal,
+      // 文本增量与工具执行器路径解耦：无论 LITE_AI_STREAMING 开关如何都转发
+      ...(args.onTextDelta ? { onTextDelta: args.onTextDelta } : {}),
       ...(executor
         ? {
             onToolCallReady: (call: ToolCall) =>

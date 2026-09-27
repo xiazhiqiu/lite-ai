@@ -531,6 +531,80 @@ function updateAssistantEntryBody(
   entry.body = body
 }
 
+/** 流式预览光标：仅在生成中显示，终稿/封条后消失 */
+export const STREAMING_CURSOR = '▌'
+
+export type StreamingPreviewState = {
+  entryId: number | null
+  text: string
+}
+
+export function createStreamingPreviewState(): StreamingPreviewState {
+  return { entryId: null, text: '' }
+}
+
+export function renderStreamingPreviewBody(
+  text: string,
+  active: boolean,
+): string {
+  return active ? `${text}${STREAMING_CURSOR}` : text
+}
+
+/** 文本增量并入预览：首增量建 assistant 条目，后续原地更新（渲染由调用方 scheduleRender 合帧） */
+export function appendStreamingPreview(
+  state: ScreenState,
+  streaming: StreamingPreviewState,
+  delta: string,
+): void {
+  if (!delta) return
+  streaming.text += delta
+  const body = renderStreamingPreviewBody(streaming.text, true)
+  if (streaming.entryId === null) {
+    streaming.entryId = pushTranscriptEntry(state, {
+      kind: 'assistant',
+      body,
+    })
+  } else {
+    updateAssistantEntryBody(state, streaming.entryId, body)
+  }
+  // 不动 transcriptScrollOffset：offset=0 本就跟随尾部，用户上滚阅读时不被打断
+}
+
+/** 终稿到达前移除预览，防止与权威条目重复（onAssistantMessage/onProgressMessage 用） */
+export function dropStreamingPreview(
+  state: ScreenState,
+  streaming: StreamingPreviewState,
+): void {
+  if (streaming.entryId !== null) {
+    const index = state.transcript.findIndex(
+      item => item.id === streaming.entryId,
+    )
+    if (index !== -1) state.transcript.splice(index, 1)
+  }
+  streaming.entryId = null
+  streaming.text = ''
+}
+
+/** 工具步开始时把已流出的旁白转成 progress 条目保留（无光标） */
+export function sealStreamingPreviewAsProgress(
+  state: ScreenState,
+  streaming: StreamingPreviewState,
+): void {
+  if (streaming.entryId === null) return
+  const text = streaming.text
+  const index = state.transcript.findIndex(
+    item => item.id === streaming.entryId,
+  )
+  if (index !== -1) state.transcript.splice(index, 1)
+  streaming.entryId = null
+  streaming.text = ''
+  if (text.trim().length === 0) return
+  pushTranscriptEntry(state, {
+    kind: 'progress',
+    body: renderStreamingPreviewBody(text, false),
+  })
+}
+
 export function pushWelcomeAnimation(state: ScreenState): void {
   const entryId = pushTranscriptEntry(state, {
     kind: 'assistant',
@@ -1384,6 +1458,7 @@ async function handleInput(
   const aggregatedEditByKey = new Map<string, AggregatedEditProgress>()
   const aggregatedEditByEntryId = new Map<number, AggregatedEditProgress>()
   const turnStartedAt = Date.now()
+  const streamingPreview = createStreamingPreviewState()
 
   args.permissions.beginTurn()
   try {
@@ -1453,6 +1528,7 @@ async function handleInput(
         }, 5000)
       },
       onAssistantMessage(content, metadata) {
+        dropStreamingPreview(state, streamingPreview)
         const workedForSeconds = metadata?.final
           ? Math.max(0, Math.floor((Date.now() - turnStartedAt) / 1000))
           : undefined
@@ -1473,6 +1549,7 @@ async function handleInput(
         rerender()
       },
       onToolStart(toolUseId, toolName, toolInput) {
+        sealStreamingPreviewAsProgress(state, streamingPreview)
         setStatus(state, `Running ${toolName}...`)
         state.activeTool = toolName
         let entryId: number
@@ -1601,6 +1678,7 @@ async function handleInput(
     await saveSession(args.cwd, args.sessionId, args.messages, args.alreadySavedCount)
     args.alreadySavedCount = args.messages.length - 1
   } catch (error) {
+    dropStreamingPreview(state, streamingPreview)
     const message = error instanceof Error ? error.message : String(error)
     args.messages.push({
       role: 'assistant',
@@ -1612,6 +1690,7 @@ async function handleInput(
     })
     state.transcriptScrollOffset = 0
   } finally {
+    dropStreamingPreview(state, streamingPreview)
     args.permissions.endTurn()
     state.isBusy = false
   }
