@@ -12,7 +12,9 @@ import { createLoadSkillTool } from './load-skill.js'
 import { modifyFileTool } from './modify-file.js'
 import { patchFileTool } from './patch-file.js'
 import { readFileTool } from './read-file.js'
-import { runCommandTool, isReadOnlyCommandCall } from './run-command.js'
+import { bashTool } from './bash-tool.js'
+import { kubectlTool } from './kubectl-tool.js'
+import { isReadOnlyCommandCall, isSreReadOnlyCommand, splitCommandLine } from './command-guard.js'
 import { rewriteTodoListTool } from './todo-write.js'
 import { updateTodoStatusTool } from './todo-status.js'
 import { webFetchTool } from './web-fetch.js'
@@ -66,9 +68,16 @@ export async function createDefaultToolRegistry(args: {
     editFileTool,
     patchFileTool,
     {
-      ...runCommandTool,
+      ...bashTool,
       isParallelSafe: input =>
-        isReadOnlyCommandCall(input as { command: string; args?: string[] }),
+        isReadOnlyCommandCall(input as { command: string }),
+    },
+    {
+      ...kubectlTool,
+      isParallelSafe: input => {
+        const args = splitCommandLine((input as { command: string }).command ?? '')
+        return isSreReadOnlyCommand('kubectl', args)
+      },
     },
     { ...createLoadSkillTool(args.cwd), isParallelSafe: () => true },
     { ...webFetchTool, isParallelSafe: () => true },

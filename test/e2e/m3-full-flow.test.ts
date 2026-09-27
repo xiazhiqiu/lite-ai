@@ -130,23 +130,23 @@ test(
         `- Elasticsearch logs: ${sources.elasticsearchUrl}  (index "sock-shop-logs"; query via curl GET ?q= or POST /_search)`,
         '- Kubernetes cluster: kubectl (already configured; namespace sock-shop)',
         '',
-        'Follow this exact protocol. Use ONLY run_command (with curl / kubectl), hypothesis_tracker, incident_checkpoint, generate_postmortem. DO NOT read the csv files directly with read_file — fetch data through the real interfaces above.',
+        'Follow this exact protocol. Use ONLY bash (for curl), the kubectl tool, hypothesis_tracker, incident_checkpoint, generate_postmortem. DO NOT read the csv files directly with read_file — fetch data through the real interfaces above.',
         '',
-        'Step 1 — Metrics (Prometheus): use run_command + curl to:',
+        'Step 1 — Metrics (Prometheus): use bash + curl to:',
         `  - curl -s "${sources.prometheusUrl}/api/v1/label/__name__/values"  (list metric names)`,
         `  - curl -s "${sources.prometheusUrl}/api/v1/query?query=<metric_name>"  (instant value)`,
         `  - curl -s "${sources.prometheusUrl}/api/v1/query_range?query=<metric_name>&start=${start}&end=${end}&step=30"  (time window)`,
         '  Identify which service shows anomalous metrics around the fault time.',
         `  High-signal metric names to query first (exact names exist in Prometheus): ${SCENARIO.keyMetrics.join(', ')}.`,
         '',
-        'Step 2 — Logs (Elasticsearch): use run_command + curl to:',
+        'Step 2 — Logs (Elasticsearch): use bash + curl to:',
         `  - curl -s "${sources.elasticsearchUrl}/sock-shop-logs/_search?q=container_name:payment&size=20"`,
         `  - curl -s "${sources.elasticsearchUrl}/sock-shop-logs/_search?q=severity:ERROR&size=20"`,
         '  Find ERROR / exception messages from the affected service around the fault time.',
         '',
-        'Step 3 — Cluster (kubectl): use run_command to:',
-        '  - kubectl get pods -n sock-shop',
-        '  - kubectl logs -n sock-shop <payment-pod> --tail=50',
+        'Step 3 — Cluster (kubectl): use the kubectl tool (pass the subcommand without the leading keyword):',
+        '  - get pods -n sock-shop',
+        '  - logs -n sock-shop <payment-pod> --tail=50',
         '  Confirm which workload is affected.',
         '',
         'Step 4 — Hypothesis chain: use hypothesis_tracker to add at least 2 hypotheses (one most-likely root cause with priority 1, one alternative to rule out). Attach evidence (add_evidence) quoting actual command output (command, output_summary, data_source, timestamp, supports). Then update_status: confirmed for the root cause, refuted for the ruled-out one.',
@@ -167,7 +167,7 @@ test(
         '- Do NOT use shell pipes, command substitution, or jq.',
         '- Always quote URLs with double quotes.',
         '- Never run write operations (no -X POST except ES _search; no kubectl apply/delete/exec).',
-        '- Only tools: run_command, hypothesis_tracker, incident_checkpoint, generate_postmortem.',
+        '- Only tools: bash, kubectl, hypothesis_tracker, incident_checkpoint, generate_postmortem.',
       ].join('\n')
 
       type ChatMessage = import('../../src/types.js').ChatMessage
@@ -236,8 +236,8 @@ test(
         ...new Set(toolCalls.map(t => t.split(':')[0].trim())),
       ]
       assert.ok(
-        usedToolNames.includes('run_command'),
-        `agent should query data via run_command, got: ${usedToolNames.join(', ')}`,
+        usedToolNames.includes('bash') || usedToolNames.includes('kubectl'),
+        `agent should query data via bash/kubectl, got: ${usedToolNames.join(', ')}`,
       )
       assert.ok(
         !usedToolNames.includes('read_file'),

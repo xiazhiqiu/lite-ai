@@ -11,7 +11,7 @@
  *   2. carts_mem/1     — carts 内存压力（SEV2）
  *   3. orders_delay/1  — orders 下单延迟（SEV2）
  *
- * 每个测试：agent 经 run_command（curl/kubectl）查 mock 数据源 →
+ * 每个测试：agent 经 bash（curl）/ kubectl 查 mock 数据源 →
  * 提假设 → 加证据 → 建检查点 → 生成交接简报。
  * 断言：简报包含严重级别、已排除/待验证假设、关键命令。
  */
@@ -161,26 +161,26 @@ async function runAgentDiagnosis(
       `- Elasticsearch logs: ${sources.elasticsearchUrl}  (index "sock-shop-logs"; query via curl GET ?q= or POST /_search)`,
       '- Kubernetes cluster: kubectl (already configured; namespace sock-shop)',
       '',
-      'Follow this exact protocol. Use ONLY run_command (with curl / kubectl), hypothesis_tracker, incident_checkpoint. DO NOT read the csv files directly with read_file — fetch data through the real interfaces above.',
+      'Follow this exact protocol. Use ONLY bash (for curl), the kubectl tool, hypothesis_tracker, incident_checkpoint. DO NOT read the csv files directly with read_file — fetch data through the real interfaces above.',
       '',
-      'Step 1 — Metrics (Prometheus): use run_command + curl to:',
+      'Step 1 — Metrics (Prometheus): use bash + curl to:',
       `  - curl -s "${sources.prometheusUrl}/api/v1/label/__name__/values"  (list metric names)`,
       `  - curl -s "${sources.prometheusUrl}/api/v1/query?query=<metric_name>"  (instant value)`,
       `  - curl -s "${sources.prometheusUrl}/api/v1/query_range?query=<metric_name>&start=${start}&end=${end}&step=30"  (time window)`,
       '  Identify which service shows anomalous metrics (dropouts / spiking CPU / memory / latency) around the fault time.',
       `  High-signal metric names to query first (exact names exist in Prometheus): ${scenario.keyMetrics.join(', ')}. Query each with query_range to see the fault-time change.`,
       '',
-      'Step 2 — Logs (Elasticsearch): use run_command + curl to:',
+      'Step 2 — Logs (Elasticsearch): use bash + curl to:',
       `  - curl -s "${sources.elasticsearchUrl}/sock-shop-logs/_search?q=container_name:<service>&size=20"`,
       `  - curl -s "${sources.elasticsearchUrl}/sock-shop-logs/_search?q=severity:ERROR&size=20"`,
       '  - or POST /sock-shop-logs/_search with a JSON body (e.g. filter by container_name + timestamp range)',
       '  Find ERROR / exception / timeout messages from the affected service around the fault time.',
       '',
-      'Step 3 — Cluster (kubectl): use run_command to:',
-      '  - kubectl get pods -n sock-shop',
-      '  - kubectl get nodes',
-      '  - kubectl logs -n sock-shop <pod> --tail=50  (for pods of the suspected service)',
-      '  - kubectl describe pod -n sock-shop <pod>',
+      'Step 3 — Cluster (kubectl): use the kubectl tool (pass the subcommand without the leading keyword):',
+      '  - get pods -n sock-shop',
+      '  - get nodes',
+      '  - logs -n sock-shop <pod> --tail=50  (for pods of the suspected service)',
+      '  - describe pod -n sock-shop <pod>',
       '  Confirm which workload is affected.',
       '',
       `Step 4 — Hypothesis chain: use hypothesis_tracker to add at least 2 hypotheses (one most-likely root cause with priority 1, one alternative to rule out). Attach evidence (add_evidence) quoting the actual command output you observed (command, output_summary, data_source, timestamp, supports). Then update_status: confirmed for the root cause, refuted for the ruled-out one.`,
@@ -192,9 +192,9 @@ async function runAgentDiagnosis(
       '',
       'Rules:',
       '- Do NOT use shell pipes, command substitution, or jq (jq is not installed). Read raw JSON/text from curl/kubectl output directly.',
-      '- Always quote URLs with double quotes (URLs contain & query params). Prefer the args form: command:"curl", args:["-s","<url>"]. Never pass an unquoted URL containing & as a single string.',
+      '- Always quote URLs with double quotes (URLs contain & query params). Pass the full command as a single quoted string, e.g. bash command:"curl -s \\"<url>\\"". Never pass an unquoted URL containing &.',
       '- Never run write operations (no -X POST except ES _search; no kubectl apply/delete/exec).',
-      '- Only tools: run_command, hypothesis_tracker, incident_checkpoint.',
+      '- Only tools: bash, kubectl, hypothesis_tracker, incident_checkpoint.',
     ].join('\n')
 
     // eslint-disable-next-line @typescript-eslint/consistent-type-imports
@@ -262,10 +262,10 @@ function assertScenarioResult(
     ...new Set(toolCalls.map(t => t.split(':')[0].trim())),
   ]
 
-  // agent 经 run_command 查 mock 数据源，而不是直接 read_file
+  // agent 经 bash/kubectl 查 mock 数据源，而不是直接 read_file
   assert.ok(
-    usedToolNames.includes('run_command'),
-    `[${scenario.name}] agent should query data via run_command, got: ${usedToolNames.join(', ')}`,
+    usedToolNames.includes('bash') || usedToolNames.includes('kubectl'),
+    `[${scenario.name}] agent should query data via bash/kubectl, got: ${usedToolNames.join(', ')}`,
   )
   assert.ok(
     !usedToolNames.includes('read_file'),

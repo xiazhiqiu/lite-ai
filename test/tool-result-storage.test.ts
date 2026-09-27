@@ -21,7 +21,7 @@ function toolResult(
   return {
     role: 'tool_result',
     toolUseId: id,
-    toolName: 'run_command',
+    toolName: 'bash',
     content,
     isError: false,
   }
@@ -77,7 +77,7 @@ describe('tool result replacement', () => {
       ['empty-undefined', undefined],
     ] as const) {
       const result = await replaceLargeToolResult(toolResult(id, value))
-      assert.equal(result.content, '(run_command completed with no output)')
+      assert.equal(result.content, '(bash completed with no output)')
     }
 
     for (const value of ['0', 'false', '[]']) {

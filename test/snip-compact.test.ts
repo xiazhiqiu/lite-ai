@@ -278,8 +278,8 @@ describe('snipCompactConversation', () => {
         { role: i % 2 === 0 ? 'assistant' : 'user', content: `Old safe ${i}: ${'x'.repeat(2_000)}` } as ChatMessage
       )),
       { role: 'assistant', content: 'Keep before error' },
-      { role: 'assistant_tool_call', toolUseId: 'run-1', toolName: 'run_command', input: { command: 'npm test' } },
-      { role: 'tool_result', toolUseId: 'run-1', toolName: 'run_command', content: 'Traceback: exception failed', isError: false },
+      { role: 'assistant_tool_call', toolUseId: 'run-1', toolName: 'bash', input: { command: 'npm test' } },
+      { role: 'tool_result', toolUseId: 'run-1', toolName: 'bash', content: 'Traceback: exception failed', isError: false },
       { role: 'assistant', content: 'Keep after error' },
       ...Array.from({ length: SNIP_KEEP_RECENT_MESSAGES - 1 }, (_, i) => (
         { role: i % 2 === 0 ? 'assistant' : 'user', content: `Recent ${i}` } as ChatMessage

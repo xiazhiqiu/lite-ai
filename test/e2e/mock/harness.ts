@@ -4,7 +4,7 @@
  *
  * 用法：
  *   const src = await startMockSources(scenarioDir)
- *   // ... 让 agent 通过 run_command（curl/kubectl）查询 src.prometheusUrl / src.elasticsearchUrl / kubectl
+ *   // ... 让 agent 通过 bash（curl）/ kubectl查询 src.prometheusUrl / src.elasticsearchUrl / kubectl
  *   await src.stop()
  */
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'

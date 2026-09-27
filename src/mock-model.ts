@@ -58,7 +58,7 @@ export class MockModelAdapter implements ModelAdapter {
     if (userText === '/tools') {
       return {
         type: 'assistant',
-        content: '可用工具：ask_user, list_files, grep_files, read_file, write_file, edit_file, run_command',
+        content: '可用工具：ask_user, list_files, grep_files, read_file, write_file, edit_file, bash, kubectl',
       }
     }
 
@@ -102,14 +102,13 @@ export class MockModelAdapter implements ModelAdapter {
     }
 
     if (userText.startsWith('/cmd ')) {
-      const parts = userText.slice('/cmd '.length).trim().split(/\s+/)
-      const [command, ...args] = parts
+      const command = userText.slice('/cmd '.length).trim()
       return {
         type: 'tool_calls',
         calls: [{
           id: `mock-${Date.now()}`,
-          toolName: 'run_command',
-          input: { command, args },
+          toolName: 'bash',
+          input: { command },
         }],
       }
     }

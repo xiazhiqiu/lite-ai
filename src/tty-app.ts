@@ -700,9 +700,9 @@ function summarizeToolInput(toolName: string, input: unknown): string {
       return `read_file${pathPart}${offset !== undefined ? ` offset=${String(offset)}` : ''}${limit !== undefined ? ` limit=${String(limit)}` : ''}`
     }
 
-    if (toolName === 'run_command') {
+    if (toolName === 'bash' || toolName === 'kubectl') {
       const command = (input as { command?: unknown }).command
-      return `run_command${typeof command === 'string' ? ` ${truncateForDisplay(command, 120)}` : ''}`
+      return `${toolName}${typeof command === 'string' ? ` ${truncateForDisplay(command, 120)}` : ''}`
     }
   }
 

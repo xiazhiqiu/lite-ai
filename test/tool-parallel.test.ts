@@ -7,7 +7,7 @@ import {
   toolConcurrencyLimit,
   DEFAULT_TOOL_CONCURRENCY_LIMIT,
 } from '../src/utils/tool-parallel.js'
-import { isReadOnlyCommandCall } from '../src/tools/run-command.js'
+import { isReadOnlyCommandCall } from '../src/tools/command-guard.js'
 
 function call(input: unknown, id = 'c'): ToolCall {
   return { id, toolName: 'x', input }
@@ -95,25 +95,6 @@ test('isReadOnlyCommandCall: git 只读子命令 safe，写子命令 unsafe', ()
   assert.equal(isReadOnlyCommandCall({ command: 'git diff' }), true)
   assert.equal(isReadOnlyCommandCall({ command: 'git push' }), false)
   assert.equal(isReadOnlyCommandCall({ command: 'git checkout main' }), false)
-})
-
-test('isReadOnlyCommandCall: 带 args 数组', () => {
-  assert.equal(
-    isReadOnlyCommandCall({ command: 'git', args: ['status'] }),
-    true,
-  )
-  assert.equal(
-    isReadOnlyCommandCall({ command: 'git', args: ['push'] }),
-    false,
-  )
-  assert.equal(
-    isReadOnlyCommandCall({ command: 'ls', args: ['-la'] }),
-    true,
-  )
-  assert.equal(
-    isReadOnlyCommandCall({ command: 'ls', args: ['-la', '>', 'out'] }),
-    false,
-  )
 })
 
 test('isReadOnlyCommandCall: 空命令 unsafe', () => {

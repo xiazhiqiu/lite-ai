@@ -177,34 +177,42 @@ test('并发开启：LITE_AI_TOOL_CONCURRENCY_LIMIT 限住同时在飞数', asyn
 })
 
 test('并发关闭：行为与旧一致（逐条串行）', async () => {
-  delete process.env.LITE_AI_TOOL_CONCURRENCY
-  const messages: ChatMessage[] = []
-  const result = await runAgentTurn({
-    model: makeAdapter({
-      type: 'tool_calls',
-      calls: [
-        { id: 'r1', toolName: 'read_file', input: { path: 'a' } },
-        { id: 'r2', toolName: 'read_file', input: { path: 'b' } },
-      ],
-    }),
-    tools: makeRegistry(),
-    messages,
-    cwd: process.cwd(),
-  })
+  process.env.LITE_AI_TOOL_CONCURRENCY = '0'
+  try {
+    const messages: ChatMessage[] = []
+    const result = await runAgentTurn({
+      model: makeAdapter({
+        type: 'tool_calls',
+        calls: [
+          { id: 'r1', toolName: 'read_file', input: { path: 'a' } },
+          { id: 'r2', toolName: 'read_file', input: { path: 'b' } },
+        ],
+      }),
+      tools: makeRegistry(),
+      messages,
+      cwd: process.cwd(),
+    })
 
-  const ids = collectToolMsgIds(result)
-  assert.deepEqual(ids, ['r1', 'r2'])
+    const ids = collectToolMsgIds(result)
+    assert.deepEqual(ids, ['r1', 'r2'])
+  } finally {
+    delete process.env.LITE_AI_TOOL_CONCURRENCY
+  }
 })
 
 test('并发关闭：慢工具 maxRunning = 1（确认开关确实是总闸）', async () => {
-  delete process.env.LITE_AI_TOOL_CONCURRENCY
-  const { registry, probe } = makeSlowRegistry()
-  await runAgentTurn({
-    model: makeAdapter({ type: 'tool_calls', calls: slowCalls(3) }),
-    tools: registry,
-    messages: [],
-    cwd: process.cwd(),
-  })
+  process.env.LITE_AI_TOOL_CONCURRENCY = '0'
+  try {
+    const { registry, probe } = makeSlowRegistry()
+    await runAgentTurn({
+      model: makeAdapter({ type: 'tool_calls', calls: slowCalls(3) }),
+      tools: registry,
+      messages: [],
+      cwd: process.cwd(),
+    })
 
-  assert.equal(probe.maxRunning, 1, '开关关闭时即便工具声明 safe 也必须串行')
+    assert.equal(probe.maxRunning, 1, '开关关闭时即便工具声明 safe 也必须串行')
+  } finally {
+    delete process.env.LITE_AI_TOOL_CONCURRENCY
+  }
 })

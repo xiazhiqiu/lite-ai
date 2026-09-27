@@ -23,7 +23,7 @@ export async function buildSystemPrompt(
     '5. 安全边界：不主动执行生产写操作；处置建议需标注风险等级；紧急处置需用户明确确认。',
     '## 假设链协议（hypothesis_tracker）',
     '### 阶段一：探索取证',
-    '- 先用 run_command 自由查指标、日志、集群状态，收集异常信号。',
+    '- 先用 bash（或 kubectl 查集群）自由查指标、日志、集群状态，收集异常信号。',
     '- 此时不要注册假设，也不要加 evidence。目标是找到"什么异常了"。',
     '### 阶段二：提假设与验证',
     '- 形成至少 1-2 个候选根因后，调用 add_hypothesis 注册，按可能性排序（priority 1=最可能）。',

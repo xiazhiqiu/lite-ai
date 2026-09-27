@@ -2,7 +2,7 @@
  * RE2-SS 评测运行器：驱动 lite-ai agent 诊断单个实例，返回结构化结果。
  *
  * 复用 E2E 测试的驱动模式：真实模型（DeepSeek）+ mock 数据源。
- * agent 经 run_command（curl/kubectl）查 mock Prometheus/ES/k8s，
+ * agent 经 bash（curl）/ kubectl 查 mock Prometheus/ES/k8s，
  * 提假设 → 加证据 → 标记状态。跑完后从 hypothesis-store 读取最终假设
  * 链，供 scorer 评分。
  */
@@ -255,7 +255,7 @@ function buildUserMessage(
       ? `  High-signal metric names to query first (exact names exist in Prometheus): ${input.keyMetrics.join(', ')}. Query each with query_range to see the fault-time change.`
       : ''
   const filterNote =
-    'Use ONLY run_command (with curl / kubectl), hypothesis_tracker. DO NOT read the csv files directly with a file-reading tool — fetch data through the real interfaces above.'
+    'Use ONLY bash (for curl), kubectl, hypothesis_tracker. DO NOT read the csv files directly with a file-reading tool — fetch data through the real interfaces above.'
 
   return [
     `I'm investigating an incident in the Sock Shop microservice demo (namespace: sock-shop).`,
@@ -268,21 +268,21 @@ function buildUserMessage(
     '',
     'Follow this exact protocol. ' + filterNote,
     '',
-    'Step 1 — Metrics (Prometheus): use run_command + curl to:',
+    'Step 1 — Metrics (Prometheus): use bash + curl to:',
     `  - curl -s "${sources.prometheusUrl}/api/v1/label/__name__/values"  (list metric names)`,
     `  - curl -s "${sources.prometheusUrl}/api/v1/query?query=<metric_name>"  (instant value)`,
     `  - curl -s "${sources.prometheusUrl}/api/v1/query_range?query=<metric_name>&start=${start}&end=${end}&step=30"  (time window)`,
     '  Identify which service shows anomalous metrics around the fault time.',
     keyMetrics,
     '',
-    'Step 2 — Logs (Elasticsearch): use run_command + curl to:',
+    'Step 2 — Logs (Elasticsearch): use bash + curl to:',
     `  - curl -s "${sources.elasticsearchUrl}/sock-shop-logs/_search?q=container_name:<service>&size=20"`,
     `  - curl -s "${sources.elasticsearchUrl}/sock-shop-logs/_search?q=severity:ERROR&size=20"`,
     '  Find ERROR / exception messages from the affected service around the fault time.',
     '',
-    'Step 3 — Cluster (kubectl): use run_command to:',
-    '  - kubectl get pods -n sock-shop',
-    '  - kubectl logs -n sock-shop <pod> --tail=50',
+    'Step 3 — Cluster (kubectl): use the kubectl tool (pass the subcommand without the leading keyword):',
+    '  - get pods -n sock-shop',
+    '  - logs -n sock-shop <pod> --tail=50',
     '  Confirm which workload is affected.',
     '',
     'Step 4 — Hypothesis chain: use hypothesis_tracker to add at least 2 hypotheses (one most-likely root cause with priority 1, one alternative to rule out). Attach evidence (add_evidence) quoting the actual command output you observed (command, output_summary, data_source, timestamp, supports). Then update_status: confirmed for the root cause, refuted for the ruled-out one.',
@@ -293,6 +293,6 @@ function buildUserMessage(
     '- Do NOT use shell pipes, command substitution, or jq.',
     '- Always quote URLs with double quotes (URLs contain & query params).',
     '- Never run write operations (no -X POST except ES _search; no kubectl apply/delete/exec).',
-    '- Only tools: run_command, hypothesis_tracker.',
+    '- Only tools: bash, kubectl, hypothesis_tracker.',
   ].join('\n')
 }

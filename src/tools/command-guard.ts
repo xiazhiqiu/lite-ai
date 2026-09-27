@@ -1,5 +1,5 @@
 /**
- * command-guard：run_command 免审批/审批/硬拒的三态判定管线（纯函数，无 IO）。
+ * command-guard：bash / kubectl 工具免审批/审批/硬拒的三态判定管线（纯函数，无 IO）。
  *
  * 分层职责（对齐 HolmesGPT：通用底座 + 命令域判定器）：
  * - 本模块只做「命令字符串 → 三态判定」：allow（免审批）/ approval（转审批）/ deny（硬拒）。
@@ -186,38 +186,18 @@ function hasDangerousToken(token: string): boolean {
 }
 
 /**
- * 判定一次 run_command 调用实例是否可并发执行（只读）。
+ * 判定一次 bash 调用实例是否可并发执行（只读）。
  * fail-closed：任何无法 100% 确认只读的情况都返回 false。
- * - 带 args 数组：command 为 argv0，args 为 argv1..；仅白名单命令 + git 只读子命令通过。
- * - 单字符串 command：按 shell 分隔符拆段，逐段校验 argv0 与危险符号。
+ * 按 shell 分隔符拆段，逐段校验 argv0 与危险符号。
  * 绝不复用 isReadOnlyCommand（其白名单含 sed）。
  */
 export function isReadOnlyCommandCall(input: {
   command: string
-  args?: string[]
 }): boolean {
   const trimmed = input.command.trim()
   if (!trimmed) return false
 
-  if ((input.args?.length ?? 0) > 0) {
-    return isReadOnlyArgv(trimmed, input.args!)
-  }
-
   return isReadOnlySnippet(trimmed)
-}
-
-function isReadOnlyArgv(argv0: string, args: string[]): boolean {
-  if (args.some(hasDangerousToken)) return false
-
-  if (argv0 === 'git') {
-    const sub = args[0]
-    return sub !== undefined && CONCURRENT_READONLY_GIT_SUBCOMMANDS.has(sub)
-  }
-
-  // SRE 只读诊断命令（kubectl get/logs、docker ps/logs、curl GET 等）
-  if (isSreReadOnlyCommand(argv0, args)) return true
-
-  return CONCURRENT_READONLY_COMMANDS.has(argv0)
 }
 
 function isReadOnlySnippet(command: string): boolean {
@@ -576,9 +556,10 @@ export function findDangerousArgvPrimitive(
 }
 
 /**
- * 单命令（argv 形态）判定：secret 硬拦 → 参数原语 → 白名单成员。
- * argv 形态经 execFile 执行、无 shell 语义，重定向字符只是字面参数，
- * 因此这里不做重定向检查（shell 形态由 evaluateCommandSnippet 负责）。
+ * 单命令段判定：secret 硬拦 → 参数原语 → 白名单成员。
+ * 作为 evaluateCommandSnippet 的段级判定器使用；bash 工具不再有
+ * 独立的 argv 执行形态（整条 snippet 经 bash -lc 执行，重定向等
+ * shell 语义由 evaluateCommandSnippet 的 findFileRedirect 负责）。
  */
 export function evaluateCommandArgv(argv0: string, args: string[]): GuardResult {
   if (!argv0) return { verdict: 'approval', reason: 'empty command' }

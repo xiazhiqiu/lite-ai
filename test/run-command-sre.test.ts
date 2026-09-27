@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {
   isReadOnlyCommandCall,
   isSreReadOnlyCommand,
-} from '../src/tools/run-command.js'
+} from '../src/tools/command-guard.js'
 
 test('isSreReadOnlyCommand: kubectl 只读子命令放行', () => {
   assert.equal(isSreReadOnlyCommand('kubectl', ['get', 'pods']), true)
@@ -64,34 +64,34 @@ test('isSreReadOnlyCommand: 非 SRE 命令返回 false', () => {
 })
 
 test('isReadOnlyCommandCall: kubectl 只读命令可并发', () => {
-  assert.equal(isReadOnlyCommandCall({ command: 'kubectl', args: ['get', 'pods'] }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'kubectl get pods' }), true)
   assert.equal(
-    isReadOnlyCommandCall({ command: 'kubectl', args: ['describe', 'pod', 'nginx'] }),
+    isReadOnlyCommandCall({ command: 'kubectl describe pod nginx' }),
     true,
   )
   assert.equal(
-    isReadOnlyCommandCall({ command: 'kubectl get pods' }),
+    isReadOnlyCommandCall({ command: 'kubectl logs api-xxx --tail=100' }),
     true,
   )
 })
 
 test('isReadOnlyCommandCall: kubectl 写命令不可并发', () => {
   assert.equal(
-    isReadOnlyCommandCall({ command: 'kubectl', args: ['scale', 'deploy', '--replicas=3'] }),
+    isReadOnlyCommandCall({ command: 'kubectl scale deploy --replicas=3' }),
     false,
   )
   assert.equal(isReadOnlyCommandCall({ command: 'kubectl delete pod nginx' }), false)
 })
 
 test('isReadOnlyCommandCall: docker 只读命令可并发', () => {
-  assert.equal(isReadOnlyCommandCall({ command: 'docker', args: ['ps'] }), true)
+  assert.equal(isReadOnlyCommandCall({ command: 'docker ps' }), true)
   assert.equal(isReadOnlyCommandCall({ command: 'docker logs container-xxx' }), true)
 })
 
 test('isReadOnlyCommandCall: curl GET 可并发，POST 不可', () => {
   assert.equal(isReadOnlyCommandCall({ command: 'curl http://host/health' }), true)
   assert.equal(
-    isReadOnlyCommandCall({ command: 'curl', args: ['-X', 'POST', 'http://host/api'] }),
+    isReadOnlyCommandCall({ command: 'curl -X POST http://host/api' }),
     false,
   )
 })
