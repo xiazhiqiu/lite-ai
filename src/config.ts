@@ -9,12 +9,30 @@ export function resolveProviderName(raw: unknown): ProviderName {
   return String(raw ?? 'openai').toLowerCase() === 'anthropic' ? 'anthropic' : 'openai'
 }
 
+export type LLMToolSetConfig = {
+  /** 启用该 toolset。缺省 true；但 config 不完整时仍按 prerequisite 判 disabled。 */
+  enabled?: boolean
+  /** 工具集类型：prometheus | elasticsearch | kubernetes | database | tempo | gitlab */
+  type?: string
+  /** 连接参数；值支持 {{ env.NAME }} 占位，运行时替换为环境变量。 */
+  config?: Record<string, unknown>
+}
+
+/** 解析后的 toolset 配置：env 占位已替换、合并默认值。 */
+export type ResolvedToolsetConfig = {
+  name: string
+  type: string
+  config: Record<string, unknown>
+}
+
 export type LiteAISettings = {
   env?: Record<string, string | number>
   model?: string
   provider?: ProviderName
   maxOutputTokens?: number
   mcpServers?: Record<string, McpServerConfig>
+  /** 内置/可扩展 toolset 启用配置。name → 配置；见 LLMToolSetConfig。 */
+  toolsets?: Record<string, LLMToolSetConfig>
 }
 
 export type McpServerConfig = {
@@ -178,6 +196,10 @@ function mergeSettings(
       ...(override.env ?? {}),
     },
     mcpServers: mergedMcpServers,
+    toolsets: {
+      ...(base.toolsets ?? {}),
+      ...(override.toolsets ?? {}),
+    },
   }
 }
 
@@ -196,6 +218,66 @@ export async function loadEffectiveSettings(): Promise<LiteAISettings> {
     ),
     liteAISettings,
   )
+}
+
+/**
+ * 递归替换 value 中 string 里的 `{{ env.NAME }}` 占位为 env[NAME]。
+ * 未命中的占位保留原文；非 string 值原样返回。
+ * 用于 headers/url/凭据等，避免敏感信息离开运行时。
+ */
+export function resolveEnvTemplate(
+  value: unknown,
+  env: Record<string, string>,
+): unknown {
+  if (typeof value === 'string') {
+    return value.replace(/\{\{\s*env\.([A-Za-z0-9_]+)\s*\}\}/g, (_, name: string) =>
+      name in env ? env[name]! : `{{ env.${name} }}`,
+    )
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => resolveEnvTemplate(item, env))
+  }
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, val]) => [
+        key,
+        resolveEnvTemplate(val, env),
+      ]),
+    )
+  }
+  return value
+}
+
+/**
+ * 读取已启用的 toolset 配置列表，并把 config 中的 env 占位替换为运行时环境变量。
+ * enabled 缺省视为 true；enabled:false 的项被剔除。
+ * prerequisite（config 完整性）由各 toolset 的 checkConfig 判定，这里不判。
+ */
+export async function loadResolvedToolsets(): Promise<ResolvedToolsetConfig[]> {
+  try {
+    const settings = await loadEffectiveSettings()
+    const raw = settings.toolsets
+    if (raw === undefined || typeof raw !== 'object') return []
+    const env: Record<string, string> = {}
+    for (const [k, v] of [
+      ...Object.entries(process.env),
+      ...Object.entries(settings.env ?? {}),
+    ]) {
+      if (v !== undefined && v !== null) env[k] = String(v)
+    }
+    const resolved: ResolvedToolsetConfig[] = []
+    for (const [name, entry] of Object.entries(raw)) {
+      if (entry === null || typeof entry !== 'object') continue
+      if (entry.enabled === false) continue
+      const type = typeof entry.type === 'string' ? entry.type : name
+      const config =
+        resolveEnvTemplate(entry.config ?? {}, env) as Record<string, unknown>
+      resolved.push({ name, type, config })
+    }
+    return resolved
+  } catch {
+    return []
+  }
 }
 
 export async function saveLiteAISettings(

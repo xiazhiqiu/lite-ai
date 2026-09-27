@@ -23,6 +23,7 @@ import { incidentCheckpointTool } from './incident-checkpoint.js'
 import { tailLogsTool, followLogsTool, stopFollowTool } from './tail-logs.js'
 import { generatePostmortemTool } from './generate-postmortem.js'
 import { searchIncidentKbTool } from './search-incident-kb.js'
+import { buildEnabledTools } from './data-sources/registry.js'
 
 function summarizeServerEndpoint(config: McpServerConfig): string {
   const remoteUrl = config.url?.trim()
@@ -53,6 +54,7 @@ export async function createDefaultToolRegistry(args: {
 }): Promise<ToolRegistry> {
   const skills = await discoverSkills(args.cwd)
   const mcpServers = args.runtime?.mcpServers ?? {}
+  const dataTools = await buildEnabledTools()
 
   return new ToolRegistry([
     askUserTool,
@@ -79,6 +81,7 @@ export async function createDefaultToolRegistry(args: {
     generatePostmortemTool,
     { ...searchIncidentKbTool, isParallelSafe: () => true },
     ...(isTodosEnabled() ? [rewriteTodoListTool, updateTodoStatusTool] : []),
+    ...dataTools,
   ], {
     skills,
     mcpServers: buildConnectingMcpSummaries(mcpServers),
