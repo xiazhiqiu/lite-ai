@@ -94,6 +94,13 @@ export type ModelToolDefinition = {
 export type ModelRequestOptions = {
   tools?: ModelToolDefinition[]
   signal?: AbortSignal
+  /**
+   * 流式：单个 tool call 的参数拼装完成时触发（SSE adapter 可选实现）。
+   * 未触发时 agent-loop 以 next() 返回的完整 calls 兜底，两种 adapter 形态统一。
+   */
+  onToolCallReady?: (call: ToolCall) => void
+  /** 流式：assistant 文本增量（TUI 渲染用；adapter 可选实现）。 */
+  onTextDelta?: (text: string) => void
 }
 
 export interface ModelAdapter {

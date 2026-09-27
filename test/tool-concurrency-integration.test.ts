@@ -216,3 +216,90 @@ test('并发关闭：慢工具 maxRunning = 1（确认开关确实是总闸）',
     delete process.env.LITE_AI_TOOL_CONCURRENCY
   }
 })
+
+test('流式：工具在 next() 返回前即起跑（生成与执行重叠）', async () => {
+  process.env.LITE_AI_TOOL_CONCURRENCY = '1'
+  delete process.env.LITE_AI_STREAMING
+  try {
+    const phases: string[] = []
+    let nextReturned = false
+    let nextCallCount = 0
+    const probeTool = {
+      name: 'probe_read',
+      description: 'probe',
+      inputSchema: {},
+      schema: z.object({ path: z.string() }),
+      isParallelSafe: () => true,
+      run: async (input: { path: string }) => {
+        phases.push(`${input.path}:${nextReturned ? 'after-next' : 'before-next'}`)
+        await sleep(40)
+        return { ok: true, output: `p:${input.path}` }
+      },
+    }
+    const registry = new ToolRegistry([probeTool])
+    const calls = [
+      { id: 'p1', toolName: 'probe_read', input: { path: 'a' } },
+      { id: 'p2', toolName: 'probe_read', input: { path: 'b' } },
+    ]
+    const model: ModelAdapter = {
+      async next(_messages, options) {
+        nextCallCount += 1
+        if (nextCallCount === 1) {
+          // 模拟流式生成：响应中途参数拼装完成 → 回调
+          await sleep(10)
+          for (const call of calls) options?.onToolCallReady?.(call)
+          await sleep(20) // 继续生成剩余部分
+          nextReturned = true
+          return { type: 'tool_calls', calls }
+        }
+        return { type: 'assistant', content: 'done', kind: 'final' }
+      },
+    }
+
+    const messages: ChatMessage[] = []
+    const result = await runAgentTurn({ model, tools: registry, messages, cwd: process.cwd() })
+
+    assert.deepEqual(
+      phases,
+      ['a:before-next', 'b:before-next'],
+      '两个工具都应在 next() 返回前起跑',
+    )
+    const ids = collectToolMsgIds(result)
+    assert.deepEqual(ids, ['p1', 'p2'], '兜底注册幂等，结果按发射序配对')
+  } finally {
+    delete process.env.LITE_AI_TOOL_CONCURRENCY
+    delete process.env.LITE_AI_STREAMING
+  }
+})
+
+test('流式关闭（LITE_AI_STREAMING=0）：adapter 收不到 onToolCallReady', async () => {
+  process.env.LITE_AI_TOOL_CONCURRENCY = '1'
+  process.env.LITE_AI_STREAMING = '0'
+  try {
+    let sawCallback = false
+    let nextCallCount = 0
+    const registry = new ToolRegistry([readTool])
+    const model: ModelAdapter = {
+      async next(_messages, options) {
+        nextCallCount += 1
+        if (options?.onToolCallReady) sawCallback = true
+        if (nextCallCount === 1) {
+          return {
+            type: 'tool_calls',
+            calls: [{ id: 'r9', toolName: 'read_file', input: { path: 'x' } }],
+          }
+        }
+        return { type: 'assistant', content: 'done', kind: 'final' }
+      },
+    }
+
+    const messages: ChatMessage[] = []
+    const result = await runAgentTurn({ model, tools: registry, messages, cwd: process.cwd() })
+
+    assert.equal(sawCallback, false, '关闭流式时不得向 adapter 传递流式回调')
+    assert.deepEqual(collectToolMsgIds(result), ['r9'])
+  } finally {
+    delete process.env.LITE_AI_TOOL_CONCURRENCY
+    delete process.env.LITE_AI_STREAMING
+  }
+})

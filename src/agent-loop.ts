@@ -1,10 +1,11 @@
-import type { ToolRegistry } from './tool.js'
+import type { ToolRegistry, ToolResult } from './tool.js'
 import type {
   ChatMessage,
   CompressionResult,
   ModelAdapter,
   ProviderThinkingBlock,
   ProviderUsage,
+  ToolCall,
 } from './types.js'
 import type { PermissionManager } from './permissions.js'
 import { microcompact } from './compact/microcompact.js'
@@ -27,6 +28,10 @@ import {
   toolConcurrencyLimit,
   mapWithConcurrency,
 } from './utils/tool-parallel.js'
+import {
+  StreamingToolExecutor,
+  isToolStreamingEnabled,
+} from './utils/streaming-tool-executor.js'
 import {
   buildAgentStatusBar,
   isStatusBarEnabled,
@@ -267,9 +272,40 @@ export async function runAgentTurn(args: {
       return [...modelMessages, { role: 'user' as const, content: status }]
     })()
 
+    const isConcurrent = isToolConcurrencyEnabled()
+    // 并行批内同时在飞的上限；关闭并发时不生效
+    const concurrencyLimit = toolConcurrencyLimit()
+
+    const executeOne = async (call: ToolCall): Promise<ToolResult> => {
+      throwIfAborted(args.signal)
+      args.onToolStart?.(call.id, call.toolName, call.input)
+      return args.tools.execute(call.toolName, call.input, {
+        cwd: args.cwd,
+        permissions: args.permissions,
+      })
+    }
+
+    // 流式执行器：onToolCallReady 在模型流式生成期间触发，边到达边执行；
+    // next() 返回后对完整 calls 兜底注册（同 id 幂等去重）——非流式 adapter 也统一走此路径，
+    // 动态准入语义与静态分批等价（unsafe 独占、safe 可并行）。
+    const executor = isToolStreamingEnabled() && isConcurrent
+      ? new StreamingToolExecutor<ToolResult>({
+          // 未找到工具 / 未声明 isParallelSafe → false（fail-closed）
+          isSafe: call =>
+            args.tools.find(call.toolName)?.isParallelSafe?.(call.input) ?? false,
+          limit: concurrencyLimit,
+        })
+      : null
+
     const next = await args.model.next(nextInput, {
       tools: args.tools.list(),
       signal: args.signal,
+      ...(executor
+        ? {
+            onToolCallReady: (call: ToolCall) =>
+              executor.register(call, () => executeOne(call)),
+          }
+        : {}),
     })
 
     if (next.type === 'assistant') {
@@ -412,59 +448,74 @@ export async function runAgentTurn(args: {
       toolResult?: PendingToolResult
     }> = []
 
-    const isConcurrent = isToolConcurrencyEnabled()
-    // 并行批内同时在飞的上限；关闭并发时不生效
-    const concurrencyLimit = toolConcurrencyLimit()
-    const groups = isConcurrent
-      ? partitionToolCalls(next.calls, call => {
-          // 未找到工具 / 未声明 isParallelSafe → false（fail-closed）
-          return args.tools.find(call.toolName)?.isParallelSafe?.(call.input) ?? false
-        })
-      : next.calls.map(call => ({ parallel: false, calls: [call] }))
-
-    for (const group of groups) {
-      throwIfAborted(args.signal)
-
-      if (group.parallel) {
-        // 并行批：先统一 onToolStart，再 Promise.all 执行，再按发射序 onToolResult
-        for (const call of group.calls) {
-          args.onToolStart?.(call.id, call.toolName, call.input)
+    if (executor) {
+      // 流式/动态准入路径：兜底注册后按发射序交付
+      for (const call of next.calls) {
+        executor.register(call, () => executeOne(call))
+      }
+      const results = await executor.all()
+      next.calls.forEach((call, i) => {
+        const result = results[i]!
+        sawToolResultThisTurn = true
+        if (!result.ok) {
+          toolErrorCount += 1
         }
-        const results = await mapWithConcurrency(
-          group.calls,
-          concurrencyLimit,
-          call =>
-            args.tools.execute(call.toolName, call.input, {
+        args.onToolResult?.(call.id, call.toolName, result.output, !result.ok)
+        statusBarToolCount.set(call.toolName, (statusBarToolCount.get(call.toolName) ?? 0) + 1)
+        executedToolResults.push({ call, result })
+      })
+    } else {
+      const groups = isConcurrent
+        ? partitionToolCalls(next.calls, call => {
+            // 未找到工具 / 未声明 isParallelSafe → false（fail-closed）
+            return args.tools.find(call.toolName)?.isParallelSafe?.(call.input) ?? false
+          })
+        : next.calls.map(call => ({ parallel: false, calls: [call] }))
+
+      for (const group of groups) {
+        throwIfAborted(args.signal)
+
+        if (group.parallel) {
+          // 并行批：先统一 onToolStart，再 Promise.all 执行，再按发射序 onToolResult
+          for (const call of group.calls) {
+            args.onToolStart?.(call.id, call.toolName, call.input)
+          }
+          const results = await mapWithConcurrency(
+            group.calls,
+            concurrencyLimit,
+            call =>
+              args.tools.execute(call.toolName, call.input, {
+                cwd: args.cwd,
+                permissions: args.permissions,
+              }),
+          )
+          group.calls.forEach((call, i) => {
+            const result = results[i]!
+            sawToolResultThisTurn = true
+            if (!result.ok) {
+              toolErrorCount += 1
+            }
+            args.onToolResult?.(call.id, call.toolName, result.output, !result.ok)
+            statusBarToolCount.set(call.toolName, (statusBarToolCount.get(call.toolName) ?? 0) + 1)
+            executedToolResults.push({ call, result })
+          })
+        } else {
+          // 串行批：逐个执行（与当前行为一致）
+          for (const call of group.calls) {
+            throwIfAborted(args.signal)
+            args.onToolStart?.(call.id, call.toolName, call.input)
+            const result = await args.tools.execute(call.toolName, call.input, {
               cwd: args.cwd,
               permissions: args.permissions,
-            }),
-        )
-        group.calls.forEach((call, i) => {
-          const result = results[i]!
-          sawToolResultThisTurn = true
-          if (!result.ok) {
-            toolErrorCount += 1
+            })
+            sawToolResultThisTurn = true
+            if (!result.ok) {
+              toolErrorCount += 1
+            }
+            args.onToolResult?.(call.id, call.toolName, result.output, !result.ok)
+            statusBarToolCount.set(call.toolName, (statusBarToolCount.get(call.toolName) ?? 0) + 1)
+            executedToolResults.push({ call, result })
           }
-          args.onToolResult?.(call.id, call.toolName, result.output, !result.ok)
-          statusBarToolCount.set(call.toolName, (statusBarToolCount.get(call.toolName) ?? 0) + 1)
-          executedToolResults.push({ call, result })
-        })
-      } else {
-        // 串行批：逐个执行（与当前行为一致）
-        for (const call of group.calls) {
-          throwIfAborted(args.signal)
-          args.onToolStart?.(call.id, call.toolName, call.input)
-          const result = await args.tools.execute(call.toolName, call.input, {
-            cwd: args.cwd,
-            permissions: args.permissions,
-          })
-          sawToolResultThisTurn = true
-          if (!result.ok) {
-            toolErrorCount += 1
-          }
-          args.onToolResult?.(call.id, call.toolName, result.output, !result.ok)
-          statusBarToolCount.set(call.toolName, (statusBarToolCount.get(call.toolName) ?? 0) + 1)
-          executedToolResults.push({ call, result })
         }
       }
     }
