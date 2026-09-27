@@ -207,6 +207,15 @@ test('isReadOnlyCommandCall: AST——find 写原语堵漏（-delete 不可并�
   assert.equal(isReadOnlyCommandCall({ command: 'find . -name x' }), true)
 })
 
+test('isReadOnlyCommandCall: AST——rg --pre 执行原语不可并行，--pre-glob 不误伤', async () => {
+  await ensureBashParserReady()
+  // rg 在白名单，但 --pre 会对每个文件执行外部程序 → 不可并行；
+  // --pre-glob 只是文件名过滤 glob，保持只读可并行。
+  assert.equal(isReadOnlyCommandCall({ command: 'rg --pre gunzip pattern' }), false)
+  assert.equal(isReadOnlyCommandCall({ command: 'rg --pre=gunzip pattern' }), false)
+  assert.equal(isReadOnlyCommandCall({ command: 'rg --pre-glob "*.gz" pattern' }), true)
+})
+
 test('isReadOnlyCommandCall: AST——git/SRE/白名单语义不变', async () => {
   await ensureBashParserReady()
   assert.equal(isReadOnlyCommandCall({ command: 'git status' }), true)

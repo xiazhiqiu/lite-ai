@@ -686,8 +686,8 @@ const UNIQ_VALUE_LONG_OPTS = new Set([
 
 /**
  * argv 级危险原语检查：免审批白名单只看命令名不看参数的补丁层。
- * find -delete/-exec、sed -i、sort -o/-–compress-program、uniq 输出文件等
- * 参数会让「只读命令」产生写副作用或执行程序。
+ * find -delete/-exec、sed -i、sort -o/-–compress-program、rg --pre、
+ * uniq 输出文件等参数会让「只读命令」产生写副作用或执行程序。
  */
 export function findDangerousArgvPrimitive(
   argv0: string,
@@ -736,6 +736,20 @@ export function findDangerousArgvPrimitive(
     return null
   }
 
+  if (argv0 === 'rg') {
+    // `rg --pre <cmd>` 会对每个文件执行 <cmd> 作为预处理管道——白名单按
+    // 命令名放行 rg，但 --pre 让"只读"承诺失效；与 sort --compress-program
+    // 同类执行原语，转审批（TUI 人批放行，无人值守无 prompt 硬拒）。
+    // --pre-glob 只是文件名过滤 glob，不执行命令，不误伤；ripgrep 用 clap
+    // 解析，长选项无 GNU 缩写，精确匹配 '--pre' 与 '--pre=' 即无歧义。
+    for (const arg of args) {
+      if (arg === '--pre' || arg.startsWith('--pre=')) {
+        return "'rg --pre' can execute an arbitrary program on each file"
+      }
+    }
+    return null
+  }
+
   if (argv0 === 'uniq') {
     // `uniq [OPTION]... [INPUT [OUTPUT]]`：第 2 个位置参数是输出文件，
     // 除非是 '-'（stdout）或良性目标；对齐 HG command_arg_rules._uniq_reason。
@@ -761,11 +775,11 @@ export function findDangerousArgvPrimitive(
 
 /**
  * 参数含运行时展开时无法静态校验其值——展开结果可能正是上面拦的原语
- * （如 $FLAGS 展开成 -i/-o/-delete）。对 find/sed/sort/uniq 这类
- * argv-checked 命令转审批；对齐 HG validation.py:219-231 的
+ * （如 $FLAGS 展开成 -i/-o/-delete/--pre）。对 find/sed/sort/uniq/rg
+ * 这类 argv-checked 命令转审批；对齐 HG validation.py:219-231 的
  * shell-expansion gate（HG 集合为 find/sort/uniq，本仓 sed 在白名单故并入）。
  */
-const ARGV_CHECKED_COMMANDS = new Set(['find', 'sed', 'sort', 'uniq'])
+const ARGV_CHECKED_COMMANDS = new Set(['find', 'sed', 'sort', 'uniq', 'rg'])
 
 export function isArgvCheckedCommand(name: string): boolean {
   return ARGV_CHECKED_COMMANDS.has(name)

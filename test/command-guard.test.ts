@@ -138,6 +138,19 @@ describe('findDangerousArgvPrimitive 参数原语', () => {
     assert.equal(findDangerousArgvPrimitive('uniq', ['a.txt', '/dev/null']), null)
   })
 
+  test('rg --pre 执行原语命中（空格与 = 两种形式）', () => {
+    assert.ok(findDangerousArgvPrimitive('rg', ['--pre', 'gunzip', 'pattern']))
+    assert.ok(findDangerousArgvPrimitive('rg', ['--pre=gunzip', 'pattern']))
+    assert.ok(findDangerousArgvPrimitive('rg', ['pattern', '--pre', 'zcat']))
+  })
+
+  test('rg --pre-glob 只是文件过滤 glob，不误伤', () => {
+    assert.equal(
+      findDangerousArgvPrimitive('rg', ['--pre-glob', '*.gz', 'pattern']),
+      null,
+    )
+  })
+
   test('非目标命令不检查', () => {
     assert.equal(findDangerousArgvPrimitive('grep', ['-delete']), null)
   })
